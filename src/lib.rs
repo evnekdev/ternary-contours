@@ -59,8 +59,8 @@ impl From<TernaryCoordinate> for [f64; 3] {
 
 pub use contour::{
     AdaptiveContourOptions, ContourBand, ContourBandOptions, ContourBandSet, ContourError,
-    ContourInterpolation, ContourLevel, ContourOptions, ContourPath, ContourRegion,
-    ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
+    ContourFragment, ContourInterpolation, ContourLevel, ContourOptions, ContourPath,
+    ContourRegion, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
 };
 pub use error::{FieldError, GridEvaluationError};
 pub use grid::{GridVertexId, LatticeCoordinate, RegularTernaryGrid, RegularTernaryScalarField};
