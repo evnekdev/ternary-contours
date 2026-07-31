@@ -1,29 +1,66 @@
-//! Backend-independent numerical primitives for regular two-dimensional ternary grids.
+//! Backend-independent regular-grid ternary fields and isoline construction.
 //!
-//! `ternary-contours` owns the regular lattice, scalar-field validation, and
-//! directed cubic-alpha interpolation model used by `plotters-ternary`. It has
-//! no dependency on Plotters, drawing backends, screen coordinates, clipping, or
-//! contour path extraction.
+//! `ternary-contours` owns regular-lattice indexing, scalar-field validation,
+//! directed cubic-alpha interpolation, topology extraction, deterministic path
+//! assembly, optional arc-length regularization, and implicit-level projection.
+//! It has no dependency on Plotters, drawing backends, screen coordinates, or
+//! viewport clipping.
 //!
-//! The regular lattice stores finite scalar samples at `i + j + k = n` in a
-//! documented row-major order. With the `cubic-alpha` feature, shared directed
-//! edge intervals are constructed through `spline1d`; local triangle fields use
-//! the alpha form `y0*(1-t)+y1*t+(1-t)*t*(alpha0+alpha1*t)`.
+//! The regular lattice stores finite samples at `i + j + k = n` in the ordering
+//! documented by [`RegularTernaryScalarField`]. With `cubic-alpha`, shared
+//! directed edge intervals use
+//! `y0*(1-t) + y1*t + (1-t)*t*(alpha0 + alpha1*t)`.
 //!
-//! Current scope is deliberately limited to regular two-dimensional ternary
-//! grids. Arbitrary-dimensional grids, Kuhn simplices, manifold/path extraction,
-//! viewport clipping, rendering, and Plotters integration are excluded.
+//! Scope is deliberately limited to line contours over regular two-dimensional
+//! ternary grids. Irregular triangulations, arbitrary-dimensional grids, Kuhn
+//! simplices, filled contours, viewport clipping, and rendering are excluded.
 
+pub mod contour;
 mod error;
 pub mod field;
 pub mod grid;
 pub mod interpolation;
 
-pub use error::FieldError;
-pub use field::{CubicBuildDiagnostics, CubicGridField};
-pub use grid::{GridTriangle, GridVertexId, LatticeCoordinate, RegularTernaryScalarField};
-pub use interpolation::{
-    AlphaInterval, BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod,
-    CubicAlphaTriangle, CubicBoundaryPolicy, DirectedAlphaInterval, InterpolationError,
-    PairEvaluation, evaluate_pair,
+/// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
+///
+/// [`ContourSet`] returns finite normalized coordinates. `new` itself is an
+/// unchecked low-level constructor used by numerical algorithms; scalar-field
+/// and contour APIs validate all public input before producing paths.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TernaryCoordinate {
+    a: f64,
+    b: f64,
+    c: f64,
+}
+
+impl TernaryCoordinate {
+    /// Construct an unchecked semantic A/B/C coordinate.
+    pub const fn new(a: f64, b: f64, c: f64) -> Self {
+        Self { a, b, c }
+    }
+
+    /// Return the semantic components in canonical A/B/C order.
+    pub const fn as_array(self) -> [f64; 3] {
+        [self.a, self.b, self.c]
+    }
+}
+
+impl From<[f64; 3]> for TernaryCoordinate {
+    fn from([a, b, c]: [f64; 3]) -> Self {
+        Self::new(a, b, c)
+    }
+}
+
+impl From<TernaryCoordinate> for [f64; 3] {
+    fn from(value: TernaryCoordinate) -> Self {
+        value.as_array()
+    }
+}
+
+pub use contour::{
+    AdaptiveContourOptions, ContourError, ContourInterpolation, ContourLevel, ContourOptions,
+    ContourPath, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
 };
+pub use error::FieldError;
+pub use grid::{GridVertexId, LatticeCoordinate, RegularTernaryScalarField};
+pub use interpolation::{BinaryExtrapolation, CubicAlphaMethod, CubicBoundaryPolicy};
