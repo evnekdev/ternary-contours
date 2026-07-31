@@ -1224,4 +1224,38 @@ mod tests {
             ));
         }
     }
+
+    /// Manual timing smoke test; run with `cargo test -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "manual timing comparison, not a correctness test"]
+    fn benchmark_direct_location_against_exhaustive_reference() {
+        let grid = RegularTernaryGrid::new(192).unwrap();
+        let points = (0..2_000)
+            .map(|index| {
+                let a = (index as f64 + 0.37) / 2_001.0;
+                let b = (1.0 - a) * (((index * 37) % 2_000) as f64 + 0.19) / 2_000.0;
+                [a, b, 1.0 - a - b]
+            })
+            .collect::<Vec<_>>();
+
+        let start = std::time::Instant::now();
+        let direct = points
+            .iter()
+            .map(|point| grid.locate(*point).unwrap().triangle.id)
+            .collect::<Vec<_>>();
+        let direct_elapsed = start.elapsed();
+
+        let start = std::time::Instant::now();
+        let exhaustive = points
+            .iter()
+            .map(|point| reference_locate(&grid, *point).triangle.id)
+            .collect::<Vec<_>>();
+        let exhaustive_elapsed = start.elapsed();
+        assert_eq!(direct, exhaustive);
+        eprintln!(
+            "n={}, points={}: direct={direct_elapsed:?}, exhaustive={exhaustive_elapsed:?}",
+            grid.subdivisions(),
+            points.len(),
+        );
+    }
 }
