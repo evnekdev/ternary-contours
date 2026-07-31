@@ -1,15 +1,21 @@
 //! Backend-independent regular-grid ternary fields and isoline construction.
 //!
 //! `ternary-contours` owns regular-lattice indexing, scalar-field validation,
-//! directed cubic-alpha interpolation, topology extraction, deterministic path
-//! assembly, optional arc-length regularization, and implicit-level projection.
-//! It has no dependency on Plotters, drawing backends, screen coordinates, or
-//! viewport clipping.
+//! direct regular-grid point location, prepared linear and cubic-alpha field
+//! evaluation, topology extraction, deterministic path assembly, optional
+//! arc-length regularization, and implicit-level projection. It has no
+//! dependency on Plotters, drawing backends, screen coordinates, or viewport
+//! clipping.
 //!
 //! The regular lattice stores finite samples at `i + j + k = n` in the ordering
 //! documented by [`RegularTernaryScalarField`]. With `cubic-alpha`, shared
 //! directed edge intervals use
 //! `y0*(1-t) + y1*t + (1-t)*t*(alpha0 + alpha1*t)`.
+//!
+//! [`InterpolatedTernaryField`] prepares a field model once for repeated point
+//! queries. Its [`FieldSample`] gradients use independent semantic `(a, b)`
+//! coordinates with `c = 1-a-b`. Locations on shared grid edges are assigned to
+//! one canonical owner, so gradients are deterministic without averaging.
 //!
 //! Scope is deliberately limited to regular two-dimensional ternary grids.
 //! Piecewise-linear isolines and filled bands are available. Irregular
@@ -18,6 +24,7 @@
 
 pub mod contour;
 mod error;
+pub mod evaluation;
 pub mod field;
 pub mod grid;
 pub mod interpolation;
@@ -64,5 +71,14 @@ pub use contour::{
     ContourRegion, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
 };
 pub use error::{FieldError, GridEvaluationError};
-pub use grid::{GridVertexId, LatticeCoordinate, RegularTernaryGrid, RegularTernaryScalarField};
-pub use interpolation::{BinaryExtrapolation, CubicAlphaMethod, CubicBoundaryPolicy};
+pub use evaluation::{
+    FieldEvaluationError, FieldInterpolation, FieldSample, InterpolatedTernaryField,
+};
+pub use field::{CubicBuildDiagnostics, CubicGridField};
+pub use grid::{
+    GridTriangle, GridVertexId, LatticeCoordinate, LocatedTriangle, POINT_LOCATION_TOLERANCE,
+    PointBoundaryLocation, PointLocationError, RegularTernaryGrid, RegularTernaryScalarField,
+};
+pub use interpolation::{
+    BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
+};
