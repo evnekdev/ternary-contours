@@ -26,6 +26,59 @@ vertex, then construct a field from those values. The scalar can be
 temperature, activity, concentration, Gibbs energy, phase fraction, or any
 other property defined on a three-component mixture.
 
+## Pointwise field evaluation
+
+Prepare an interpolation evaluator once when a field will be queried at many
+arbitrary normalized compositions. Point location belongs to
+`RegularTernaryGrid`, independently of scalar values; it uses scaled lattice
+coordinates and a constant-sized local candidate set rather than scanning the
+grid.
+
+~~~rust
+use ternary_contours::{
+    FieldInterpolation, InterpolatedTernaryField, RegularTernaryScalarField,
+};
+
+let field = RegularTernaryScalarField::from_fn(12, |[a, b, c]| {
+    2.0 * a - 3.0 * b + 5.0 * c
+})?;
+let evaluator = InterpolatedTernaryField::new(&field, FieldInterpolation::Linear)?;
+
+let sample = evaluator.evaluate([0.23, 0.31, 0.46])?;
+assert!((sample.value - (2.0 * 0.23 - 3.0 * 0.31 + 5.0 * 0.46)).abs() < 1e-12);
+println!("triangle={:?}, bary={:?}", sample.location.triangle, sample.location.barycentric);
+println!("df/da, df/db = {:?}", sample.gradient_ab);
+# Ok::<(), Box<dyn std::error::Error>>(())
+~~~
+
+Accepted compositions must be finite and sum to one within
+`POINT_LOCATION_TOLERANCE` (`1e-10`). They are then normalized and snapped near
+simplex and regular-lattice boundaries. A point on a shared edge or vertex is
+owned by the lowest canonical elementary-triangle identifier; its reported
+gradient comes from that owning triangle and is never averaged.
+
+Field interpolation has this hierarchy:
+
+~~~text
+Linear
+CubicAlpha
+    Akima | MAKIMA | PCHIP | Steffen
+    boundary: LinearFallback | Error
+    interior continuation: Muggianu | Kohler | RawBarycentric
+~~~
+
+`Muggianu`, `Kohler`, and `RawBarycentric` are interior continuation policies
+inside the cubic-alpha model, not separate interpolation families. With the
+optional `cubic-alpha` feature, select them through `CubicAlphaBuildOptions`.
+The cubic local model is prepared once and shares the exact directed interval
+model used by cubic contours. Both interpolation families are C0; piecewise
+linear gradients are constant within a triangle, while cubic-alpha gradients
+vary inside a triangle and neither model promises C1 continuity across a grid
+edge.
+
+Use `InterpolatedTernaryField::values` for lazy batch results or `values_into`
+to reuse caller-owned output storage. See `examples/interpolate_field.rs`.
+
 ## Extracting isolines
 
 An isoline is the set of compositions satisfying f(a, b, c) = level. The crate

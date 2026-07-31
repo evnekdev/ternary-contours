@@ -1,7 +1,102 @@
 #[cfg(test)]
 use std::collections::BTreeSet;
+use std::fmt;
 
 use crate::{FieldError, GridEvaluationError};
+
+/// Absolute tolerance used when accepting a nearly normalized composition.
+///
+/// Public point-location APIs accept finite components whose sum differs from
+/// one by at most this amount, normalize that accepted input, then snap nearby
+/// simplex and lattice boundaries. Inputs farther away are rejected rather
+/// than silently projected into the simplex.
+pub const POINT_LOCATION_TOLERANCE: f64 = 1.0e-10;
+
+/// One elementary triangle and its canonical regular-grid vertices.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GridTriangle {
+    /// Stable canonical elementary-triangle identifier.
+    pub id: usize,
+    /// Vertices in the triangle's canonical local barycentric order.
+    pub vertices: [GridVertexId; 3],
+}
+
+/// Classification of a located point after tolerance snapping.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PointBoundaryLocation {
+    /// The point is strictly inside its deterministically selected triangle.
+    Interior,
+    /// The point lies on an elementary-triangle edge.
+    Edge,
+    /// The point lies at a regular-grid vertex.
+    Vertex,
+}
+
+/// A regular-grid triangle containing a normalized ternary composition.
+///
+/// `barycentric` is ordered to match [`Self::triangle`]'s vertices, contains
+/// only non-negative values after snapping, and sums to one. The private grid
+/// subdivision marker prevents accidentally using a location from an
+/// incompatible regular grid while keeping the useful geometric fields public.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LocatedTriangle {
+    /// Deterministically owned elementary triangle.
+    pub triangle: GridTriangle,
+    /// Local barycentric coordinates in `triangle.vertices` order.
+    pub barycentric: [f64; 3],
+    /// Whether the located point is interior, on an edge, or at a vertex.
+    pub boundary: PointBoundaryLocation,
+    subdivisions: usize,
+}
+
+impl LocatedTriangle {
+    pub(crate) const fn subdivisions(&self) -> usize {
+        self.subdivisions
+    }
+}
+
+/// Failure while locating a composition on a regular ternary grid.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum PointLocationError {
+    /// One component of the requested composition was NaN or infinite.
+    NonFiniteComposition { component: usize, value: f64 },
+    /// The composition sum was not within [`POINT_LOCATION_TOLERANCE`] of one.
+    InvalidCompositionSum { sum: f64 },
+    /// A finite normalized component lies outside the ternary simplex.
+    OutsideSimplex { composition: [f64; 3] },
+    /// Checked grid-index arithmetic overflowed while selecting a triangle.
+    GridIndexOverflow,
+}
+
+impl fmt::Display for PointLocationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NonFiniteComposition { component, value } => write!(
+                formatter,
+                "composition component {component} is not finite: {value:?}"
+            ),
+            Self::InvalidCompositionSum { sum } => write!(
+                formatter,
+                "composition components must sum to one within {POINT_LOCATION_TOLERANCE:e}; received {sum:?}"
+            ),
+            Self::OutsideSimplex { composition } => write!(
+                formatter,
+                "composition {:?} lies outside the ternary simplex",
+                composition
+            ),
+            Self::GridIndexOverflow => {
+                write!(
+                    formatter,
+                    "regular-grid triangle index arithmetic overflowed"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for PointLocationError {}
 
 /// Stable identifier in the field's canonical value ordering.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -103,6 +198,279 @@ impl RegularTernaryGrid {
     }
 }
 
+impl RegularTernaryGrid {
+    /// Number of elementary triangles in canonical order.
+    pub fn triangle_count(&self) -> Result<usize, FieldError> {
+        self.subdivisions
+            .checked_mul(self.subdivisions)
+            .ok_or(FieldError::AllocationOverflow)
+    }
+
+    /// Return the canonical vertex identifier for one lattice coordinate.
+    pub fn vertex_id(&self, coordinate: LatticeCoordinate) -> Result<GridVertexId, FieldError> {
+        if coordinate
+            .i
+            .checked_add(coordinate.j)
+            .and_then(|value| value.checked_add(coordinate.k))
+            != Some(self.subdivisions)
+        {
+            return Err(FieldError::InvalidLatticeCoordinate {
+                i: coordinate.i,
+                j: coordinate.j,
+                k: coordinate.k,
+                subdivisions: self.subdivisions,
+            });
+        }
+        let prefix = coordinate
+            .i
+            .checked_mul(self.subdivisions + 1)
+            .and_then(|value| {
+                coordinate
+                    .i
+                    .checked_mul(coordinate.i.saturating_sub(1))
+                    .map(|triangle| value - triangle / 2)
+            })
+            .ok_or(FieldError::AllocationOverflow)?;
+        prefix
+            .checked_add(coordinate.j)
+            .map(GridVertexId)
+            .ok_or(FieldError::AllocationOverflow)
+    }
+
+    /// Return the lattice coordinate for one canonical vertex identifier.
+    pub fn lattice_coordinate(&self, id: GridVertexId) -> Result<LatticeCoordinate, FieldError> {
+        if id.0 >= self.vertex_count {
+            return Err(FieldError::InvalidVertexIndex {
+                index: id.0,
+                vertex_count: self.vertex_count,
+            });
+        }
+        let mut offset = 0;
+        for i in 0..=self.subdivisions {
+            let row = self.subdivisions - i + 1;
+            if id.0 < offset + row {
+                let j = id.0 - offset;
+                return Ok(LatticeCoordinate {
+                    i,
+                    j,
+                    k: self.subdivisions - i - j,
+                });
+            }
+            offset += row;
+        }
+        unreachable!("validated vertex id must occur in one row")
+    }
+
+    /// Return the normalized composition at one canonical vertex identifier.
+    pub fn composition(&self, id: GridVertexId) -> Result<[f64; 3], FieldError> {
+        Ok(composition_from_coordinate(
+            self.lattice_coordinate(id)?,
+            self.subdivisions as f64,
+        ))
+    }
+}
+
+impl RegularTernaryGrid {
+    /// Generate elementary triangles in canonical regular-grid order.
+    pub fn elementary_triangles(&self) -> Result<Vec<GridTriangle>, FieldError> {
+        let mut triangles = Vec::with_capacity(self.triangle_count()?);
+        for i in 0..self.subdivisions {
+            for j in 0..(self.subdivisions - i) {
+                triangles.push(self.upward_triangle(i, j)?);
+                if i + j + 2 <= self.subdivisions {
+                    triangles.push(self.downward_triangle(i, j)?);
+                }
+            }
+        }
+        debug_assert_eq!(triangles.len(), self.triangle_count()?);
+        Ok(triangles)
+    }
+
+    pub(crate) fn triangle(&self, id: usize) -> Result<GridTriangle, FieldError> {
+        let triangle_count = self.triangle_count()?;
+        if id >= triangle_count {
+            return Err(FieldError::InvalidVertexIndex {
+                index: id,
+                vertex_count: triangle_count,
+            });
+        }
+        let mut row = 0usize;
+        let mut row_start = 0usize;
+        while row < self.subdivisions {
+            let row_triangles = (self.subdivisions - row)
+                .checked_mul(2)
+                .and_then(|value| value.checked_sub(1))
+                .ok_or(FieldError::AllocationOverflow)?;
+            if id < row_start + row_triangles {
+                let offset = id - row_start;
+                let column = offset / 2;
+                return if offset.is_multiple_of(2) {
+                    self.upward_triangle(row, column)
+                } else {
+                    self.downward_triangle(row, column)
+                };
+            }
+            row_start = row_start
+                .checked_add(row_triangles)
+                .ok_or(FieldError::AllocationOverflow)?;
+            row += 1;
+        }
+        unreachable!("validated triangle id must occur in one row")
+    }
+
+    fn upward_triangle(&self, i: usize, j: usize) -> Result<GridTriangle, FieldError> {
+        let k = self
+            .subdivisions
+            .checked_sub(i)
+            .and_then(|value| value.checked_sub(j))
+            .ok_or(FieldError::AllocationOverflow)?;
+        if k == 0 {
+            return Err(FieldError::InvalidLatticeCoordinate {
+                i,
+                j,
+                k,
+                subdivisions: self.subdivisions,
+            });
+        }
+        let id = triangle_row_start(self.subdivisions, i)
+            .and_then(|value| {
+                j.checked_mul(2)
+                    .and_then(|offset| value.checked_add(offset))
+            })
+            .ok_or(FieldError::AllocationOverflow)?;
+        Ok(GridTriangle {
+            id,
+            vertices: [
+                self.vertex_id(LatticeCoordinate { i, j, k })?,
+                self.vertex_id(LatticeCoordinate {
+                    i: i + 1,
+                    j,
+                    k: k - 1,
+                })?,
+                self.vertex_id(LatticeCoordinate {
+                    i,
+                    j: j + 1,
+                    k: k - 1,
+                })?,
+            ],
+        })
+    }
+
+    fn downward_triangle(&self, i: usize, j: usize) -> Result<GridTriangle, FieldError> {
+        let k = self
+            .subdivisions
+            .checked_sub(i)
+            .and_then(|value| value.checked_sub(j))
+            .ok_or(FieldError::AllocationOverflow)?;
+        if k < 2 {
+            return Err(FieldError::InvalidLatticeCoordinate {
+                i,
+                j,
+                k,
+                subdivisions: self.subdivisions,
+            });
+        }
+        let id = triangle_row_start(self.subdivisions, i)
+            .and_then(|value| {
+                j.checked_mul(2)
+                    .and_then(|offset| value.checked_add(offset))
+            })
+            .and_then(|value| value.checked_add(1))
+            .ok_or(FieldError::AllocationOverflow)?;
+        Ok(GridTriangle {
+            id,
+            vertices: [
+                self.vertex_id(LatticeCoordinate {
+                    i: i + 1,
+                    j,
+                    k: k - 1,
+                })?,
+                self.vertex_id(LatticeCoordinate {
+                    i: i + 1,
+                    j: j + 1,
+                    k: k - 2,
+                })?,
+                self.vertex_id(LatticeCoordinate {
+                    i,
+                    j: j + 1,
+                    k: k - 1,
+                })?,
+            ],
+        })
+    }
+}
+
+impl RegularTernaryGrid {
+    /// Locate a finite normalized composition in constant time with respect to
+    /// the total grid triangle count.
+    ///
+    /// Input within [`POINT_LOCATION_TOLERANCE`] of normalized is normalized,
+    /// then values close to simplex or lattice boundaries are snapped. Points
+    /// on shared edges and vertices are owned by the lowest canonical triangle
+    /// identifier among the bounded local candidate set.
+    pub fn locate(&self, composition: [f64; 3]) -> Result<LocatedTriangle, PointLocationError> {
+        let composition = normalized_composition(composition)?;
+        let scale = self.subdivisions as f64;
+        let scaled = composition.map(|value| snap_lattice(value * scale));
+        let floor_i = floor_lattice_index(scaled[0], self.subdivisions)?;
+        let floor_j = floor_lattice_index(scaled[1], self.subdivisions)?;
+        let mut selected = None;
+
+        for base_i in [floor_i.checked_sub(1), Some(floor_i)]
+            .into_iter()
+            .flatten()
+        {
+            for base_j in [floor_j.checked_sub(1), Some(floor_j)]
+                .into_iter()
+                .flatten()
+            {
+                if base_i
+                    .checked_add(base_j)
+                    .is_none_or(|sum| sum >= self.subdivisions)
+                {
+                    continue;
+                }
+                let delta_a = scaled[0] - base_i as f64;
+                let delta_b = scaled[1] - base_j as f64;
+                consider_location_candidate(
+                    self.upward_triangle(base_i, base_j)
+                        .map_err(|_| PointLocationError::GridIndexOverflow)?,
+                    [1.0 - delta_a - delta_b, delta_a, delta_b],
+                    scale,
+                    &mut selected,
+                );
+                if base_i + base_j + 2 <= self.subdivisions {
+                    consider_location_candidate(
+                        self.downward_triangle(base_i, base_j)
+                            .map_err(|_| PointLocationError::GridIndexOverflow)?,
+                        [1.0 - delta_b, delta_a + delta_b - 1.0, 1.0 - delta_a],
+                        scale,
+                        &mut selected,
+                    );
+                }
+            }
+        }
+
+        let Some((triangle, barycentric)) = selected else {
+            return Err(PointLocationError::OutsideSimplex { composition });
+        };
+        let zeroes = barycentric
+            .into_iter()
+            .filter(|value| *value == 0.0)
+            .count();
+        let boundary = match zeroes {
+            0 => PointBoundaryLocation::Interior,
+            1 => PointBoundaryLocation::Edge,
+            _ => PointBoundaryLocation::Vertex,
+        };
+        Ok(LocatedTriangle {
+            triangle,
+            barycentric,
+            boundary,
+            subdivisions: self.subdivisions,
+        })
+    }
+}
 #[derive(Clone, Debug)]
 struct CanonicalLatticeCoordinates {
     subdivisions: usize,
@@ -149,14 +517,8 @@ impl ExactSizeIterator for CanonicalLatticeCoordinates {}
 /// for each `i`, `j` increases from zero to `n-i`; `k=n-i-j`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RegularTernaryScalarField {
-    subdivisions: usize,
+    grid: RegularTernaryGrid,
     values: Vec<f64>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct GridTriangle {
-    pub id: usize,
-    pub vertices: [GridVertexId; 3],
 }
 
 #[cfg(feature = "cubic-alpha")]
@@ -259,10 +621,8 @@ impl RegularTernaryScalarField {
     }
 
     pub fn new(subdivisions: usize, values: Vec<f64>) -> Result<Self, FieldError> {
-        if subdivisions == 0 {
-            return Err(FieldError::ZeroSubdivisions);
-        }
-        let expected = canonical_vertex_count(subdivisions)?;
+        let grid = RegularTernaryGrid::new(subdivisions)?;
+        let expected = grid.vertex_count();
         if values.len() != expected {
             return Err(FieldError::IncorrectValueCount {
                 expected,
@@ -277,14 +637,15 @@ impl RegularTernaryScalarField {
         {
             return Err(FieldError::NonFiniteValue { index, value });
         }
-        Ok(Self {
-            subdivisions,
-            values,
-        })
+        Ok(Self { grid, values })
     }
 
     pub const fn subdivisions(&self) -> usize {
-        self.subdivisions
+        self.grid.subdivisions()
+    }
+    /// Return the canonical regular grid on which this field is sampled.
+    pub const fn grid(&self) -> RegularTernaryGrid {
+        self.grid
     }
     pub fn values(&self) -> &[f64] {
         &self.values
@@ -293,13 +654,12 @@ impl RegularTernaryScalarField {
         self.values.len()
     }
     pub fn triangle_count(&self) -> Result<usize, FieldError> {
-        self.subdivisions
-            .checked_mul(self.subdivisions)
-            .ok_or(FieldError::AllocationOverflow)
+        self.grid.triangle_count()
     }
     pub fn edge_count(&self) -> Result<usize, FieldError> {
-        self.subdivisions
-            .checked_mul(self.subdivisions + 1)
+        self.grid
+            .subdivisions()
+            .checked_mul(self.grid.subdivisions() + 1)
             .and_then(|value| value.checked_mul(3))
             .map(|value| value / 2)
             .ok_or(FieldError::AllocationOverflow)
@@ -316,56 +676,15 @@ impl RegularTernaryScalarField {
     }
 
     pub fn vertex_id(&self, coordinate: LatticeCoordinate) -> Result<GridVertexId, FieldError> {
-        if coordinate
-            .i
-            .checked_add(coordinate.j)
-            .and_then(|v| v.checked_add(coordinate.k))
-            != Some(self.subdivisions)
-        {
-            return Err(FieldError::InvalidLatticeCoordinate {
-                i: coordinate.i,
-                j: coordinate.j,
-                k: coordinate.k,
-                subdivisions: self.subdivisions,
-            });
-        }
-        let i = coordinate.i;
-        let prefix = i
-            .checked_mul(self.subdivisions + 1)
-            .and_then(|v| i.checked_mul(i.saturating_sub(1)).map(|tri| v - tri / 2))
-            .ok_or(FieldError::AllocationOverflow)?;
-        Ok(GridVertexId(prefix + coordinate.j))
+        self.grid.vertex_id(coordinate)
     }
 
     pub fn lattice_coordinate(&self, id: GridVertexId) -> Result<LatticeCoordinate, FieldError> {
-        if id.0 >= self.values.len() {
-            return Err(FieldError::InvalidVertexIndex {
-                index: id.0,
-                vertex_count: self.values.len(),
-            });
-        }
-        let mut offset = 0;
-        for i in 0..=self.subdivisions {
-            let row = self.subdivisions - i + 1;
-            if id.0 < offset + row {
-                let j = id.0 - offset;
-                return Ok(LatticeCoordinate {
-                    i,
-                    j,
-                    k: self.subdivisions - i - j,
-                });
-            }
-            offset += row;
-        }
-        unreachable!("validated vertex id must occur in one row")
+        self.grid.lattice_coordinate(id)
     }
 
     pub fn composition(&self, id: GridVertexId) -> Result<[f64; 3], FieldError> {
-        let coordinate = self.lattice_coordinate(id)?;
-        Ok(composition_from_coordinate(
-            coordinate,
-            self.subdivisions as f64,
-        ))
+        self.grid.composition(id)
     }
 
     pub fn index_of(&self, i: usize, j: usize, k: usize) -> Result<usize, FieldError> {
@@ -381,41 +700,7 @@ impl RegularTernaryScalarField {
     }
 
     pub fn elementary_triangles(&self) -> Result<Vec<GridTriangle>, FieldError> {
-        let capacity = self.triangle_count()?;
-        let mut triangles = Vec::with_capacity(capacity);
-        for i in 0..self.subdivisions {
-            for j in 0..(self.subdivisions - i) {
-                let k = self.subdivisions - i - j;
-                let p = self.vertex_id(LatticeCoordinate { i, j, k })?;
-                let q = self.vertex_id(LatticeCoordinate {
-                    i: i + 1,
-                    j,
-                    k: k - 1,
-                })?;
-                let r = self.vertex_id(LatticeCoordinate {
-                    i,
-                    j: j + 1,
-                    k: k - 1,
-                })?;
-                triangles.push(GridTriangle {
-                    id: triangles.len(),
-                    vertices: [p, q, r],
-                });
-                if k >= 2 {
-                    let s = self.vertex_id(LatticeCoordinate {
-                        i: i + 1,
-                        j: j + 1,
-                        k: k - 2,
-                    })?;
-                    triangles.push(GridTriangle {
-                        id: triangles.len(),
-                        vertices: [q, s, r],
-                    });
-                }
-            }
-        }
-        debug_assert_eq!(triangles.len(), capacity);
-        Ok(triangles)
+        self.grid.elementary_triangles()
     }
 
     #[cfg(test)]
@@ -432,6 +717,100 @@ impl RegularTernaryScalarField {
         }
         Ok(edges)
     }
+}
+
+fn normalized_composition(composition: [f64; 3]) -> Result<[f64; 3], PointLocationError> {
+    if let Some((component, value)) = composition
+        .into_iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(PointLocationError::NonFiniteComposition { component, value });
+    }
+    let sum = composition.into_iter().sum::<f64>();
+    if (sum - 1.0).abs() > POINT_LOCATION_TOLERANCE {
+        return Err(PointLocationError::InvalidCompositionSum { sum });
+    }
+    let mut normalized = composition.map(|value| value / sum);
+    if normalized
+        .into_iter()
+        .any(|value| !(-POINT_LOCATION_TOLERANCE..=1.0 + POINT_LOCATION_TOLERANCE).contains(&value))
+    {
+        return Err(PointLocationError::OutsideSimplex { composition });
+    }
+    for value in &mut normalized {
+        if value.abs() <= POINT_LOCATION_TOLERANCE {
+            *value = 0.0;
+        } else if (1.0 - *value).abs() <= POINT_LOCATION_TOLERANCE {
+            *value = 1.0;
+        }
+    }
+    let snapped_sum = normalized.into_iter().sum::<f64>();
+    Ok(normalized.map(|value| value / snapped_sum))
+}
+
+fn snap_lattice(value: f64) -> f64 {
+    let nearest = value.round();
+    let tolerance = POINT_LOCATION_TOLERANCE * value.abs().max(1.0);
+    if (value - nearest).abs() <= tolerance {
+        nearest
+    } else {
+        value
+    }
+}
+
+fn floor_lattice_index(value: f64, subdivisions: usize) -> Result<usize, PointLocationError> {
+    if value < -POINT_LOCATION_TOLERANCE || value > subdivisions as f64 + POINT_LOCATION_TOLERANCE {
+        return Err(PointLocationError::GridIndexOverflow);
+    }
+    if value >= subdivisions as f64 {
+        Ok(subdivisions)
+    } else {
+        Ok(value.floor() as usize)
+    }
+}
+
+fn canonical_barycentric(mut barycentric: [f64; 3], scale: f64) -> Option<[f64; 3]> {
+    let tolerance = POINT_LOCATION_TOLERANCE * scale.max(1.0);
+    if barycentric
+        .into_iter()
+        .any(|value| value < -tolerance || value > 1.0 + tolerance)
+    {
+        return None;
+    }
+    for value in &mut barycentric {
+        if value.abs() <= tolerance {
+            *value = 0.0;
+        } else if (1.0 - *value).abs() <= tolerance {
+            *value = 1.0;
+        }
+    }
+    let sum = barycentric.into_iter().sum::<f64>();
+    if sum <= 0.0 || !sum.is_finite() {
+        return None;
+    }
+    Some(barycentric.map(|value| (value / sum).max(0.0)))
+}
+
+fn consider_location_candidate(
+    triangle: GridTriangle,
+    barycentric: [f64; 3],
+    scale: f64,
+    selected: &mut Option<(GridTriangle, [f64; 3])>,
+) {
+    let Some(barycentric) = canonical_barycentric(barycentric, scale) else {
+        return;
+    };
+    if selected.is_none_or(|(current, _)| triangle.id < current.id) {
+        *selected = Some((triangle, barycentric));
+    }
+}
+
+fn triangle_row_start(subdivisions: usize, row: usize) -> Option<usize> {
+    subdivisions
+        .checked_mul(2)
+        .and_then(|twice| twice.checked_sub(row))
+        .and_then(|factor| row.checked_mul(factor))
 }
 
 fn canonical_vertex_count(subdivisions: usize) -> Result<usize, FieldError> {
@@ -673,6 +1052,142 @@ mod tests {
         assert!(matches!(
             RegularTernaryScalarField::new(usize::MAX, Vec::new()),
             Err(FieldError::AllocationOverflow)
+        ));
+    }
+
+    fn close(left: f64, right: f64) {
+        assert!((left - right).abs() <= 2.0e-10, "{left:?} != {right:?}");
+    }
+
+    fn reference_locate(grid: &RegularTernaryGrid, point: [f64; 3]) -> LocatedTriangle {
+        let point = normalized_composition(point).unwrap();
+        for triangle in grid.elementary_triangles().unwrap() {
+            let vertices = triangle.vertices.map(|id| grid.composition(id).unwrap());
+            let determinant = (vertices[0][0] - vertices[2][0]) * (vertices[1][1] - vertices[2][1])
+                - (vertices[1][0] - vertices[2][0]) * (vertices[0][1] - vertices[2][1]);
+            let pa = point[0] - vertices[2][0];
+            let pb = point[1] - vertices[2][1];
+            let u = (pa * (vertices[1][1] - vertices[2][1])
+                - (vertices[1][0] - vertices[2][0]) * pb)
+                / determinant;
+            let v = ((vertices[0][0] - vertices[2][0]) * pb
+                - pa * (vertices[0][1] - vertices[2][1]))
+                / determinant;
+            if let Some(barycentric) =
+                canonical_barycentric([u, v, 1.0 - u - v], grid.subdivisions() as f64)
+            {
+                let zeroes = barycentric.iter().filter(|value| **value == 0.0).count();
+                return LocatedTriangle {
+                    triangle,
+                    barycentric,
+                    boundary: match zeroes {
+                        0 => PointBoundaryLocation::Interior,
+                        1 => PointBoundaryLocation::Edge,
+                        _ => PointBoundaryLocation::Vertex,
+                    },
+                    subdivisions: grid.subdivisions(),
+                };
+            }
+        }
+        panic!("reference locator did not find {point:?}")
+    }
+
+    #[test]
+    fn direct_locator_matches_exhaustive_reference_and_reconstructs_points() {
+        let mut state = 0x7e57_1a11_u64;
+        let next = |state: &mut u64| {
+            *state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1);
+            (*state >> 11) as f64 / ((u64::MAX >> 11) as f64)
+        };
+        for subdivisions in [1, 2, 3, 7, 31, 127] {
+            let grid = RegularTernaryGrid::new(subdivisions).unwrap();
+            for _ in 0..257 {
+                let a = next(&mut state);
+                let b = (1.0 - a) * next(&mut state);
+                let point = [a, b, 1.0 - a - b];
+                let direct = grid.locate(point).unwrap();
+                let reference = reference_locate(&grid, point);
+                assert_eq!(direct.triangle, reference.triangle);
+                assert_eq!(direct.boundary, reference.boundary);
+                for (actual, expected) in direct.barycentric.into_iter().zip(reference.barycentric)
+                {
+                    close(actual, expected);
+                }
+                let reconstructed = direct
+                    .triangle
+                    .vertices
+                    .map(|id| grid.composition(id).unwrap());
+                for component in 0..3 {
+                    close(
+                        direct
+                            .barycentric
+                            .into_iter()
+                            .zip(reconstructed)
+                            .map(|(weight, vertex)| weight * vertex[component])
+                            .sum(),
+                        point[component],
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn direct_locator_handles_vertices_centres_edges_and_invalid_input() {
+        for subdivisions in [1, 2, 5, 19] {
+            let grid = RegularTernaryGrid::new(subdivisions).unwrap();
+            for (id, point) in grid.indexed_compositions() {
+                let location = grid.locate(point).unwrap();
+                assert_eq!(location.boundary, PointBoundaryLocation::Vertex);
+                assert!(location.triangle.vertices.contains(&id));
+            }
+            for triangle in grid.elementary_triangles().unwrap() {
+                let vertices = triangle.vertices.map(|id| grid.composition(id).unwrap());
+                let centre = vertices.map(|vertex| vertex.map(|value| value / 3.0));
+                let point = [
+                    centre.into_iter().map(|value| value[0]).sum(),
+                    centre.into_iter().map(|value| value[1]).sum(),
+                    centre.into_iter().map(|value| value[2]).sum(),
+                ];
+                let location = grid.locate(point).unwrap();
+                assert_eq!(location.triangle, triangle);
+                assert_eq!(location.boundary, PointBoundaryLocation::Interior);
+            }
+            for triangle in grid.elementary_triangles().unwrap() {
+                for [left, right] in [[0, 1], [1, 2], [2, 0]] {
+                    let a = grid.composition(triangle.vertices[left]).unwrap();
+                    let b = grid.composition(triangle.vertices[right]).unwrap();
+                    let point = [
+                        (a[0] + b[0]) / 2.0,
+                        (a[1] + b[1]) / 2.0,
+                        (a[2] + b[2]) / 2.0,
+                    ];
+                    assert!(matches!(
+                        grid.locate(point).unwrap().boundary,
+                        PointBoundaryLocation::Edge
+                    ));
+                }
+            }
+        }
+        let grid = RegularTernaryGrid::new(3).unwrap();
+        for point in [[-0.01, 0.4, 0.61], [1.01, 0.0, -0.01]] {
+            assert!(matches!(
+                grid.locate(point),
+                Err(PointLocationError::OutsideSimplex { .. })
+                    | Err(PointLocationError::InvalidCompositionSum { .. })
+            ));
+        }
+        for point in [[f64::NAN, 0.0, 1.0], [f64::INFINITY, 0.0, 1.0]] {
+            assert!(matches!(
+                grid.locate(point),
+                Err(PointLocationError::NonFiniteComposition { .. })
+            ));
+        }
+        assert!(matches!(
+            grid.locate([0.2, 0.2, 0.2]),
+            Err(PointLocationError::InvalidCompositionSum { .. })
         ));
     }
 }

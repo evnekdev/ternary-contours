@@ -29,64 +29,20 @@ fn locate_with(
     point: TernaryCoordinate,
     mut evaluate: impl FnMut(GridTriangle, [f64; 3]) -> Result<(f64, [f64; 2]), ContourError>,
 ) -> Result<LocatedValue, ContourError> {
-    for triangle in field.elementary_triangles()? {
-        let [v0, v1, v2] = triangle.vertices;
-        let vertices = [
-            field.composition(v0)?.into(),
-            field.composition(v1)?.into(),
-            field.composition(v2)?.into(),
-        ];
-        let Some(barycentric) = barycentric_in_triangle(point, vertices, 1.0e-10) else {
-            continue;
-        };
-        let (value, local_gradient) = evaluate(triangle, barycentric)?;
-        let gradient_ab = local_to_global_gradient(local_gradient, vertices);
-        return Ok(LocatedValue { value, gradient_ab });
-    }
     let [a, b, c] = point.as_array();
-    Err(ContourError::PointOutsideGrid { a, b, c })
-}
-
-pub(crate) fn barycentric_in_triangle(
-    point: TernaryCoordinate,
-    vertices: [TernaryCoordinate; 3],
-    tolerance: f64,
-) -> Option<[f64; 3]> {
-    let [a, b, _] = point.as_array();
-    let [a0, b0, _] = vertices[0].as_array();
-    let [a1, b1, _] = vertices[1].as_array();
-    let [a2, b2, _] = vertices[2].as_array();
-    let da0 = a0 - a2;
-    let da1 = a1 - a2;
-    let db0 = b0 - b2;
-    let db1 = b1 - b2;
-    let det = da0 * db1 - da1 * db0;
-    if det == 0.0 {
-        return None;
-    }
-    let pa = a - a2;
-    let pb = b - b2;
-    let u = (pa * db1 - da1 * pb) / det;
-    let v = (da0 * pb - pa * db0) / det;
-    let w = 1.0 - u - v;
-    if [u, v, w]
-        .into_iter()
-        .all(|value| value >= -tolerance && value <= 1.0 + tolerance)
-    {
-        Some([snap(u, tolerance), snap(v, tolerance), snap(w, tolerance)])
-    } else {
-        None
-    }
-}
-
-fn snap(value: f64, tolerance: f64) -> f64 {
-    if value.abs() <= tolerance {
-        0.0
-    } else if (1.0 - value).abs() <= tolerance {
-        1.0
-    } else {
-        value
-    }
+    let location = field
+        .grid()
+        .locate([a, b, c])
+        .map_err(|_| ContourError::PointOutsideGrid { a, b, c })?;
+    let [v0, v1, v2] = location.triangle.vertices;
+    let vertices = [
+        field.composition(v0)?.into(),
+        field.composition(v1)?.into(),
+        field.composition(v2)?.into(),
+    ];
+    let (value, local_gradient) = evaluate(location.triangle, location.barycentric)?;
+    let gradient_ab = local_to_global_gradient(local_gradient, vertices);
+    Ok(LocatedValue { value, gradient_ab })
 }
 
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
