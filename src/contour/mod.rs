@@ -9,7 +9,7 @@ mod paths;
 mod regularize;
 mod topology;
 
-pub use bands::{ContourBand, ContourBandOptions, ContourBandSet, ContourRegion};
+pub use bands::{ContourBand, ContourBandOptions, ContourBandSet, ContourFragment, ContourRegion};
 pub use error::ContourError;
 pub use options::{
     AdaptiveContourOptions, ContourInterpolation, ContourOptions, ContourRegularization,

@@ -75,6 +75,34 @@ pub struct ContourBand {
     pub upper: Option<f64>,
     /// Deterministically ordered disconnected filled regions.
     pub regions: Vec<ContourRegion>,
+    fragments: Vec<ContourFragment>,
+}
+
+impl ContourBand {
+    /// Return deterministic, non-overlapping simple fragments for this band.
+    ///
+    /// This representation is useful to render a band without painting its
+    /// holes: draw the fragments and leave all complementary geometry
+    /// untouched. It has the same positive-area coverage as Self::regions.
+    pub fn fragments(&self) -> &[ContourFragment] {
+        &self.fragments
+    }
+}
+
+/// One simple, open polygon fragment of a contour band.
+///
+/// Fragments are in canonical ternary composition coordinates. They have no
+/// holes and do not overlap each other in positive area.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContourFragment {
+    vertices: Vec<TernaryCoordinate>,
+}
+
+impl ContourFragment {
+    /// Return the open polygon ring. The final edge is implicit.
+    pub fn vertices(&self) -> &[TernaryCoordinate] {
+        &self.vertices
+    }
 }
 
 /// One connected filled-band region.
@@ -112,9 +140,10 @@ pub struct ContourBandSet {
 impl ContourBandSet {
     /// Compute finite, ordered piecewise-linear scalar bands.
     ///
-    /// Breaks are sorted internally and must be finite and distinct within the
-    /// configured scalar tolerance. The field is clipped in composition space
-    /// before any rendering or viewport mapping.
+    /// Callers must supply finite, strictly increasing breaks. Semantic scalar
+    /// ownership is f < l0, li <= f < li+1, and f >= lm; closed polygon
+    /// boundaries may still be shared by adjacent bands without a positive-area
+    /// overlap. The field is clipped in composition space before rendering.
     pub fn compute(
         field: &RegularTernaryScalarField,
         breaks: &[f64],
@@ -156,13 +185,38 @@ impl ContourBandSet {
                     );
                 }
             }
+            let fragments = fragments
+                .into_iter()
+                .map(|vertices| ContourFragment { vertices })
+                .collect::<Vec<_>>();
             bands.push(ContourBand {
                 lower,
                 upper,
-                regions: assemble_regions(fragments, options.geometry_tolerance),
+                regions: assemble_regions(
+                    fragments
+                        .iter()
+                        .map(|fragment| fragment.vertices.clone())
+                        .collect(),
+                    options.geometry_tolerance,
+                )?,
+                fragments,
             });
         }
         Ok(Self { bands })
+    }
+
+    /// Return the semantically owning band for a finite scalar value.
+    ///
+    /// Unlike geometric clipping this performs no tolerance expansion: a value
+    /// exactly equal to a break belongs to the band starting at that break.
+    pub fn band_index_for(&self, value: f64) -> Option<usize> {
+        if !value.is_finite() {
+            return None;
+        }
+        self.bands.iter().position(|band| {
+            band.lower.is_none_or(|lower| value >= lower)
+                && band.upper.is_none_or(|upper| value < upper)
+        })
     }
 }
 
@@ -173,25 +227,38 @@ struct BandVertex {
 }
 
 fn validated_breaks(breaks: &[f64], tolerance: f64) -> Result<Vec<f64>, ContourError> {
-    let mut indexed = breaks.iter().copied().enumerate().collect::<Vec<_>>();
-    if let Some((index, value)) = indexed
-        .iter()
-        .copied()
-        .find(|(_, value)| !value.is_finite())
-    {
-        return Err(ContourError::NonFiniteBandBreak { index, value });
+    for (index, value) in breaks.iter().copied().enumerate() {
+        if !value.is_finite() {
+            return Err(ContourError::NonFiniteBandBreak { index, value });
+        }
     }
-    indexed.sort_by(|left, right| left.1.total_cmp(&right.1));
-    for pair in indexed.windows(2) {
-        if (pair[0].1 - pair[1].1).abs() <= tolerance {
+    for (index, pair) in breaks.windows(2).enumerate() {
+        let previous = pair[0];
+        let value = pair[1];
+        if value <= previous {
+            if (previous - value).abs() <= tolerance {
+                return Err(ContourError::DuplicateBandBreak {
+                    first: index,
+                    second: index + 1,
+                    value,
+                });
+            }
+            return Err(ContourError::UnorderedBandBreak {
+                previous_index: index,
+                index: index + 1,
+                previous,
+                value,
+            });
+        }
+        if value - previous <= tolerance {
             return Err(ContourError::DuplicateBandBreak {
-                first: pair[0].0,
-                second: pair[1].0,
-                value: pair[0].1,
+                first: index,
+                second: index + 1,
+                value,
             });
         }
     }
-    Ok(indexed.into_iter().map(|(_, value)| value).collect())
+    Ok(breaks.to_vec())
 }
 
 fn band_ranges(breaks: &[f64], options: ContourBandOptions) -> Vec<(Option<f64>, Option<f64>)> {
@@ -210,11 +277,13 @@ fn band_ranges(breaks: &[f64], options: ContourBandOptions) -> Vec<(Option<f64>,
 }
 
 fn clip_lower(input: &[BandVertex], threshold: f64, tolerance: f64) -> Vec<BandVertex> {
-    clip(input, threshold, tolerance, |delta| delta >= -tolerance)
+    // Closed geometry is intentional: neighbouring bands share only the
+    // threshold curve. Semantic half-open ownership is exposed separately.
+    clip(input, threshold, tolerance, |delta| delta >= 0.0)
 }
 
 fn clip_upper(input: &[BandVertex], threshold: f64, tolerance: f64) -> Vec<BandVertex> {
-    clip(input, threshold, tolerance, |delta| delta <= tolerance)
+    clip(input, threshold, tolerance, |delta| delta <= 0.0)
 }
 
 fn clip(
@@ -300,19 +369,72 @@ fn push_vertex(output: &mut Vec<BandVertex>, vertex: BandVertex, tolerance: f64)
 struct NodeKey(i64, i64);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct DirectedEdgeKey(NodeKey, NodeKey);
+struct DirectedEdgeKey(usize, usize);
 
-fn node_key(point: TernaryCoordinate, tolerance: f64) -> NodeKey {
-    let [a, b, _] = point.as_array();
-    NodeKey(
-        (a / tolerance).round() as i64,
-        (b / tolerance).round() as i64,
-    )
+struct NodeCanonicalizer {
+    tolerance: f64,
+    buckets: BTreeMap<NodeKey, Vec<usize>>,
+    points: Vec<TernaryCoordinate>,
 }
 
-fn assemble_regions(fragments: Vec<Vec<TernaryCoordinate>>, tolerance: f64) -> Vec<ContourRegion> {
-    let mut nodes = BTreeMap::new();
-    let mut edges = BTreeMap::<DirectedEdgeKey, (TernaryCoordinate, TernaryCoordinate)>::new();
+impl NodeCanonicalizer {
+    fn new(tolerance: f64) -> Self {
+        Self {
+            // A tolerance below machine-scale cannot identify distinct computed
+            // intersections reliably. This guard only affects node joining.
+            tolerance: tolerance.max(64.0 * f64::EPSILON),
+            buckets: BTreeMap::new(),
+            points: Vec::new(),
+        }
+    }
+
+    fn node_for(&mut self, point: TernaryCoordinate) -> usize {
+        let key = self.key(point);
+        let mut existing: Option<usize> = None;
+        for da in -1..=1 {
+            for db in -1..=1 {
+                let neighbour = NodeKey(key.0.saturating_add(da), key.1.saturating_add(db));
+                if let Some(candidates) = self.buckets.get(&neighbour) {
+                    for &candidate in candidates {
+                        if points_close(self.points[candidate], point, self.tolerance) {
+                            existing = Some(existing.map_or(candidate, |old| old.min(candidate)));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(node) = existing {
+            return node;
+        }
+        let node = self.points.len();
+        self.points.push(point);
+        self.buckets.entry(key).or_default().push(node);
+        node
+    }
+
+    fn key(&self, point: TernaryCoordinate) -> NodeKey {
+        let [a, b, _] = point.as_array();
+        NodeKey(bucket(a, self.tolerance), bucket(b, self.tolerance))
+    }
+}
+
+fn bucket(value: f64, tolerance: f64) -> i64 {
+    let scaled = (value / tolerance).floor();
+    if scaled <= i64::MIN as f64 {
+        i64::MIN
+    } else if scaled >= i64::MAX as f64 {
+        i64::MAX
+    } else {
+        scaled as i64
+    }
+}
+
+fn assemble_regions(
+    fragments: Vec<Vec<TernaryCoordinate>>,
+    tolerance: f64,
+) -> Result<Vec<ContourRegion>, ContourError> {
+    let mut nodes = NodeCanonicalizer::new(tolerance);
+    let mut edges = BTreeSet::<DirectedEdgeKey>::new();
     for fragment in fragments {
         for (start, end) in fragment
             .iter()
@@ -320,26 +442,24 @@ fn assemble_regions(fragments: Vec<Vec<TernaryCoordinate>>, tolerance: f64) -> V
             .zip(fragment.iter().copied().cycle().skip(1))
             .take(fragment.len())
         {
-            let start_key = node_key(start, tolerance);
-            let end_key = node_key(end, tolerance);
-            if start_key == end_key {
+            let start = nodes.node_for(start);
+            let end = nodes.node_for(end);
+            if start == end {
                 continue;
             }
-            nodes.entry(start_key).or_insert(start);
-            nodes.entry(end_key).or_insert(end);
-            let key = DirectedEdgeKey(start_key, end_key);
-            let reverse = DirectedEdgeKey(end_key, start_key);
-            if edges.remove(&reverse).is_none() {
-                edges.entry(key).or_insert((start, end));
+            let key = DirectedEdgeKey(start, end);
+            let reverse = DirectedEdgeKey(end, start);
+            if !edges.remove(&reverse) {
+                edges.insert(key);
             }
         }
     }
 
-    let mut outgoing = BTreeMap::<NodeKey, BTreeSet<DirectedEdgeKey>>::new();
-    for key in edges.keys().copied() {
+    let mut outgoing = BTreeMap::<usize, BTreeSet<DirectedEdgeKey>>::new();
+    for key in edges.iter().copied() {
         outgoing.entry(key.0).or_default().insert(key);
     }
-    let mut unused = edges.keys().copied().collect::<BTreeSet<_>>();
+    let mut unused = edges.clone();
     let mut rings = Vec::new();
     while let Some(start) = unused.iter().next().copied() {
         let mut ring = Vec::new();
@@ -348,13 +468,17 @@ fn assemble_regions(fragments: Vec<Vec<TernaryCoordinate>>, tolerance: f64) -> V
         loop {
             guard += 1;
             if guard > edges.len().saturating_add(1) || !unused.remove(&current) {
-                break;
+                return Err(ContourError::UnclosedBandBoundary);
             }
-            let (from, to) = edges[&current];
+            let from = nodes.points[current.0];
+            let to = nodes.points[current.1];
             if ring.is_empty() {
                 ring.push(from);
             }
             ring.push(to);
+            if current.1 == start.0 {
+                break;
+            }
             let candidates = outgoing
                 .get(&current.1)
                 .into_iter()
@@ -362,32 +486,29 @@ fn assemble_regions(fragments: Vec<Vec<TernaryCoordinate>>, tolerance: f64) -> V
                 .copied()
                 .filter(|key| unused.contains(key))
                 .collect::<Vec<_>>();
-            let Some(next) = select_next(current, &candidates, &nodes) else {
-                break;
+            let Some(next) = select_next(current, &candidates, &nodes.points) else {
+                return Err(ContourError::UnclosedBandBoundary);
             };
             current = next;
         }
-        if ring.len() > 1 && points_close(ring[0], *ring.last().expect("nonempty ring"), tolerance)
-        {
-            ring.pop();
-        }
+        ring.pop();
         if ring.len() >= 3 && ring_area(&ring).abs() > tolerance {
             rings.push(ring);
         }
     }
-    build_regions(rings)
+    Ok(build_regions(rings))
 }
 
 fn select_next(
     incoming: DirectedEdgeKey,
     candidates: &[DirectedEdgeKey],
-    nodes: &BTreeMap<NodeKey, TernaryCoordinate>,
+    nodes: &[TernaryCoordinate],
 ) -> Option<DirectedEdgeKey> {
-    let from = nodes[&incoming.0].as_array();
-    let middle = nodes[&incoming.1].as_array();
+    let from = nodes[incoming.0].as_array();
+    let middle = nodes[incoming.1].as_array();
     candidates.iter().copied().min_by(|left, right| {
-        let l = turn_angle(from, middle, nodes[&left.1].as_array());
-        let r = turn_angle(from, middle, nodes[&right.1].as_array());
+        let l = turn_angle(from, middle, nodes[left.1].as_array());
+        let r = turn_angle(from, middle, nodes[right.1].as_array());
         l.total_cmp(&r).then_with(|| left.cmp(right))
     })
 }
@@ -406,43 +527,114 @@ fn turn_angle(from: [f64; 3], middle: [f64; 3], to: [f64; 3]) -> f64 {
 
 fn build_regions(mut rings: Vec<Vec<TernaryCoordinate>>) -> Vec<ContourRegion> {
     rings.sort_by(|left, right| compare_ring_keys(ring_sort_key(left), ring_sort_key(right)));
-    let mut exteriors = Vec::<ContourRegion>::new();
-    let mut holes = Vec::new();
-    for mut ring in rings {
-        if ring_area(&ring) > 0.0 {
-            exteriors.push(ContourRegion {
-                exterior: ring,
+    let samples = rings
+        .iter()
+        .map(|ring| interior_sample(ring))
+        .collect::<Vec<_>>();
+    let areas = rings
+        .iter()
+        .map(|ring| ring_area(ring).abs())
+        .collect::<Vec<_>>();
+    let parents = (0..rings.len())
+        .map(|child| {
+            (0..rings.len())
+                .filter(|&candidate| candidate != child && areas[candidate] > areas[child])
+                .filter(|&candidate| point_in_ring(samples[child], &rings[candidate]))
+                .min_by(|&left, &right| areas[left].total_cmp(&areas[right]))
+        })
+        .collect::<Vec<_>>();
+    let depths = (0..rings.len())
+        .map(|index| {
+            let mut depth = 0usize;
+            let mut parent = parents[index];
+            while let Some(next) = parent {
+                depth += 1;
+                parent = parents[next];
+            }
+            depth
+        })
+        .collect::<Vec<_>>();
+
+    let mut exterior_result = BTreeMap::<usize, usize>::new();
+    let mut regions = Vec::new();
+    for index in 0..rings.len() {
+        if depths[index] % 2 == 0 {
+            let mut exterior = rings[index].clone();
+            if ring_area(&exterior) < 0.0 {
+                exterior.reverse();
+            }
+            exterior_result.insert(index, regions.len());
+            regions.push(ContourRegion {
+                exterior,
                 holes: Vec::new(),
             });
-        } else {
-            ring.reverse();
-            holes.push(ring);
         }
     }
-    for mut hole in holes {
-        hole.reverse();
-        let sample = hole[0];
-        if let Some(region) = exteriors
-            .iter_mut()
-            .filter(|region| point_in_ring(sample, &region.exterior))
-            .min_by(|left, right| left.area().total_cmp(&right.area()))
-        {
-            region.holes.push(hole);
-        } else {
-            hole.reverse();
-            exteriors.push(ContourRegion {
-                exterior: hole,
-                holes: Vec::new(),
-            });
+    for index in 0..rings.len() {
+        if depths[index] % 2 == 1 {
+            let mut hole = rings[index].clone();
+            if ring_area(&hole) > 0.0 {
+                hole.reverse();
+            }
+            let mut owner = parents[index];
+            while let Some(parent) = owner {
+                if depths[parent] % 2 == 0 {
+                    if let Some(&region) = exterior_result.get(&parent) {
+                        regions[region].holes.push(hole);
+                    }
+                    break;
+                }
+                owner = parents[parent];
+            }
         }
     }
-    exteriors.sort_by(|left, right| {
+    for region in &mut regions {
+        region
+            .holes
+            .sort_by(|left, right| compare_ring_keys(ring_sort_key(left), ring_sort_key(right)));
+    }
+    regions.sort_by(|left, right| {
         compare_ring_keys(
             ring_sort_key(&left.exterior),
             ring_sort_key(&right.exterior),
         )
     });
-    exteriors
+    regions
+}
+
+fn interior_sample(ring: &[TernaryCoordinate]) -> TernaryCoordinate {
+    let signed_area = ring_area(ring);
+    if signed_area.abs() > f64::EPSILON {
+        let (a, b) = ring
+            .iter()
+            .zip(ring.iter().cycle().skip(1))
+            .take(ring.len())
+            .fold((0.0, 0.0), |(a_sum, b_sum), (left, right)| {
+                let [x0, y0, _] = left.as_array();
+                let [x1, y1, _] = right.as_array();
+                let cross = x0 * y1 - x1 * y0;
+                (a_sum + (x0 + x1) * cross, b_sum + (y0 + y1) * cross)
+            });
+        let sample = TernaryCoordinate::new(a / (6.0 * signed_area), b / (6.0 * signed_area), 0.0);
+        if point_in_ring(sample, ring) {
+            return sample;
+        }
+    }
+    let origin = ring[0].as_array();
+    for pair in ring[1..].windows(2) {
+        let left = pair[0].as_array();
+        let right = pair[1].as_array();
+        let sample = TernaryCoordinate::new(
+            (origin[0] + left[0] + right[0]) / 3.0,
+            (origin[1] + left[1] + right[1]) / 3.0,
+            0.0,
+        );
+        if point_in_ring(sample, ring) {
+            return sample;
+        }
+    }
+    // Only reached for malformed rings, which are filtered before assembly.
+    ring[0]
 }
 
 fn compare_ring_keys(left: (f64, f64, usize), right: (f64, f64, usize)) -> std::cmp::Ordering {
@@ -613,5 +805,133 @@ mod tests {
                 .flat_map(|band| &band.regions)
                 .all(|region| region.area() > 1e-10)
         );
+    }
+    #[test]
+    fn breaks_are_strictly_increasing_and_scalar_ownership_is_half_open() {
+        let field = field(1, |a, _, _| a);
+        let options = ContourBandOptions::linear();
+        let bands = ContourBandSet::compute(&field, &[0.25, 0.75], options).unwrap();
+        assert_eq!(bands.band_index_for(0.249_999_999), Some(0));
+        assert_eq!(bands.band_index_for(0.25), Some(1));
+        assert_eq!(bands.band_index_for(0.75), Some(2));
+        assert_eq!(bands.band_index_for(f64::NAN), None);
+        assert!(matches!(
+            ContourBandSet::compute(&field, &[0.75, 0.25], options),
+            Err(ContourError::UnorderedBandBreak { .. })
+        ));
+        assert!(matches!(
+            ContourBandSet::compute(&field, &[0.25, 0.25 + 1.0e-12], options),
+            Err(ContourError::DuplicateBandBreak { .. })
+        ));
+        assert!(ContourBandSet::compute(&field, &[], options).is_ok());
+    }
+
+    #[test]
+    fn containment_assigns_holes_and_nested_islands_without_orientation_assumptions() {
+        let coordinate = |a, b| TernaryCoordinate::new(a, b, 1.0 - a - b);
+        let outer = vec![
+            coordinate(0.05, 0.05),
+            coordinate(0.85, 0.05),
+            coordinate(0.85, 0.85),
+            coordinate(0.05, 0.85),
+        ];
+        let hole = vec![
+            coordinate(0.25, 0.25),
+            coordinate(0.65, 0.25),
+            coordinate(0.65, 0.65),
+            coordinate(0.25, 0.65),
+        ];
+        let island = vec![
+            coordinate(0.35, 0.35),
+            coordinate(0.55, 0.35),
+            coordinate(0.55, 0.55),
+            coordinate(0.35, 0.55),
+        ];
+        let regions = build_regions(vec![outer, hole, island]);
+        assert_eq!(regions.len(), 2);
+        assert_eq!(
+            regions
+                .iter()
+                .filter(|region| !region.holes.is_empty())
+                .count(),
+            1
+        );
+        assert!(
+            regions
+                .iter()
+                .all(|region| ring_area(&region.exterior) > 0.0)
+        );
+        assert!(
+            regions
+                .iter()
+                .flat_map(|region| &region.holes)
+                .all(|ring| ring_area(ring) < 0.0)
+        );
+    }
+
+    #[test]
+    fn neighbour_cell_canonicalisation_cancels_shared_fragment_edges_once() {
+        let coordinate = |a, b| TernaryCoordinate::new(a, b, 1.0 - a - b);
+        let epsilon = 0.25e-8;
+        let regions = assemble_regions(
+            vec![
+                vec![
+                    coordinate(0.0, 0.0),
+                    coordinate(0.5, 0.0),
+                    coordinate(0.5, 0.5),
+                ],
+                vec![
+                    coordinate(0.5 + epsilon, 0.0),
+                    coordinate(1.0, 0.0),
+                    coordinate(0.5 + epsilon, 0.5),
+                ],
+            ],
+            1.0e-8,
+        )
+        .unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!(regions[0].area() > 0.2);
+    }
+
+    #[test]
+    fn assembled_regions_and_fragments_have_matching_coverage() {
+        let field = field(9, |a, b, c| 0.4 * a - 0.3 * b + 0.8 * c);
+        let bands =
+            ContourBandSet::compute(&field, &[0.05, 0.25, 0.45], ContourBandOptions::linear())
+                .unwrap();
+        let fragment_area = bands
+            .bands
+            .iter()
+            .flat_map(|band| band.fragments())
+            .map(|fragment| ring_area(fragment.vertices()).abs())
+            .sum::<f64>();
+        assert!((fragment_area - area(&bands)).abs() < 1.0e-8);
+        for i in 1..20 {
+            for j in 1..(20 - i) {
+                let a = i as f64 / 20.0;
+                let b = j as f64 / 20.0;
+                let value = 0.4 * a - 0.3 * b + 0.8 * (1.0 - a - b);
+                if [0.05_f64, 0.25, 0.45]
+                    .iter()
+                    .any(|break_value| (value - break_value).abs() < 1.0e-9)
+                {
+                    continue;
+                }
+                let expected = bands.band_index_for(value).unwrap();
+                let point = TernaryCoordinate::new(a, b, 1.0 - a - b);
+                let covered = bands
+                    .bands
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, band)| {
+                        band.fragments()
+                            .iter()
+                            .any(|fragment| point_in_ring(point, fragment.vertices()))
+                    })
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                assert_eq!(covered, vec![expected]);
+            }
+        }
     }
 }

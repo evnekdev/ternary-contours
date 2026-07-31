@@ -43,7 +43,14 @@ pub enum ContourError {
         second: usize,
         value: f64,
     },
+    UnorderedBandBreak {
+        previous_index: usize,
+        index: usize,
+        previous: f64,
+        value: f64,
+    },
     UnsupportedFilledInterpolation,
+    UnclosedBandBoundary,
     InvalidTolerance {
         value_tolerance: f64,
         geometry_tolerance: f64,
@@ -136,9 +143,22 @@ impl fmt::Display for ContourError {
                 f,
                 "contour band breaks {first} and {second} duplicate {value:?}"
             ),
+            Self::UnorderedBandBreak {
+                previous_index,
+                index,
+                previous,
+                value,
+            } => write!(
+                f,
+                "band break {index} ({value}) must be greater than break {previous_index} ({previous})"
+            ),
             Self::UnsupportedFilledInterpolation => write!(
                 f,
                 "filled contour bands currently support only piecewise-linear interpolation"
+            ),
+            Self::UnclosedBandBoundary => write!(
+                f,
+                "filled-band fragments did not assemble into a closed boundary"
             ),
             Self::InvalidTolerance {
                 value_tolerance,

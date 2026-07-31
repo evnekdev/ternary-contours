@@ -82,9 +82,9 @@ Piecewise-linear contours are always available. The crate remains
 `publish = false` while extraction compatibility is reviewed.
 
 Irregular triangulations, the proposed iterative irregular-edge alpha method,
-Kuhn simplices, arbitrary-dimensional grids, filled contours, isosurfaces,
-manifold extraction, viewport clipping, and rendering are intentionally out of
-scope.
+Kuhn simplices, arbitrary-dimensional grids, cubic-alpha filled bands,
+isosurfaces, manifold extraction, viewport clipping, and rendering are
+intentionally out of scope.
 
 Editable numerical design notes live under [`docs/knowledge-base`](docs/knowledge-base/README.md).
 The committed ZIP files are archival convenience copies and are excluded from
@@ -98,9 +98,12 @@ Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
 ## Linear filled bands
 
 ContourBandSet computes exact piecewise-linear triangle fragments and
-deterministic semantic ternary regions. Bands are lower-inclusive and
-upper-exclusive. Rings have implicit closure; exterior rings are
-counter-clockwise in the semantic (a,b) plane and holes are clockwise.
+deterministic semantic ternary regions. Breaks must be finite and strictly
+increasing. Scalar ownership is f < l0, li <= f < li+1, and f >= lm; adjacent
+closed polygons may share only their zero-area threshold boundary. Rings have
+implicit closure; exteriors are counter-clockwise and holes clockwise in the
+semantic (a,b) plane. The core also retains non-overlapping simple fragments so
+renderers can leave holes transparent without background-colour compositing.
 
 Filled bands support linear interpolation only. Cubic-alpha filled bands return
 a typed unsupported-mode error. The core owns region geometry only: colours,
