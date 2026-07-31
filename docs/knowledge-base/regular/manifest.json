@@ -1,0 +1,20 @@
+{
+  "name": "ternary-cubic-alpha-contouring-knowledge-base",
+  "version": "0.1.0",
+  "created": "2026-07-31",
+  "scope": "Regular ternary-grid line contours with linear and cubic-alpha interpolation, Muggianu/Kohler extrapolation, adaptive topology, and level-preserving regularization",
+  "future_scope": "N-component simplex fields and Kuhn-simplex grids in a separate crate",
+  "entrypoint": "README.md",
+  "essential_files": [
+    "01_method/method_overview.md",
+    "02_mathematics/alpha_interval.md",
+    "02_mathematics/local_triangle_field.md",
+    "02_mathematics/muggianu_kohler.md",
+    "03_algorithms/contour_pipeline.md",
+    "03_algorithms/regularization_projection.md",
+    "04_architecture/modular_design.md",
+    "05_validation/validation_plan.md",
+    "06_nd_extension/kuhn_simplex_roadmap.md",
+    "08_bootstrap/new_thread_prompt.md"
+  ]
+}
