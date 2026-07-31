@@ -11,9 +11,10 @@
 //! directed edge intervals use
 //! `y0*(1-t) + y1*t + (1-t)*t*(alpha0 + alpha1*t)`.
 //!
-//! Scope is deliberately limited to line contours over regular two-dimensional
-//! ternary grids. Irregular triangulations, arbitrary-dimensional grids, Kuhn
-//! simplices, filled contours, viewport clipping, and rendering are excluded. Piecewise-linear filled bands are available; cubic-alpha filled bands are intentionally excluded.
+//! Scope is deliberately limited to regular two-dimensional ternary grids.
+//! Piecewise-linear isolines and filled bands are available. Irregular
+//! triangulations, arbitrary-dimensional grids, Kuhn simplices, viewport
+//! clipping, rendering, and cubic-alpha filled bands are intentionally excluded.
 
 pub mod contour;
 mod error;
