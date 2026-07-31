@@ -1,7 +1,7 @@
 #[cfg(test)]
 use std::collections::BTreeSet;
 
-use crate::FieldError;
+use crate::{FieldError, GridEvaluationError};
 
 /// Stable identifier in the field's canonical value ordering.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -90,12 +90,16 @@ impl RegularTernaryGrid {
             .map(move |coordinate| composition_from_coordinate(coordinate, denominator))
     }
 
-    /// Lazily iterate scalar-field value indices and normalized compositions.
+    /// Lazily iterate scalar-field vertex identifiers and normalized compositions.
     ///
-    /// Every index matches the canonical order expected by
+    /// Every identifier matches the canonical order expected by
     /// RegularTernaryScalarField::new.
-    pub fn indexed_compositions(&self) -> impl ExactSizeIterator<Item = (usize, [f64; 3])> + Clone {
-        self.compositions().enumerate()
+    pub fn indexed_compositions(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (GridVertexId, [f64; 3])> + Clone {
+        self.compositions()
+            .enumerate()
+            .map(|(index, composition)| (GridVertexId(index), composition))
     }
 }
 
@@ -207,19 +211,51 @@ impl RegularTernaryScalarField {
 
     /// Fallibly construct a field by evaluating canonical grid compositions.
     ///
-    /// Callback failures use the existing FieldError type and are returned
-    /// unchanged; this avoids introducing a second generic error layer for this
-    /// focused convenience constructor.
-    pub fn try_from_fn<F>(subdivisions: usize, mut value_at: F) -> Result<Self, FieldError>
+    /// Callback failures retain their source error, stable vertex identifier,
+    /// and normalized composition in GridEvaluationError::Evaluation. Grid and
+    /// field validation failures are returned as GridEvaluationError::Grid.
+    ///
+    /// Example:
+    ///
+    ///     use ternary_contours::{
+    ///         GridEvaluationError, GridVertexId, RegularTernaryScalarField,
+    ///     };
+    ///
+    ///     let error = RegularTernaryScalarField::try_from_fn(2, |composition| {
+    ///         if composition == [0.0, 0.5, 0.5] {
+    ///             Err("sample unavailable")
+    ///         } else {
+    ///             Ok(composition[0])
+    ///         }
+    ///     })
+    ///     .unwrap_err();
+    ///     assert!(matches!(
+    ///         error,
+    ///         GridEvaluationError::Evaluation {
+    ///             index: GridVertexId(1),
+    ///             source: "sample unavailable",
+    ///             ..
+    ///         }
+    ///     ));
+    pub fn try_from_fn<F, E>(
+        subdivisions: usize,
+        mut value_at: F,
+    ) -> Result<Self, GridEvaluationError<E>>
     where
-        F: FnMut([f64; 3]) -> Result<f64, FieldError>,
+        F: FnMut([f64; 3]) -> Result<f64, E>,
     {
-        let grid = RegularTernaryGrid::new(subdivisions)?;
+        let grid = RegularTernaryGrid::new(subdivisions).map_err(GridEvaluationError::Grid)?;
         let mut values = Vec::with_capacity(grid.vertex_count());
-        for composition in grid.compositions() {
-            values.push(value_at(composition)?);
+        for (index, composition) in grid.indexed_compositions() {
+            let value =
+                value_at(composition).map_err(|source| GridEvaluationError::Evaluation {
+                    index,
+                    composition,
+                    source,
+                })?;
+            values.push(value);
         }
-        Self::new(subdivisions, values)
+        Self::new(subdivisions, values).map_err(GridEvaluationError::Grid)
     }
 
     pub fn new(subdivisions: usize, values: Vec<f64>) -> Result<Self, FieldError> {
@@ -479,7 +515,7 @@ mod tests {
             for ((id, composition), coordinate) in
                 grid.indexed_compositions().zip(grid.lattice_coordinates())
             {
-                let index = id;
+                let index = id.0;
                 assert_eq!(
                     field
                         .index_of(coordinate.i, coordinate.j, coordinate.k)
@@ -505,7 +541,7 @@ mod tests {
             assert_eq!(generated.values(), values);
 
             let fallible = RegularTernaryScalarField::try_from_fn(subdivisions, |[a, b, c]| {
-                Ok::<f64, FieldError>(2.0 * a - 3.0 * b + 5.0 * c)
+                Ok::<f64, &'static str>(2.0 * a - 3.0 * b + 5.0 * c)
             })
             .unwrap();
             assert_eq!(fallible, generated);
@@ -523,13 +559,54 @@ mod tests {
             Err(FieldError::ZeroSubdivisions)
         ));
         assert!(matches!(
-            RegularTernaryScalarField::try_from_fn(0, |_| Ok::<f64, FieldError>(0.0)),
-            Err(FieldError::ZeroSubdivisions)
+            RegularTernaryScalarField::try_from_fn(0, |_| Ok::<f64, &'static str>(0.0)),
+            Err(GridEvaluationError::Grid(FieldError::ZeroSubdivisions))
         ));
         assert!(matches!(
             RegularTernaryScalarField::from_fn(2, |_| f64::NAN),
             Err(FieldError::NonFiniteValue { index: 0, .. })
         ));
+        assert!(matches!(
+            RegularTernaryScalarField::try_from_fn(2, |_| { Ok::<f64, &'static str>(f64::NAN) }),
+            Err(GridEvaluationError::Grid(FieldError::NonFiniteValue {
+                index: 0,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn fallible_evaluation_preserves_source_vertex_and_composition() {
+        #[derive(Debug, PartialEq)]
+        struct SampleUnavailable {
+            reason: &'static str,
+        }
+
+        let mut calls = 0;
+        let error = RegularTernaryScalarField::try_from_fn(3, |composition| {
+            let index = calls;
+            calls += 1;
+            if index == 2 {
+                Err(SampleUnavailable {
+                    reason: "missing sample",
+                })
+            } else {
+                Ok(composition[0] + composition[1])
+            }
+        })
+        .unwrap_err();
+
+        assert_eq!(calls, 3);
+        assert_eq!(
+            error,
+            GridEvaluationError::Evaluation {
+                index: GridVertexId(2),
+                composition: [0.0, 2.0 / 3.0, 1.0 / 3.0],
+                source: SampleUnavailable {
+                    reason: "missing sample",
+                },
+            }
+        );
     }
 
     #[test]

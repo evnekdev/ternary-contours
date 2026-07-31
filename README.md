@@ -52,7 +52,10 @@ The workflow is:
         -> contour extraction
 
 RegularTernaryScalarField::from_fn is an equivalent convenience constructor
-when scalar evaluation cannot fail.
+when scalar evaluation cannot fail. For fallible evaluation,
+RegularTernaryScalarField::try_from_fn accepts any callback error type and
+reports the original error together with the canonical GridVertexId and
+composition.
 
 ## Alpha convention
 
