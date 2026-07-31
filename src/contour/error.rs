@@ -34,6 +34,16 @@ pub enum ContourError {
         second: usize,
         value: f64,
     },
+    NonFiniteBandBreak {
+        index: usize,
+        value: f64,
+    },
+    DuplicateBandBreak {
+        first: usize,
+        second: usize,
+        value: f64,
+    },
+    UnsupportedFilledInterpolation,
     InvalidTolerance {
         value_tolerance: f64,
         geometry_tolerance: f64,
@@ -115,6 +125,21 @@ impl fmt::Display for ContourError {
                 second,
                 value,
             } => write!(f, "contour levels {first} and {second} duplicate {value:?}"),
+            Self::NonFiniteBandBreak { index, value } => {
+                write!(f, "contour band break {index} is not finite: {value:?}")
+            }
+            Self::DuplicateBandBreak {
+                first,
+                second,
+                value,
+            } => write!(
+                f,
+                "contour band breaks {first} and {second} duplicate {value:?}"
+            ),
+            Self::UnsupportedFilledInterpolation => write!(
+                f,
+                "filled contour bands currently support only piecewise-linear interpolation"
+            ),
             Self::InvalidTolerance {
                 value_tolerance,
                 geometry_tolerance,

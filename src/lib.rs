@@ -13,7 +13,7 @@
 //!
 //! Scope is deliberately limited to line contours over regular two-dimensional
 //! ternary grids. Irregular triangulations, arbitrary-dimensional grids, Kuhn
-//! simplices, filled contours, viewport clipping, and rendering are excluded.
+//! simplices, filled contours, viewport clipping, and rendering are excluded. Piecewise-linear filled bands are available; cubic-alpha filled bands are intentionally excluded.
 
 pub mod contour;
 mod error;
@@ -58,8 +58,9 @@ impl From<TernaryCoordinate> for [f64; 3] {
 }
 
 pub use contour::{
-    AdaptiveContourOptions, ContourError, ContourInterpolation, ContourLevel, ContourOptions,
-    ContourPath, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
+    AdaptiveContourOptions, ContourBand, ContourBandOptions, ContourBandSet, ContourError,
+    ContourInterpolation, ContourLevel, ContourOptions, ContourPath, ContourRegion,
+    ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
 };
 pub use error::{FieldError, GridEvaluationError};
 pub use grid::{GridVertexId, LatticeCoordinate, RegularTernaryGrid, RegularTernaryScalarField};
