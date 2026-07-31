@@ -1190,4 +1190,38 @@ mod tests {
             Err(PointLocationError::InvalidCompositionSum { .. })
         ));
     }
+
+    #[test]
+    fn direct_locator_snaps_near_boundaries_and_distinguishes_edge_sides() {
+        let grid = RegularTernaryGrid::new(5).unwrap();
+        let tolerance = POINT_LOCATION_TOLERANCE / 2.0;
+        let boundary = grid.locate([-tolerance, 0.25, 0.75 + tolerance]).unwrap();
+        assert_eq!(boundary.boundary, PointBoundaryLocation::Edge);
+        assert!(boundary.barycentric.into_iter().all(|value| value >= 0.0));
+        close(boundary.barycentric.into_iter().sum(), 1.0);
+
+        // The q-r edge of cell (1, 1) is x+y=3 in scaled lattice
+        // coordinates. A perturbation larger than the documented snapping
+        // tolerance must select a triangle on the corresponding side.
+        let step = 1.0e-6;
+        let below = grid
+            .locate([(1.4 - step) / 5.0, 1.6 / 5.0, 1.0 - (3.0 - step) / 5.0])
+            .unwrap();
+        let edge = grid.locate([1.4 / 5.0, 1.6 / 5.0, 0.4]).unwrap();
+        let above = grid
+            .locate([(1.4 + step) / 5.0, 1.6 / 5.0, 1.0 - (3.0 + step) / 5.0])
+            .unwrap();
+        assert_eq!(below.boundary, PointBoundaryLocation::Interior);
+        assert_eq!(edge.boundary, PointBoundaryLocation::Edge);
+        assert_eq!(above.boundary, PointBoundaryLocation::Interior);
+        assert_ne!(below.triangle, above.triangle);
+        assert_eq!(edge.triangle, below.triangle);
+
+        for point in [[0.4, 0.4, 0.4], [0.6, 0.3, 0.3]] {
+            assert!(matches!(
+                grid.locate(point),
+                Err(PointLocationError::InvalidCompositionSum { .. })
+            ));
+        }
+    }
 }
