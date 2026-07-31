@@ -61,7 +61,7 @@ impl<'a> CubicGridField<'a> {
                     let key = GridEdgeKey::new(triangle.vertices[left], triangle.vertices[right]);
                     let interval = *intervals
                         .get(&key)
-                        .ok_or(crate::InterpolationError::MissingEdgePair)?;
+                        .ok_or(crate::interpolation::InterpolationError::MissingEdgePair)?;
                     let (start, end) = if key.start == triangle.vertices[left] {
                         (left, right)
                     } else {
