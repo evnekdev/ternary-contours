@@ -1,8 +1,8 @@
 # ternary-contours
 
 `ternary-contours` is a backend-independent numerical core for scalar data on a
-regular two-dimensional ternary composition grid. It owns the complete line-
-contour pipeline:
+regular two-dimensional ternary composition grid. It owns line-contour extraction and piecewise-linear filled-band geometry:
+
 
 ```text
 regular scalar grid
@@ -94,3 +94,15 @@ Cargo packages.
 
 Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
 [MIT license](LICENSE-MIT), at your option.
+
+## Linear filled bands
+
+ContourBandSet computes exact piecewise-linear triangle fragments and
+deterministic semantic ternary regions. Bands are lower-inclusive and
+upper-exclusive. Rings have implicit closure; exterior rings are
+counter-clockwise in the semantic (a,b) plane and holes are clockwise.
+
+Filled bands support linear interpolation only. Cubic-alpha filled bands return
+a typed unsupported-mode error. The core owns region geometry only: colours,
+opacity, viewport clipping, scalar-map micro-triangulation, and Plotters
+drawing belong to a rendering crate.

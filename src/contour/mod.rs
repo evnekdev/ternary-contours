@@ -1,5 +1,6 @@
 //! Backend-independent line contours over a regular ternary composition grid.
 
+mod bands;
 mod error;
 mod linear;
 mod locate;
@@ -8,6 +9,7 @@ mod paths;
 mod regularize;
 mod topology;
 
+pub use bands::{ContourBand, ContourBandOptions, ContourBandSet, ContourRegion};
 pub use error::ContourError;
 pub use options::{
     AdaptiveContourOptions, ContourInterpolation, ContourOptions, ContourRegularization,
