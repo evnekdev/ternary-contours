@@ -15,6 +15,130 @@ pub struct LatticeCoordinate {
     pub k: usize,
 }
 
+/// A reusable view of the canonical regular ternary composition lattice.
+///
+/// The grid visits lattice coordinates in the exact order used by
+/// RegularTernaryScalarField: i increases first, then j, with
+/// k = subdivisions - i - j. Its iterators are lazy and do not allocate.
+///
+/// Example:
+///
+///     use ternary_contours::{LatticeCoordinate, RegularTernaryGrid};
+///
+///     let grid = RegularTernaryGrid::new(2)?;
+///     let coordinates: Vec<_> = grid.lattice_coordinates().collect();
+///     assert_eq!(coordinates[0], LatticeCoordinate { i: 0, j: 0, k: 2 });
+///     # Ok::<(), ternary_contours::FieldError>(())
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegularTernaryGrid {
+    subdivisions: usize,
+    vertex_count: usize,
+}
+
+impl RegularTernaryGrid {
+    /// Create a regular ternary lattice with subdivisions intervals per edge.
+    ///
+    /// The subdivision count must be positive. Its vertex count is
+    /// (n + 1) * (n + 2) / 2 and is checked for overflow.
+    pub fn new(subdivisions: usize) -> Result<Self, FieldError> {
+        if subdivisions == 0 {
+            return Err(FieldError::ZeroSubdivisions);
+        }
+        Ok(Self {
+            subdivisions,
+            vertex_count: canonical_vertex_count(subdivisions)?,
+        })
+    }
+
+    /// Number of intervals on each binary edge.
+    pub const fn subdivisions(&self) -> usize {
+        self.subdivisions
+    }
+
+    /// Number of vertices in canonical scalar-field order.
+    pub const fn vertex_count(&self) -> usize {
+        self.vertex_count
+    }
+
+    /// Lazily iterate canonical integer lattice coordinates.
+    ///
+    /// The iterator is exact-sized and yields i = 0..=n, j = 0..=n-i,
+    /// and k = n-i-j.
+    pub fn lattice_coordinates(&self) -> impl ExactSizeIterator<Item = LatticeCoordinate> + Clone {
+        CanonicalLatticeCoordinates {
+            subdivisions: self.subdivisions,
+            i: 0,
+            j: 0,
+            remaining: self.vertex_count,
+        }
+    }
+
+    /// Lazily iterate normalized semantic compositions in canonical field order.
+    ///
+    /// Each item is [i/n, j/n, k/n] in A/B/C component order.
+    ///
+    /// Example:
+    ///
+    ///     use ternary_contours::RegularTernaryGrid;
+    ///
+    ///     let grid = RegularTernaryGrid::new(2)?;
+    ///     assert_eq!(grid.compositions().next(), Some([0.0, 0.0, 1.0]));
+    ///     # Ok::<(), ternary_contours::FieldError>(())
+    pub fn compositions(&self) -> impl ExactSizeIterator<Item = [f64; 3]> + Clone {
+        let denominator = self.subdivisions as f64;
+        self.lattice_coordinates()
+            .map(move |coordinate| composition_from_coordinate(coordinate, denominator))
+    }
+
+    /// Lazily iterate scalar-field value indices and normalized compositions.
+    ///
+    /// Every index matches the canonical order expected by
+    /// RegularTernaryScalarField::new.
+    pub fn indexed_compositions(&self) -> impl ExactSizeIterator<Item = (usize, [f64; 3])> + Clone {
+        self.compositions().enumerate()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CanonicalLatticeCoordinates {
+    subdivisions: usize,
+    i: usize,
+    j: usize,
+    remaining: usize,
+}
+
+impl Iterator for CanonicalLatticeCoordinates {
+    type Item = LatticeCoordinate;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.remaining == 0 {
+            return None;
+        }
+
+        let coordinate = LatticeCoordinate {
+            i: self.i,
+            j: self.j,
+            k: self.subdivisions - self.i - self.j,
+        };
+        self.remaining -= 1;
+
+        if self.j == self.subdivisions - self.i {
+            self.i += 1;
+            self.j = 0;
+        } else {
+            self.j += 1;
+        }
+
+        Some(coordinate)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl ExactSizeIterator for CanonicalLatticeCoordinates {}
+
 /// A scalar field sampled on the regular ternary lattice `i+j+k=n`.
 ///
 /// Values use row-major `(i,j)` ordering: `i` increases from zero to `n`, and
@@ -56,11 +180,53 @@ impl GridEdgeKey {
 }
 
 impl RegularTernaryScalarField {
+    /// Construct a field by evaluating one scalar value at every canonical grid
+    /// composition.
+    ///
+    /// The callback receives normalized [a, b, c] compositions in the same
+    /// order as RegularTernaryGrid::compositions. The produced values are
+    /// validated exactly as they are by Self::new.
+    ///
+    /// Example:
+    ///
+    ///     use ternary_contours::RegularTernaryScalarField;
+    ///
+    ///     let field = RegularTernaryScalarField::from_fn(2, |[a, b, c]| {
+    ///         2.0 * a - 3.0 * b + 5.0 * c
+    ///     })?;
+    ///     assert_eq!(field.vertex_count(), 6);
+    ///     # Ok::<(), ternary_contours::FieldError>(())
+    pub fn from_fn<F>(subdivisions: usize, value_at: F) -> Result<Self, FieldError>
+    where
+        F: FnMut([f64; 3]) -> f64,
+    {
+        let grid = RegularTernaryGrid::new(subdivisions)?;
+        let values = grid.compositions().map(value_at).collect();
+        Self::new(subdivisions, values)
+    }
+
+    /// Fallibly construct a field by evaluating canonical grid compositions.
+    ///
+    /// Callback failures use the existing FieldError type and are returned
+    /// unchanged; this avoids introducing a second generic error layer for this
+    /// focused convenience constructor.
+    pub fn try_from_fn<F>(subdivisions: usize, mut value_at: F) -> Result<Self, FieldError>
+    where
+        F: FnMut([f64; 3]) -> Result<f64, FieldError>,
+    {
+        let grid = RegularTernaryGrid::new(subdivisions)?;
+        let mut values = Vec::with_capacity(grid.vertex_count());
+        for composition in grid.compositions() {
+            values.push(value_at(composition)?);
+        }
+        Self::new(subdivisions, values)
+    }
+
     pub fn new(subdivisions: usize, values: Vec<f64>) -> Result<Self, FieldError> {
         if subdivisions == 0 {
             return Err(FieldError::ZeroSubdivisions);
         }
-        let expected = Self::vertex_count_for(subdivisions)?;
+        let expected = canonical_vertex_count(subdivisions)?;
         if values.len() != expected {
             return Err(FieldError::IncorrectValueCount {
                 expected,
@@ -160,12 +326,10 @@ impl RegularTernaryScalarField {
 
     pub fn composition(&self, id: GridVertexId) -> Result<[f64; 3], FieldError> {
         let coordinate = self.lattice_coordinate(id)?;
-        let denominator = self.subdivisions as f64;
-        Ok([
-            coordinate.i as f64 / denominator,
-            coordinate.j as f64 / denominator,
-            coordinate.k as f64 / denominator,
-        ])
+        Ok(composition_from_coordinate(
+            coordinate,
+            self.subdivisions as f64,
+        ))
     }
 
     pub fn index_of(&self, i: usize, j: usize, k: usize) -> Result<usize, FieldError> {
@@ -232,18 +396,26 @@ impl RegularTernaryScalarField {
         }
         Ok(edges)
     }
+}
 
-    fn vertex_count_for(subdivisions: usize) -> Result<usize, FieldError> {
-        subdivisions
-            .checked_add(1)
-            .and_then(|left| {
-                subdivisions
-                    .checked_add(2)
-                    .and_then(|right| left.checked_mul(right))
-            })
-            .map(|value| value / 2)
-            .ok_or(FieldError::AllocationOverflow)
-    }
+fn canonical_vertex_count(subdivisions: usize) -> Result<usize, FieldError> {
+    subdivisions
+        .checked_add(1)
+        .and_then(|left| {
+            subdivisions
+                .checked_add(2)
+                .and_then(|right| left.checked_mul(right))
+        })
+        .map(|value| value / 2)
+        .ok_or(FieldError::AllocationOverflow)
+}
+
+fn composition_from_coordinate(coordinate: LatticeCoordinate, denominator: f64) -> [f64; 3] {
+    [
+        coordinate.i as f64 / denominator,
+        coordinate.j as f64 / denominator,
+        coordinate.k as f64 / denominator,
+    ]
 }
 
 #[cfg(test)]
@@ -253,6 +425,111 @@ mod tests {
     fn field(n: usize) -> RegularTernaryScalarField {
         let count = (n + 1) * (n + 2) / 2;
         RegularTernaryScalarField::new(n, (0..count).map(|value| value as f64).collect()).unwrap()
+    }
+
+    fn requires_exact_size<I: ExactSizeIterator>(_iterator: I) {}
+
+    #[test]
+    fn grid_iterators_match_field_order_and_accessors() {
+        for subdivisions in [1, 2, 3, 5] {
+            let grid = RegularTernaryGrid::new(subdivisions).unwrap();
+            assert_eq!(grid.subdivisions(), subdivisions);
+            assert_eq!(
+                grid.vertex_count(),
+                (subdivisions + 1) * (subdivisions + 2) / 2
+            );
+            requires_exact_size(grid.lattice_coordinates());
+            requires_exact_size(grid.compositions());
+            requires_exact_size(grid.indexed_compositions());
+
+            let mut coordinates = grid.lattice_coordinates();
+            assert_eq!(coordinates.len(), grid.vertex_count());
+            let first = coordinates.next().unwrap();
+            assert_eq!(
+                first,
+                LatticeCoordinate {
+                    i: 0,
+                    j: 0,
+                    k: subdivisions
+                }
+            );
+            assert_eq!(coordinates.len(), grid.vertex_count() - 1);
+
+            let expected_coordinates: Vec<_> = (0..=subdivisions)
+                .flat_map(|i| {
+                    (0..=subdivisions - i).map(move |j| LatticeCoordinate {
+                        i,
+                        j,
+                        k: subdivisions - i - j,
+                    })
+                })
+                .collect();
+            assert_eq!(
+                grid.lattice_coordinates().collect::<Vec<_>>(),
+                expected_coordinates
+            );
+
+            let values: Vec<_> = grid
+                .compositions()
+                .map(|[a, b, c]| 2.0 * a - 3.0 * b + 5.0 * c)
+                .collect();
+            let field = RegularTernaryScalarField::new(subdivisions, values.clone()).unwrap();
+            assert_eq!(field.vertex_count(), grid.vertex_count());
+
+            for ((id, composition), coordinate) in
+                grid.indexed_compositions().zip(grid.lattice_coordinates())
+            {
+                let index = id;
+                assert_eq!(
+                    field
+                        .index_of(coordinate.i, coordinate.j, coordinate.k)
+                        .unwrap(),
+                    index
+                );
+                assert_eq!(field.coordinate_of(index).unwrap(), coordinate);
+                assert_eq!(field.composition_at(index).unwrap(), composition);
+                assert_eq!(
+                    composition,
+                    [
+                        coordinate.i as f64 / subdivisions as f64,
+                        coordinate.j as f64 / subdivisions as f64,
+                        coordinate.k as f64 / subdivisions as f64,
+                    ]
+                );
+            }
+
+            let generated = RegularTernaryScalarField::from_fn(subdivisions, |[a, b, c]| {
+                2.0 * a - 3.0 * b + 5.0 * c
+            })
+            .unwrap();
+            assert_eq!(generated.values(), values);
+
+            let fallible = RegularTernaryScalarField::try_from_fn(subdivisions, |[a, b, c]| {
+                Ok::<f64, FieldError>(2.0 * a - 3.0 * b + 5.0 * c)
+            })
+            .unwrap();
+            assert_eq!(fallible, generated);
+        }
+    }
+
+    #[test]
+    fn grid_and_function_constructors_preserve_typed_errors() {
+        assert!(matches!(
+            RegularTernaryGrid::new(0),
+            Err(FieldError::ZeroSubdivisions)
+        ));
+        assert!(matches!(
+            RegularTernaryScalarField::from_fn(0, |_| 0.0),
+            Err(FieldError::ZeroSubdivisions)
+        ));
+        assert!(matches!(
+            RegularTernaryScalarField::try_from_fn(0, |_| Ok::<f64, FieldError>(0.0)),
+            Err(FieldError::ZeroSubdivisions)
+        ));
+        assert!(matches!(
+            RegularTernaryScalarField::from_fn(2, |_| f64::NAN),
+            Err(FieldError::NonFiniteValue { index: 0, .. })
+        ));
     }
 
     #[test]

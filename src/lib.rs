@@ -21,7 +21,9 @@ pub mod interpolation;
 
 pub use error::FieldError;
 pub use field::{CubicBuildDiagnostics, CubicGridField};
-pub use grid::{GridTriangle, GridVertexId, LatticeCoordinate, RegularTernaryScalarField};
+pub use grid::{
+    GridTriangle, GridVertexId, LatticeCoordinate, RegularTernaryGrid, RegularTernaryScalarField,
+};
 pub use interpolation::{
     AlphaInterval, BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod,
     CubicAlphaTriangle, CubicBoundaryPolicy, DirectedAlphaInterval, InterpolationError,
