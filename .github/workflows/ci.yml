@@ -21,6 +21,8 @@ jobs:
       - run: cargo test --all-features
       - run: cargo test --no-default-features
       - run: cargo doc --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
       - run: cargo package
 
   portable:

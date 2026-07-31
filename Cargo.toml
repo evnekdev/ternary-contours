@@ -3,7 +3,7 @@ name = "ternary-contours"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.89"
-description = "Backend-independent isolines for regular ternary scalar grids"
+description = "Backend-independent contours and linear filled bands for regular ternary scalar grids"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evnekdev/ternary-contours"
 homepage = "https://github.com/evnekdev/ternary-contours"
@@ -11,12 +11,7 @@ documentation = "https://docs.rs/ternary-contours"
 readme = "README.md"
 keywords = ["ternary", "contours", "interpolation", "scientific", "numerical"]
 categories = ["science", "mathematics"]
-publish = false
-exclude = [
-    ".github/**",
-    "*.zip",
-    "target/**",
-]
+exclude = [`n    ".github/**",`n    "*.zip",`n    "target/**",`n    ".codex/**",`n    "kb-audit-temp/**",`n    "proptest-regressions/**",`n    "temp/**",`n    "tmp/**",`n]
 
 [features]
 default = []

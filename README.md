@@ -1,111 +1,143 @@
 # ternary-contours
 
-`ternary-contours` is a backend-independent numerical core for scalar data on a
-regular two-dimensional ternary composition grid. It owns line-contour extraction and piecewise-linear filled-band geometry:
+ternary-contours is a backend-independent numerical crate for scalar data on a
+regular ternary composition grid. It answers questions such as where in a
+three-component composition space temperature is 900 degrees C, Gibbs energy is
+zero, or a phase fraction is 0.5.
 
+A composition is written as (a, b, c) with a + b + c = 1. Those three numbers
+live on a two-dimensional simplex, so a ternary diagram is naturally a
+triangle. This crate computes numerical isolines and filled scalar intervals in
+that triangle; it deliberately does not know about pixels, colours, fonts,
+viewports, or drawing backends.
 
-```text
-regular scalar grid
-  -> linear or cubic-alpha interpolation
-  -> local iso-level intersections
-  -> deterministic global path assembly
-  -> optional arc-length redistribution
-  -> implicit-level projection
-  -> semantic ternary contour paths
-```
+## From compositions to a scalar field
 
-It intentionally has no dependency on Plotters, rendering backends, screen
-coordinates, image dimensions, visual viewports, or legends. A rendering crate
-such as `plotters-ternary` consumes the final semantic `(a, b, c)` paths and may
-clip them only for display.
+A regular grid with subdivision count n contains the integer lattice points:
 
-Changing a renderer, output dimensions, viewport, line style, or supersampling
-cannot change the numerical contours returned by this crate.
+~~~text
+i + j + k = n
+(a, b, c) = (i/n, j/n, k/n)
+~~~
 
-## Regular grid
+RegularTernaryGrid yields compositions lazily in the canonical order expected
+by RegularTernaryScalarField. Evaluate a finite scalar property at each grid
+vertex, then construct a field from those values. The scalar can be
+temperature, activity, concentration, Gibbs energy, phase fraction, or any
+other property defined on a three-component mixture.
 
-For subdivision count `n`, samples correspond to integer triples `i + j + k = n`
-and compositions `[i/n, j/n, k/n]`. Values use row-major `(i, j)` ordering: `i`
-increases from zero through `n`; within each row, `j` increases from zero
-through `n-i`, with `k = n-i-j`.
+## Extracting isolines
 
-## Grid-to-field workflow
+An isoline is the set of compositions satisfying f(a, b, c) = level. The crate
+inspects every elementary grid triangle locally, finds its intersections with
+the requested level, and joins those local pieces into deterministic open or
+closed ContourPath values. Output remains in semantic A/B/C coordinates, ready
+for a renderer or a scientific calculation.
 
-Use RegularTernaryGrid when evaluating a scalar function at every regular
-composition vertex. Its lazy composition iterator uses exactly the order
-expected by RegularTernaryScalarField.
+| Need | Method |
+| --- | --- |
+| Robust baseline or exactly affine data | Linear contours |
+| Smoother edge behaviour on a regular grid | Cubic-alpha contours |
+| Coloured scalar intervals | Linear contour bands |
+| Charting, labels, colours, or clipping | plotters-ternary |
 
-    use ternary_contours::{RegularTernaryGrid, RegularTernaryScalarField};
+### Linear
 
-    let grid = RegularTernaryGrid::new(12)?;
-    let values: Vec<f64> = grid
-        .compositions()
-        .map(|[a, b, c]| 2.0 * a - 3.0 * b + 5.0 * c)
-        .collect();
-    let field = RegularTernaryScalarField::new(grid.subdivisions(), values)?;
+ContourInterpolation::Linear is the default baseline. The field is
+piecewise-affine inside each elementary triangle, so contours are straight
+segments there and exact for linearly interpolated vertex values. Choose it
+when predictable topology and a direct interpretation of samples matter most.
 
-The workflow is:
+### Cubic-alpha
 
-    grid compositions
-        -> user evaluates scalar values
-        -> RegularTernaryScalarField
-        -> contour extraction
+The optional cubic-alpha feature constructs directed one-dimensional spline
+intervals along the regular-grid line families and extends them through each
+triangle. Muggianu and Kohler policies control that interior binary
+continuation; both reproduce the source interval exactly on its binary edge.
+Adaptive topology extraction handles curved level sets, and optional
+regularization redistributes points while projecting them back to the requested
+level.
 
-RegularTernaryScalarField::from_fn is an equivalent convenience constructor
-when scalar evaluation cannot fail. For fallible evaluation,
-RegularTernaryScalarField::try_from_fn accepts any callback error type and
-reports the original error together with the canonical GridVertexId and
-composition.
+Cubic-alpha is smoother along grid edges, but the global field is C0 rather
+than C1 across elementary-triangle boundaries. Choose it when the
+edge-derived model fits the sampled property; it does not make every coarse
+data set more accurate.
 
-## Alpha convention
+## Filled contour bands
 
-For a directed interval, `t = 0` is the first endpoint and `t = 1` the second:
+ContourBandSet turns ordered scalar breaks into regions between those values.
+For l0 < l1 < ... < lm, scalar ownership is exact and half-open:
 
-```text
-y(t) = y0*(1-t) + y1*t + (1-t)*t*(alpha0 + alpha1*t)
-```
+- lower extreme: f < l0;
+- intermediate band: li <= f < li+1;
+- upper extreme: f >= lm.
 
-Thus `alpha1` multiplies `t`. Reversal is
-`(alpha0, alpha1) -> (alpha0 + alpha1, -alpha1)`.
+Adjacent polygons may share a zero-area threshold boundary, but their
+positive-area interiors do not overlap. Bands can have disconnected regions and
+holes. The current band implementation is linear only; requesting cubic-alpha
+bands returns a typed unsupported-mode error.
 
-## Interior policies
+## A complete numerical workflow
 
-Every binary-pair term retains the raw `xi*xj` prefactor. `Muggianu` uses
-`t = xj + xk/2`; `Kohler` uses `t = xj/(xi+xj)` and returns zero at the
-opposite vertex without evaluating `0/0`. `RawBarycentric` is an experimental,
-canonical-direction comparison policy rather than conventional Muggianu.
+~~~rust
+use ternary_contours::{
+    ContourBandOptions, ContourBandSet, ContourOptions, ContourSet,
+    RegularTernaryScalarField,
+};
 
-## Features and exclusions
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let field = RegularTernaryScalarField::from_fn(12, |[a, b, c]| {
+        2.0 * a - 3.0 * b + 5.0 * c
+    })?;
 
-`cubic-alpha` enables `spline1d`-derived shared-edge interval construction.
-Piecewise-linear contours are always available. The crate remains
-`publish = false` while extraction compatibility is reviewed.
+    let contours = ContourSet::compute(&field, &[0.0, 1.0], ContourOptions::linear())?;
+    let bands = ContourBandSet::compute(
+        &field,
+        &[-1.0, 0.0, 1.0],
+        ContourBandOptions::linear(),
+    )?;
 
-Irregular triangulations, the proposed iterative irregular-edge alpha method,
-Kuhn simplices, arbitrary-dimensional grids, cubic-alpha filled bands,
-isosurfaces, manifold extraction, viewport clipping, and rendering are
-intentionally out of scope.
+    if let Some(path) = contours.levels[0].paths.first() {
+        println!("{:?}", path.points[0].as_array());
+    }
+    println!("{} scalar bands", bands.bands.len());
+    Ok(())
+}
+~~~
 
-Editable numerical design notes live under [`docs/knowledge-base`](docs/knowledge-base/README.md).
-The committed ZIP files are archival convenience copies and are excluded from
-Cargo packages.
+For fallible field evaluation, RegularTernaryScalarField::try_from_fn preserves
+the callback error together with the canonical vertex id and composition that
+failed.
 
-## License
+## Numerical core versus rendering
 
-Licensed under either the [Apache License, Version 2.0](LICENSE-APACHE) or the
-[MIT license](LICENSE-MIT), at your option.
+This crate owns grids, scalar fields, interpolation, contour paths, band
+regions, holes, and diagnostics. It does not own colours, screen coordinates,
+viewport clipping, labels, legends, or image backends. Changing a renderer,
+output size, line style, or supersampling setting therefore cannot change the
+numerical contours returned by this crate.
 
-## Linear filled bands
+Use [plotters-ternary](https://crates.io/crates/plotters-ternary) when those
+paths and regions should become PNG or SVG ternary diagrams.
 
-ContourBandSet computes exact piecewise-linear triangle fragments and
-deterministic semantic ternary regions. Breaks must be finite and strictly
-increasing. Scalar ownership is f < l0, li <= f < li+1, and f >= lm; adjacent
-closed polygons may share only their zero-area threshold boundary. Rings have
-implicit closure; exteriors are counter-clockwise and holes clockwise in the
-semantic (a,b) plane. The core also retains non-overlapping simple fragments so
-renderers can leave holes transparent without background-colour compositing.
+## Features
 
-Filled bands support linear interpolation only. Cubic-alpha filled bands return
-a typed unsupported-mode error. The core owns region geometry only: colours,
-opacity, viewport clipping, scalar-map micro-triangulation, and Plotters
-drawing belong to a rendering crate.
+- Default: regular-grid fields, linear contours, and linear filled bands.
+- cubic-alpha: edge-derived cubic-alpha contour construction, adaptive topology,
+  and optional regularization. It enables the optional spline1d dependency.
+
+## Limits
+
+- Regular two-dimensional ternary grids only.
+- No irregular or Delaunay triangulation.
+- No cubic-alpha filled bands.
+- No rendering, pixels, chart clipping, or labels.
+- No C1 global surface guarantee for cubic-alpha fields.
+
+Detailed formulas and validation material live in the
+[knowledge base](docs/knowledge-base/README.md) and the
+[filled-band note](docs/filled-contours.md).
+
+Contributions are welcome through the
+[project repository](https://github.com/evnekdev/ternary-contours). The crate
+is licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
