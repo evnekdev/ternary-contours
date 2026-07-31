@@ -11,7 +11,16 @@ documentation = "https://docs.rs/ternary-contours"
 readme = "README.md"
 keywords = ["ternary", "contours", "interpolation", "scientific", "numerical"]
 categories = ["science", "mathematics"]
-exclude = [`n    ".github/**",`n    "*.zip",`n    "target/**",`n    ".codex/**",`n    "kb-audit-temp/**",`n    "proptest-regressions/**",`n    "temp/**",`n    "tmp/**",`n]
+exclude = [
+    ".github/**",
+    "*.zip",
+    "target/**",
+    ".codex/**",
+    "kb-audit-temp/**",
+    "proptest-regressions/**",
+    "temp/**",
+    "tmp/**",
+]
 
 [features]
 default = []
