@@ -549,4 +549,46 @@ mod tests {
             ))
         ));
     }
+
+    /// Manual timing smoke test; run with `--features cubic-alpha -- --ignored --nocapture`.
+    #[cfg(feature = "cubic-alpha")]
+    #[test]
+    #[ignore = "manual timing comparison, not a correctness test"]
+    fn benchmark_prepared_linear_and_cubic_evaluation() {
+        let field = RegularTernaryScalarField::from_fn(96, |[a, b, c]| {
+            a.powi(3) - 0.4 * b.powi(2) + 0.8 * c + a * b
+        })
+        .unwrap();
+        let linear = InterpolatedTernaryField::new(&field, FieldInterpolation::Linear).unwrap();
+        let cubic = InterpolatedTernaryField::new(
+            &field,
+            FieldInterpolation::CubicAlpha(CubicAlphaBuildOptions::default()),
+        )
+        .unwrap();
+        let points = (0..20_000)
+            .map(|index| {
+                let a = (index as f64 + 0.23) / 20_001.0;
+                let b = (1.0 - a) * (((index * 37) % 20_000) as f64 + 0.61) / 20_000.0;
+                [a, b, 1.0 - a - b]
+            })
+            .collect::<Vec<_>>();
+
+        let start = std::time::Instant::now();
+        let linear_sum = linear
+            .values(points.iter().copied())
+            .sum::<Result<f64, _>>()
+            .unwrap();
+        let linear_elapsed = start.elapsed();
+        let start = std::time::Instant::now();
+        let cubic_sum = cubic
+            .values(points.iter().copied())
+            .sum::<Result<f64, _>>()
+            .unwrap();
+        let cubic_elapsed = start.elapsed();
+        assert!(linear_sum.is_finite() && cubic_sum.is_finite());
+        eprintln!(
+            "n=96, points={}: prepared linear={linear_elapsed:?}, prepared cubic={cubic_elapsed:?}",
+            points.len(),
+        );
+    }
 }
