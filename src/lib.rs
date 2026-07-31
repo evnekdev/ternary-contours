@@ -61,6 +61,6 @@ pub use contour::{
     AdaptiveContourOptions, ContourError, ContourInterpolation, ContourLevel, ContourOptions,
     ContourPath, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
 };
-pub use error::FieldError;
+pub use error::{FieldError, GridEvaluationError};
 pub use grid::{GridVertexId, LatticeCoordinate, RegularTernaryGrid, RegularTernaryScalarField};
 pub use interpolation::{BinaryExtrapolation, CubicAlphaMethod, CubicBoundaryPolicy};
