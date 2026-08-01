@@ -28,7 +28,15 @@
 //! converged prepared field. Irregular filled bands remain intentionally excluded.
 //! The maintained numerical validation method and its limits are recorded in
 //! [`docs/numerical-validation.md`](../docs/numerical-validation.md).
-//! [`metrics`] adds deterministic shared gradient, local quadratic sampled-field,
+//! [`PreparedStablePhaseEnsemble`] resamples heterogeneous regular and optional
+//! irregular height/secondary sources onto one virtual regular umbrella grid.
+//! It caches exact affine upper-envelope phase polygons, then produces
+//! phase-labelled height or secondary contours with canonical univariant and
+//! invariant junctions. Optional verification and global refinement estimate
+//! source-to-umbrella error; results are exact for the final piecewise-linear
+//! umbrella representation, not certified for the original source interpolants.
+//!
+//! [metrics] adds deterministic shared gradient, local quadratic sampled-field,
 //! derived-evaluator, edge-jump, and final-contour analysis. Delaunay geometry
 //! quality remains specific to [`IrregularTernaryMesh`] behind `irregular-delaunay`;
 //! the corrected capability split is documented in
@@ -44,6 +52,7 @@ pub mod interpolation;
 pub mod irregular;
 pub mod metrics;
 mod simplex;
+pub mod stable;
 
 /// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
 ///
@@ -125,6 +134,13 @@ pub use metrics::{
 #[cfg(feature = "irregular-cubic-alpha")]
 pub use metrics::{
     IrregularAlphaEdgeMetrics, IrregularAlphaResponseMetrics, IrregularCubicEdgeContinuityMetrics,
+};
+pub use stable::{
+    PreparedStablePhaseEnsemble, StableContourDiagnostics, StableContourError,
+    StableContourJunction, StableContourJunctionKind, StableContourLevel, StableContourPath,
+    StableContourQuantity, StableContourSet, StableJunctionId, StablePhaseId, StablePhaseSource,
+    StableScalarSource, StableSourceEvaluationError, StableUmbrellaOptions,
+    StableUmbrellaVerification, StableVerificationPassDiagnostics,
 };
 
 #[cfg(feature = "irregular-delaunay")]

@@ -1,0 +1,503 @@
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::{TernaryCoordinate, simplex::logical_from_composition};
+
+use super::{
+    StableContourDiagnostics, StableContourError, StableContourJunction, StableContourJunctionKind,
+    StableContourPath, StableContourQuantity, StableJunctionId, StablePhaseId,
+    segments::{EndpointSource, LocalEndpoint, LocalStableSegment, lex_cmp, points_close},
+};
+
+#[derive(Clone)]
+struct JunctionCandidate {
+    point: TernaryCoordinate,
+    phases: Vec<StablePhaseId>,
+    kind: StableContourJunctionKind,
+}
+
+#[derive(Clone, Copy)]
+struct WorkEndpoint {
+    point: TernaryCoordinate,
+    junction: Option<StableJunctionId>,
+    break_path: bool,
+}
+
+#[derive(Clone, Copy)]
+struct WorkSegment {
+    triangle: usize,
+    start: WorkEndpoint,
+    end: WorkEndpoint,
+}
+
+#[derive(Clone, Copy)]
+struct Node {
+    point: TernaryCoordinate,
+    junction: Option<StableJunctionId>,
+    break_path: bool,
+}
+
+pub(crate) fn assemble_level(
+    segments: Vec<LocalStableSegment>,
+    quantity: StableContourQuantity,
+    level: f64,
+    tolerance: f64,
+    parameter_tolerance: f64,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<(Vec<StableContourPath>, Vec<StableContourJunction>), StableContourError> {
+    let junctions = build_junctions(&segments, quantity, tolerance);
+    let mut by_phase = BTreeMap::<StablePhaseId, Vec<WorkSegment>>::new();
+    for segment in segments {
+        let start = work_endpoint(&segment.start, &junctions, tolerance);
+        let end = work_endpoint(&segment.end, &junctions, tolerance);
+        if !points_close(start.point, end.point, tolerance) {
+            by_phase
+                .entry(segment.phase)
+                .or_default()
+                .push(WorkSegment {
+                    triangle: segment.triangle,
+                    start,
+                    end,
+                });
+        }
+    }
+
+    let mut paths = Vec::new();
+    for (phase, phase_segments) in by_phase {
+        paths.extend(assemble_phase(
+            phase,
+            phase_segments,
+            level,
+            tolerance,
+            parameter_tolerance,
+            diagnostics,
+        )?);
+    }
+    paths.sort_by(|left, right| {
+        left.phase
+            .cmp(&right.phase)
+            .then_with(|| lex_cmp(left.points[0], right.points[0]))
+            .then_with(|| left.points.len().cmp(&right.points.len()))
+    });
+    diagnostics.phase_labelled_paths += paths.len();
+    diagnostics.closed_paths += paths.iter().filter(|path| path.closed).count();
+    diagnostics.open_paths += paths.iter().filter(|path| !path.closed).count();
+    for junction in &junctions {
+        match junction.kind {
+            StableContourJunctionKind::Univariant => diagnostics.univariant_junctions += 1,
+            StableContourJunctionKind::Invariant => diagnostics.invariant_junctions += 1,
+            StableContourJunctionKind::StableBoundaryContact => {
+                diagnostics.stable_boundary_contacts += 1;
+            }
+        }
+    }
+    Ok((paths, junctions))
+}
+
+fn build_junctions(
+    segments: &[LocalStableSegment],
+    quantity: StableContourQuantity,
+    tolerance: f64,
+) -> Vec<StableContourJunction> {
+    let mut candidates: Vec<JunctionCandidate> = Vec::new();
+    for endpoint in segments
+        .iter()
+        .flat_map(|segment| [&segment.start, &segment.end])
+        .filter(|endpoint| endpoint.junction_kind.is_some())
+    {
+        if let Some(existing) = candidates
+            .iter_mut()
+            .find(|candidate| points_close(candidate.point, endpoint.point, tolerance))
+        {
+            if lex_cmp(endpoint.point, existing.point).is_lt() {
+                existing.point = endpoint.point;
+            }
+            existing.phases.extend(endpoint.tied_phases.iter().copied());
+            existing.phases.sort_unstable();
+            existing.phases.dedup();
+            existing.kind = junction_kind(quantity, existing.phases.len());
+        } else {
+            candidates.push(JunctionCandidate {
+                point: endpoint.point,
+                phases: endpoint.tied_phases.clone(),
+                kind: endpoint.junction_kind.unwrap(),
+            });
+        }
+    }
+    candidates.sort_by(|left, right| {
+        lex_cmp(left.point, right.point).then_with(|| left.phases.cmp(&right.phases))
+    });
+    candidates
+        .into_iter()
+        .enumerate()
+        .map(|(index, candidate)| StableContourJunction {
+            id: StableJunctionId(index),
+            point: candidate.point,
+            phases: candidate.phases,
+            kind: candidate.kind,
+        })
+        .collect()
+}
+
+fn junction_kind(
+    quantity: StableContourQuantity,
+    tied_phase_count: usize,
+) -> StableContourJunctionKind {
+    match quantity {
+        StableContourQuantity::Height if tied_phase_count == 2 => {
+            StableContourJunctionKind::Univariant
+        }
+        StableContourQuantity::Height => StableContourJunctionKind::Invariant,
+        StableContourQuantity::Secondary => StableContourJunctionKind::StableBoundaryContact,
+    }
+}
+
+fn work_endpoint(
+    endpoint: &LocalEndpoint,
+    junctions: &[StableContourJunction],
+    tolerance: f64,
+) -> WorkEndpoint {
+    let junction = endpoint.junction_kind.and_then(|_| {
+        junctions
+            .iter()
+            .find(|junction| {
+                points_close(junction.point, endpoint.point, tolerance)
+                    && endpoint
+                        .tied_phases
+                        .iter()
+                        .all(|phase| junction.phases.contains(phase))
+            })
+            .map(|junction| junction.id)
+    });
+    let point = junction
+        .map(|id| junctions[id.0].point)
+        .unwrap_or(endpoint.point);
+    let source_break = match endpoint.source {
+        EndpointSource::StableBoundary | EndpointSource::Invariant => true,
+        EndpointSource::UmbrellaEdge { edge } => {
+            let _canonical_edge = edge;
+            false
+        }
+        EndpointSource::Interior => false,
+    };
+    WorkEndpoint {
+        point,
+        junction,
+        break_path: junction.is_some() || source_break,
+    }
+}
+
+fn assemble_phase(
+    phase: StablePhaseId,
+    segments: Vec<WorkSegment>,
+    level: f64,
+    tolerance: f64,
+    parameter_tolerance: f64,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<Vec<StableContourPath>, StableContourError> {
+    let mut nodes = Vec::<Node>::new();
+    let mut buckets = BTreeMap::<[i64; 3], Vec<usize>>::new();
+    let mut edges = Vec::<(usize, usize, usize)>::new();
+    let mut unique_edges = BTreeSet::new();
+    let mut directed_edges = BTreeSet::new();
+    for segment in segments {
+        let directed_key = (
+            bucket_key(segment.start.point, tolerance),
+            bucket_key(segment.end.point, tolerance),
+        );
+        if !directed_edges.insert(directed_key) {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::DirectedTraversalCycle {
+                level,
+                phase,
+                triangle: segment.triangle,
+            });
+        }
+        if directed_edges.contains(&(directed_key.1, directed_key.0)) {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::NonForwardPathAssembly {
+                level,
+                phase,
+                point: segment.start.point,
+            });
+        }
+        let geometric_key = canonical_edge_key(segment.start.point, segment.end.point, tolerance);
+        if !unique_edges.insert(geometric_key) {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::DirectedTraversalCycle {
+                level,
+                phase,
+                triangle: segment.triangle,
+            });
+        }
+        let start = node_for(&mut nodes, &mut buckets, segment.start, tolerance);
+        let end = node_for(&mut nodes, &mut buckets, segment.end, tolerance);
+        if start != end {
+            edges.push((start, end, segment.triangle));
+        }
+    }
+    let mut adjacency = vec![Vec::<(usize, usize)>::new(); nodes.len()];
+    for (edge_index, &(left, right, _)) in edges.iter().enumerate() {
+        adjacency[left].push((right, edge_index));
+        adjacency[right].push((left, edge_index));
+    }
+    if let Some(degree) = adjacency.iter().map(Vec::len).find(|degree| *degree > 2) {
+        diagnostics.path_assembly_ambiguities += 1;
+        return Err(StableContourError::AmbiguousPathAssembly {
+            level,
+            phase,
+            degree,
+        });
+    }
+
+    let mut used = vec![false; edges.len()];
+    let mut paths = Vec::new();
+    let mut starts: Vec<_> = adjacency
+        .iter()
+        .enumerate()
+        .filter(|(_, adjacent)| adjacent.len() == 1)
+        .map(|(index, _)| index)
+        .collect();
+    starts.sort_by(|&left, &right| lex_cmp(nodes[left].point, nodes[right].point));
+    for start in starts {
+        if adjacency[start].iter().all(|(_, edge)| used[*edge]) {
+            continue;
+        }
+        paths.push(walk(
+            phase,
+            start,
+            &nodes,
+            &edges,
+            &adjacency,
+            &mut used,
+            false,
+            level,
+            parameter_tolerance,
+            diagnostics,
+        )?);
+    }
+    while let Some(edge_index) = used.iter().position(|used| !*used) {
+        let (left, right, _) = edges[edge_index];
+        let start = if lex_cmp(nodes[left].point, nodes[right].point).is_le() {
+            left
+        } else {
+            right
+        };
+        paths.push(walk(
+            phase,
+            start,
+            &nodes,
+            &edges,
+            &adjacency,
+            &mut used,
+            true,
+            level,
+            parameter_tolerance,
+            diagnostics,
+        )?);
+    }
+    Ok(paths)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk(
+    phase: StablePhaseId,
+    start: usize,
+    nodes: &[Node],
+    edges: &[(usize, usize, usize)],
+    adjacency: &[Vec<(usize, usize)>],
+    used: &mut [bool],
+    expect_closed: bool,
+    level: f64,
+    parameter_tolerance: f64,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<StableContourPath, StableContourError> {
+    let mut node_path = vec![start];
+    let mut current = start;
+    let mut previous: Option<usize> = None;
+    let mut directed_states = BTreeSet::new();
+    loop {
+        let next = adjacency[current]
+            .iter()
+            .filter(|(_, edge)| !used[*edge])
+            .min_by(|(left, _), (right, _)| lex_cmp(nodes[*left].point, nodes[*right].point))
+            .copied();
+        let Some((node, edge)) = next else { break };
+        if let Some(previous_node) = previous
+            && forward_tangent_alignment(
+                nodes[previous_node].point,
+                nodes[current].point,
+                nodes[node].point,
+            ) <= parameter_tolerance
+        {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::NonForwardPathAssembly {
+                level,
+                phase,
+                point: nodes[current].point,
+            });
+        }
+        if !directed_states.insert((current, node)) {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::DirectedTraversalCycle {
+                level,
+                phase,
+                triangle: edges[edge].2,
+            });
+        }
+        used[edge] = true;
+        previous = Some(current);
+        current = node;
+        if current == start {
+            break;
+        }
+        node_path.push(current);
+        if node_path.len() > used.len() + 1 {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::DirectedTraversalCycle {
+                level,
+                phase,
+                triangle: edges[edge].2,
+            });
+        }
+    }
+    let closed = current == start;
+    if expect_closed != closed || (closed && node_path.len() < 3) || node_path.len() < 2 {
+        diagnostics.path_assembly_ambiguities += 1;
+        return Err(StableContourError::AmbiguousPathAssembly {
+            level,
+            phase,
+            degree: adjacency[current].len(),
+        });
+    }
+    if !closed && lex_cmp(nodes[*node_path.last().unwrap()].point, nodes[start].point).is_lt() {
+        node_path.reverse();
+    }
+    if closed {
+        let minimum = (0..node_path.len())
+            .min_by(|&left, &right| {
+                lex_cmp(nodes[node_path[left]].point, nodes[node_path[right]].point)
+            })
+            .unwrap();
+        node_path.rotate_left(minimum);
+        if node_path.len() > 2
+            && lex_cmp(
+                nodes[node_path[node_path.len() - 1]].point,
+                nodes[node_path[1]].point,
+            )
+            .is_lt()
+        {
+            node_path[1..].reverse();
+        }
+    }
+    let points = node_path
+        .iter()
+        .map(|&node| nodes[node].point)
+        .collect::<Vec<_>>();
+    let start_junction = (!closed).then(|| nodes[node_path[0]].junction).flatten();
+    let end_junction = (!closed)
+        .then(|| nodes[*node_path.last().unwrap()].junction)
+        .flatten();
+    Ok(StableContourPath {
+        phase,
+        points,
+        closed,
+        start_junction,
+        end_junction,
+    })
+}
+
+fn forward_tangent_alignment(
+    previous: TernaryCoordinate,
+    current: TernaryCoordinate,
+    next: TernaryCoordinate,
+) -> f64 {
+    let previous = logical_from_composition(previous.as_array());
+    let current = logical_from_composition(current.as_array());
+    let next = logical_from_composition(next.as_array());
+    let incoming = [current[0] - previous[0], current[1] - previous[1]];
+    let outgoing = [next[0] - current[0], next[1] - current[1]];
+    let incoming_norm = incoming[0].hypot(incoming[1]);
+    let outgoing_norm = outgoing[0].hypot(outgoing[1]);
+    if incoming_norm == 0.0 || outgoing_norm == 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    (incoming[0] * outgoing[0] + incoming[1] * outgoing[1]) / (incoming_norm * outgoing_norm)
+}
+
+fn node_for(
+    nodes: &mut Vec<Node>,
+    buckets: &mut BTreeMap<[i64; 3], Vec<usize>>,
+    endpoint: WorkEndpoint,
+    tolerance: f64,
+) -> usize {
+    if endpoint.break_path {
+        let index = nodes.len();
+        nodes.push(Node {
+            point: endpoint.point,
+            junction: endpoint.junction,
+            break_path: true,
+        });
+        return index;
+    }
+    let key = bucket_key(endpoint.point, tolerance);
+    let mut matched = None;
+    for da in -1_i64..=1 {
+        for db in -1_i64..=1 {
+            for dc in -1_i64..=1 {
+                let neighbour = [
+                    key[0].saturating_add(da),
+                    key[1].saturating_add(db),
+                    key[2].saturating_add(dc),
+                ];
+                if let Some(indices) = buckets.get(&neighbour) {
+                    for &index in indices {
+                        if !nodes[index].break_path
+                            && points_close(nodes[index].point, endpoint.point, tolerance)
+                        {
+                            matched =
+                                Some(matched.map_or(index, |current: usize| current.min(index)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some(index) = matched {
+        return index;
+    }
+    let index = nodes.len();
+    nodes.push(Node {
+        point: endpoint.point,
+        junction: None,
+        break_path: false,
+    });
+    buckets.entry(key).or_default().push(index);
+    index
+}
+
+fn canonical_edge_key(
+    start: TernaryCoordinate,
+    end: TernaryCoordinate,
+    tolerance: f64,
+) -> ([i64; 3], [i64; 3]) {
+    let start = bucket_key(start, tolerance);
+    let end = bucket_key(end, tolerance);
+    if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    }
+}
+
+fn bucket_key(point: TernaryCoordinate, tolerance: f64) -> [i64; 3] {
+    point.as_array().map(|component| {
+        let scaled = (component / tolerance).round();
+        if scaled <= i64::MIN as f64 {
+            i64::MIN
+        } else if scaled >= i64::MAX as f64 {
+            i64::MAX
+        } else {
+            scaled as i64
+        }
+    })
+}
