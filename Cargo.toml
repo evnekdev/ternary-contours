@@ -38,3 +38,7 @@ required-features = ["irregular-delaunay"]
 [[example]]
 name = "interpolate_irregular_cubic_field"
 required-features = ["irregular-cubic-alpha"]
+
+[[example]]
+name = "irregular_contours"
+required-features = ["irregular-cubic-alpha"]

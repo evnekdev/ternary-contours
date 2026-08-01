@@ -22,9 +22,17 @@ a proposal for a different smooth interpolation family. Its dependency-graph
 and optional local-propagation optimizations are deferred; this implementation
 uses only deterministic global Jacobi sweeps.
 
-Not implemented: irregular isolines, irregular bands (including cubic-alpha
-filled bands), virtual-stencil persistence APIs, or parallel/local solver
-execution.
+Irregular isolines are now implemented. Linear fields use deterministic
+mesh-edge-owned marching triangles. Converged cubic-alpha fields use adaptive
+local barycentric microtriangles, canonical roots of each shared cubic edge
+interval, deterministic global path assembly, and optional equal-arclength
+redistribution followed by global implicit-field projection. The physical
+microtriangle threshold is measured in the canonical equilateral plane used by
+the Delaunay embedding. Projection relocates after every accepted step and
+backs out candidates outside the convex hull.
+
+Not implemented: irregular bands (including cubic-alpha filled bands), virtual-
+stencil persistence APIs, or parallel/local solver execution.
 
 # Supplement to the ternary cubic contour knowledge base
 
