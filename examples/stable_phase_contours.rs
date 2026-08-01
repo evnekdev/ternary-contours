@@ -1,8 +1,8 @@
 use ternary_contours::{
     FieldInterpolation, IrregularFieldInterpolation, IrregularTernaryMesh,
     IrregularTernaryScalarField, PreparedStablePhaseEnsemble, RegularTernaryScalarField,
-    StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource,
-    StableUmbrellaOptions, StableUmbrellaVerification,
+    StableContourQuantity, StableGridOptions, StableGridVerification, StablePhaseId,
+    StablePhaseSource, StableScalarSource,
 };
 
 fn regular(field: &RegularTernaryScalarField) -> StableScalarSource<'_> {
@@ -70,9 +70,9 @@ fn report(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let options = StableUmbrellaOptions {
+    let options = StableGridOptions {
         subdivisions: 12,
-        ..StableUmbrellaOptions::default()
+        ..StableGridOptions::default()
     };
     let height_a = RegularTernaryScalarField::from_fn(12, |[a, _, _]| a)?;
     let height_b = RegularTernaryScalarField::from_fn(12, |[_, b, _]| b)?;
@@ -126,9 +126,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             phase(40, &centre),
         ],
         StableContourQuantity::Height,
-        StableUmbrellaOptions {
+        StableGridOptions {
             subdivisions: 1,
-            ..StableUmbrellaOptions::default()
+            ..StableGridOptions::default()
         },
     )?;
     report("interior narrow stable phase", &narrow, &[1.0])?;
@@ -157,16 +157,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let refined = PreparedStablePhaseEnsemble::new(
         [phase(1, &nonlinear)],
         StableContourQuantity::Height,
-        StableUmbrellaOptions {
+        StableGridOptions {
             subdivisions: 1,
-            verification: StableUmbrellaVerification {
+            verification: StableGridVerification {
                 enabled: true,
                 maximum_refinement_passes: 3,
                 maximum_subdivisions: 8,
                 height_error_tolerance: 1.0e-12,
-                ..StableUmbrellaVerification::default()
+                ..StableGridVerification::default()
             },
-            ..StableUmbrellaOptions::default()
+            ..StableGridOptions::default()
         },
     )?;
     println!(

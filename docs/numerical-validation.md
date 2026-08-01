@@ -63,7 +63,7 @@ queries.
 | Irregular topology stress | high-aspect-ratio cell | Every triangle-centroid value and gradient remains finite and retains affine accuracy with looser conditioning-aware envelopes. |
 | Irregular cubic-alpha | PCHIP/Kohler prepared field and adaptive contour | Vertex reproduction, finite samples, preparation diagnostics, contour geometry, and adaptive accounting are deterministic. |
 | Non-finite derived result | finite extreme vertex values | Regular and irregular evaluators return `NonFiniteEvaluation`; no non-finite value or gradient is returned as a successful sample. |
-| Stable umbrella ensembles | affine height/secondary fields, mixed geometries, hidden interior phase, six-phase envelope, refinement, and forward-progress adversarial cases | Exact target and upper-envelope residual checks pass; metastable equalities are removed; location reuse and safe pruning are diagnostic; retracing, branches, cycles, and positive-length degeneracies are typed. |
+| Stable sampling-grid ensembles | affine height/secondary fields, mixed geometries, hidden interior phase, six-phase envelope, refinement, and forward-progress adversarial cases | Exact target and upper-envelope residual checks pass; metastable equalities are removed; location reuse and safe pruning are diagnostic; retracing, branches, cycles, and positive-length degeneracies are typed. |
 
 The comparison between regular and irregular fields is exact only for affine
 data. For nonlinear data the two meshes sample and interpolate different local
@@ -108,17 +108,17 @@ uses constant-sized local arithmetic, so its query cost does not scale with the
 total number of elementary triangles. Timings vary by machine, build profile,
 and compiler; they are not a benchmark claim or CI threshold.
 
-## Stable umbrella validation
+## Stable sampling-grid validation
 
 Stable tests compare one-phase height geometry against ordinary regular linear
 contours, reproduce affine phase boundaries, validate two-phase univariants and
 three/four-phase invariants, and confirm that a central stable polygon is found
-when its phase wins no umbrella-triangle vertex. A six-phase secondary contour
+when its phase wins no sampling-grid-triangle vertex. A six-phase secondary contour
 crosses the upper-envelope order `A -> D -> E -> C -> F -> B` without recursive
 pairwise repair. Dense checks evaluate every emitted point against its target
-level and every competing umbrella height.
+level and every competing sampling-grid height.
 
-Verification tests start from a coarse umbrella over a finer nonlinear source,
+Verification tests start from a coarse sampling-grid over a finer nonlinear source,
 observe decreasing centroid/midpoint residuals under deterministic global
 doubling, and require explicit `allow_unresolved` at a configured limit.
 Regular and irregular geometry groups verify point-location reuse, complete
@@ -129,9 +129,9 @@ Forward-progress regressions reject extrapolated edge roots, sort corrected
 events before emission, merge near-coincident events, cross exact shared-edge
 and multi-cell vertex hits without using backward canonical ownership, and
 return typed errors for immediate retracing, branching, and duplicate directed
-states. Output points come only from umbrella stable-polygon intersections.
+states. Output points come only from sampling-grid stable-polygon intersections.
 
-These checks validate the final affine umbrella model. Midpoint and centroid
+These checks validate the final affine sampling-grid model. Midpoint and centroid
 verification does not certify that an original nonlinear source contains no
 smaller feature between samples.
 

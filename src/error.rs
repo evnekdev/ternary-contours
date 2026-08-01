@@ -25,6 +25,17 @@ pub enum FieldError {
         index: usize,
         vertex_count: usize,
     },
+    InvalidGridEdgeIndex {
+        index: usize,
+        edge_count: usize,
+    },
+    InvalidGridTriangleIndex {
+        index: usize,
+        triangle_count: usize,
+    },
+    InvalidRegularGridTopology {
+        message: &'static str,
+    },
     InsufficientStencil {
         samples: usize,
     },
@@ -60,6 +71,22 @@ impl fmt::Display for FieldError {
                 index,
                 vertex_count,
             } => write!(f, "grid vertex index {index} is outside 0..{vertex_count}"),
+            Self::InvalidGridEdgeIndex { index, edge_count } => {
+                write!(
+                    f,
+                    "regular-grid edge index {index} is outside 0..{edge_count}"
+                )
+            }
+            Self::InvalidGridTriangleIndex {
+                index,
+                triangle_count,
+            } => write!(
+                f,
+                "regular-grid triangle index {index} is outside 0..{triangle_count}"
+            ),
+            Self::InvalidRegularGridTopology { message } => {
+                write!(f, "invalid regular-grid topology: {message}")
+            }
             Self::InsufficientStencil { samples } => write!(
                 f,
                 "cubic-alpha line requires at least three samples; received {samples}"

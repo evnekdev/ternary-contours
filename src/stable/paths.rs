@@ -173,7 +173,7 @@ fn work_endpoint(
         .unwrap_or(endpoint.point);
     let source_break = match endpoint.source {
         EndpointSource::StableBoundary | EndpointSource::Invariant => true,
-        EndpointSource::UmbrellaEdge { edge } => {
+        EndpointSource::SamplingEdge { edge } => {
             let _canonical_edge = edge;
             false
         }

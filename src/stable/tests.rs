@@ -1,16 +1,16 @@
 use super::*;
 use crate::{ContourOptions, ContourSet, FieldInterpolation, RegularTernaryScalarField};
 
-fn options(subdivisions: usize) -> StableUmbrellaOptions {
-    StableUmbrellaOptions {
+fn options(subdivisions: usize) -> StableGridOptions {
+    StableGridOptions {
         subdivisions,
         value_tolerance: 1.0e-11,
         stability_tolerance: 1.0e-10,
         geometry_tolerance: 1.0e-9,
         parameter_tolerance: 1.0e-12,
-        verification: StableUmbrellaVerification {
+        verification: StableGridVerification {
             maximum_subdivisions: subdivisions.max(1),
-            ..StableUmbrellaVerification::default()
+            ..StableGridVerification::default()
         },
     }
 }
@@ -340,11 +340,11 @@ fn shared_regular_geometry_reuses_locations_and_prunes_low_phases() {
     assert_eq!(diagnostics.geometry_group_count, 1);
     assert_eq!(
         diagnostics.source_point_location_count,
-        diagnostics.umbrella_vertex_count
+        diagnostics.sampling_vertex_count
     );
     assert_eq!(
         diagnostics.source_scalar_evaluation_count,
-        diagnostics.umbrella_vertex_count * diagnostics.source_scalar_layer_count
+        diagnostics.sampling_vertex_count * diagnostics.source_scalar_layer_count
     );
     assert_eq!(
         diagnostics.reused_source_locations,
@@ -357,14 +357,14 @@ fn shared_regular_geometry_reuses_locations_and_prunes_low_phases() {
 fn verification_refines_globally_and_can_report_insufficient_resolution() {
     let nonlinear = field(8, |[a, b, c]| a * a + 0.5 * b * b - c * c);
     let mut refined_options = options(1);
-    refined_options.verification = StableUmbrellaVerification {
+    refined_options.verification = StableGridVerification {
         enabled: true,
         maximum_refinement_passes: 3,
         maximum_subdivisions: 8,
         height_error_tolerance: 1.0e-12,
         secondary_error_tolerance: 1.0e-12,
         ownership_tolerance: 1.0e-9,
-        ..StableUmbrellaVerification::default()
+        ..StableGridVerification::default()
     };
     let refined = PreparedStablePhaseEnsemble::new(
         [phase(1, &nonlinear)],
@@ -374,15 +374,15 @@ fn verification_refines_globally_and_can_report_insufficient_resolution() {
     .unwrap();
     assert!(refined.diagnostics().refinement_passes > 0);
     assert_eq!(refined.diagnostics().final_subdivisions, 8);
-    assert_eq!(refined.diagnostics().unresolved_umbrella_triangles, 0);
+    assert_eq!(refined.diagnostics().unresolved_sampling_triangles, 0);
 
     let mut insufficient_options = options(1);
-    insufficient_options.verification = StableUmbrellaVerification {
+    insufficient_options.verification = StableGridVerification {
         enabled: true,
         maximum_refinement_passes: 0,
         maximum_subdivisions: 1,
         height_error_tolerance: 1.0e-14,
-        ..StableUmbrellaVerification::default()
+        ..StableGridVerification::default()
     };
     assert!(matches!(
         PreparedStablePhaseEnsemble::new(
@@ -390,7 +390,7 @@ fn verification_refines_globally_and_can_report_insufficient_resolution() {
             StableContourQuantity::Height,
             insufficient_options
         ),
-        Err(StableContourError::UmbrellaResolutionInsufficient { .. })
+        Err(StableContourError::SamplingResolutionInsufficient { .. })
     ));
 }
 
@@ -441,20 +441,20 @@ fn unavailable_regular_cubic_source_has_a_stable_context_error() {
 
 #[cfg(feature = "cubic-alpha")]
 #[test]
-fn regular_cubic_verification_refinement_reduces_umbrella_residual() {
+fn regular_cubic_verification_refinement_reduces_sampling_grid_residual() {
     let source = field(10, |[a, b, c]| a * a + 0.4 * b * b - 0.7 * c * c);
     let cubic = StableScalarSource::regular(
         &source,
         FieldInterpolation::CubicAlpha(crate::CubicAlphaBuildOptions::default()),
     );
     let mut refined = options(2);
-    refined.verification = StableUmbrellaVerification {
+    refined.verification = StableGridVerification {
         enabled: true,
         maximum_refinement_passes: 2,
         maximum_subdivisions: 8,
         height_error_tolerance: 0.0,
         allow_unresolved: true,
-        ..StableUmbrellaVerification::default()
+        ..StableGridVerification::default()
     };
     let prepared = PreparedStablePhaseEnsemble::new(
         [StablePhaseSource::new(StablePhaseId(1), cubic)],
@@ -512,7 +512,7 @@ fn irregular_mesh() -> crate::IrregularTernaryMesh {
 
 #[cfg(feature = "irregular-delaunay")]
 #[test]
-fn mixed_regular_irregular_sources_share_one_umbrella_without_extrapolation() {
+fn mixed_regular_irregular_sources_share_one_sampling_grid_without_extrapolation() {
     let regular_field = field(6, |[a, b, _]| a - b);
     let irregular_field =
         crate::IrregularTernaryScalarField::from_fn(irregular_mesh(), |[a, b, c]| {
@@ -555,17 +555,17 @@ fn shared_irregular_height_secondary_pair_reuses_exact_mesh_identity() {
     assert_eq!(prepared.diagnostics().geometry_group_count, 1);
     assert_eq!(
         prepared.diagnostics().source_point_location_count,
-        prepared.diagnostics().umbrella_vertex_count
+        prepared.diagnostics().sampling_vertex_count
     );
     assert_eq!(
         prepared.diagnostics().reused_source_locations,
-        prepared.diagnostics().umbrella_vertex_count
+        prepared.diagnostics().sampling_vertex_count
     );
 }
 
 #[cfg(feature = "irregular-delaunay")]
 #[test]
-fn incomplete_irregular_convex_hull_is_rejected_at_an_umbrella_vertex() {
+fn incomplete_irregular_convex_hull_is_rejected_at_an_sampling_vertex() {
     let mesh = crate::IrregularTernaryMesh::new([
         [0.8, 0.1, 0.1],
         [0.1, 0.8, 0.1],
@@ -903,18 +903,18 @@ fn unresolved_output_requires_explicit_opt_in_and_height_ignores_secondary() {
     let ignored_secondary = field(6, |[_, _, c]| c);
     let height_only = phase(1, &nonlinear).with_secondary(regular(&ignored_secondary));
     let mut unresolved = options(1);
-    unresolved.verification = StableUmbrellaVerification {
+    unresolved.verification = StableGridVerification {
         enabled: true,
         maximum_refinement_passes: 0,
         maximum_subdivisions: 1,
         height_error_tolerance: 1.0e-14,
         allow_unresolved: true,
-        ..StableUmbrellaVerification::default()
+        ..StableGridVerification::default()
     };
     let prepared =
         PreparedStablePhaseEnsemble::new([height_only], StableContourQuantity::Height, unresolved)
             .unwrap();
-    assert!(prepared.diagnostics().unresolved_umbrella_triangles > 0);
+    assert!(prepared.diagnostics().unresolved_sampling_triangles > 0);
     assert_eq!(prepared.diagnostics().source_scalar_layer_count, 1);
 }
 
@@ -980,7 +980,7 @@ fn unavailable_irregular_cubic_source_has_a_stable_context_error() {
 
 #[cfg(feature = "irregular-cubic-alpha")]
 #[test]
-fn irregular_cubic_source_is_prepared_once_and_sampled_onto_umbrella() {
+fn irregular_cubic_source_is_prepared_once_and_sampled_onto_sampling_grid() {
     let source = crate::IrregularTernaryScalarField::from_fn(irregular_mesh(), |[a, b, c]| {
         1.5 * a - 0.7 * b + 0.2 * c
     })

@@ -29,12 +29,12 @@
 //! The maintained numerical validation method and its limits are recorded in
 //! [`docs/numerical-validation.md`](../docs/numerical-validation.md).
 //! [`PreparedStablePhaseEnsemble`] resamples heterogeneous regular and optional
-//! irregular height/secondary sources onto one virtual regular umbrella grid.
+//! irregular height/secondary sources onto one virtual regular sampling grid.
 //! It caches exact affine upper-envelope phase polygons, then produces
 //! phase-labelled height or secondary contours with canonical univariant and
 //! invariant junctions. Optional verification and global refinement estimate
-//! source-to-umbrella error; results are exact for the final piecewise-linear
-//! umbrella representation, not certified for the original source interpolants.
+//! source-to-sampling-grid error; results are exact for the final piecewise-linear
+//! sampling-grid representation, not certified for the original source interpolants.
 //!
 //! [metrics] adds deterministic shared gradient, local quadratic sampled-field,
 //! derived-evaluator, edge-jump, and final-contour analysis. Delaunay geometry
@@ -111,7 +111,8 @@ pub use evaluation::{
 pub use field::{CubicBuildDiagnostics, CubicGridField};
 pub use grid::{
     GridTriangle, GridVertexId, LatticeCoordinate, LocatedTriangle, POINT_LOCATION_TOLERANCE,
-    PointBoundaryLocation, PointLocationError, RegularTernaryGrid, RegularTernaryScalarField,
+    PointBoundaryLocation, PointLocationError, RegularGridEdgeId, RegularSamplingTopology,
+    RegularTernaryGrid, RegularTernaryScalarField, TriangleEdgeRef,
 };
 pub use interpolation::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
@@ -140,9 +141,9 @@ pub use metrics::{
 pub use stable::{
     PreparedStablePhaseEnsemble, StableContourDiagnostics, StableContourError,
     StableContourJunction, StableContourJunctionKind, StableContourLevel, StableContourPath,
-    StableContourQuantity, StableContourSet, StableJunctionId, StablePhaseId, StablePhaseSource,
-    StableScalarSource, StableSourceEvaluationError, StableUmbrellaOptions,
-    StableUmbrellaVerification, StableVerificationPassDiagnostics,
+    StableContourQuantity, StableContourSet, StableGridOptions, StableGridVerification,
+    StableJunctionId, StablePhaseId, StablePhaseSource, StableScalarSource,
+    StableSourceEvaluationError, StableVerificationPassDiagnostics,
 };
 
 #[cfg(feature = "irregular-delaunay")]

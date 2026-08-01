@@ -21,6 +21,259 @@ pub struct GridTriangle {
     pub vertices: [GridVertexId; 3],
 }
 
+/// Dense canonical identifier for one undirected regular-grid edge.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct RegularGridEdgeId(pub usize);
+
+/// One triangle-local edge and its orientation relative to the canonical edge.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TriangleEdgeRef {
+    /// Dense canonical edge identifier.
+    pub edge: RegularGridEdgeId,
+    /// Whether the triangle-local endpoint order reverses the canonical order.
+    pub reversed: bool,
+}
+
+/// Dense deterministic edge and triangle adjacency for a regular ternary grid.
+///
+/// Edge identifiers enumerate the three lattice-direction families in a fixed
+/// order. Endpoint lookup uses a sorted dense table and does not depend on hash
+/// iteration order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegularSamplingTopology {
+    grid: RegularTernaryGrid,
+    edges: Vec<[GridVertexId; 2]>,
+    incident_triangles: Vec<[Option<usize>; 2]>,
+    triangle_edges: Vec<[TriangleEdgeRef; 3]>,
+    edge_lookup: Vec<([usize; 2], RegularGridEdgeId)>,
+}
+
+impl RegularSamplingTopology {
+    /// Build dense edge and adjacency tables for `grid`.
+    pub fn new(grid: RegularTernaryGrid) -> Result<Self, FieldError> {
+        let subdivisions = grid.subdivisions();
+        let edge_count = subdivisions
+            .checked_mul(
+                subdivisions
+                    .checked_add(1)
+                    .ok_or(FieldError::AllocationOverflow)?,
+            )
+            .and_then(|value| value.checked_mul(3))
+            .map(|value| value / 2)
+            .ok_or(FieldError::AllocationOverflow)?;
+        let mut edges = Vec::with_capacity(edge_count);
+        let mut push_edge =
+            |left: LatticeCoordinate, right: LatticeCoordinate| -> Result<(), FieldError> {
+                let mut vertices = [grid.vertex_id(left)?, grid.vertex_id(right)?];
+                if vertices[1] < vertices[0] {
+                    vertices.swap(0, 1);
+                }
+                edges.push(vertices);
+                Ok(())
+            };
+
+        // Constant C: A-B direction.
+        for k in 0..subdivisions {
+            for i in 0..(subdivisions - k) {
+                let j = subdivisions - k - i;
+                push_edge(
+                    LatticeCoordinate { i, j, k },
+                    LatticeCoordinate {
+                        i: i + 1,
+                        j: j - 1,
+                        k,
+                    },
+                )?;
+            }
+        }
+        // Constant A: B-C direction.
+        for i in 0..subdivisions {
+            for j in 0..(subdivisions - i) {
+                let k = subdivisions - i - j;
+                push_edge(
+                    LatticeCoordinate { i, j, k },
+                    LatticeCoordinate {
+                        i,
+                        j: j + 1,
+                        k: k - 1,
+                    },
+                )?;
+            }
+        }
+        // Constant B: C-A direction.
+        for j in 0..subdivisions {
+            for i in 0..(subdivisions - j) {
+                let k = subdivisions - i - j;
+                push_edge(
+                    LatticeCoordinate { i, j, k },
+                    LatticeCoordinate {
+                        i: i + 1,
+                        j,
+                        k: k - 1,
+                    },
+                )?;
+            }
+        }
+        if edges.len() != edge_count {
+            return Err(FieldError::InvalidRegularGridTopology {
+                message: "edge family enumeration produced the wrong count",
+            });
+        }
+
+        let mut edge_lookup = edges
+            .iter()
+            .enumerate()
+            .map(|(index, vertices)| ([vertices[0].0, vertices[1].0], RegularGridEdgeId(index)))
+            .collect::<Vec<_>>();
+        edge_lookup.sort_by_key(|entry| entry.0);
+        if edge_lookup.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(FieldError::InvalidRegularGridTopology {
+                message: "edge family enumeration produced a duplicate edge",
+            });
+        }
+
+        let triangle_count = grid.triangle_count()?;
+        let mut incident_triangles = vec![[None; 2]; edge_count];
+        let mut triangle_edges = Vec::with_capacity(triangle_count);
+        for triangle in grid.elementary_triangles()? {
+            let local_pairs = [
+                [triangle.vertices[0], triangle.vertices[1]],
+                [triangle.vertices[1], triangle.vertices[2]],
+                [triangle.vertices[2], triangle.vertices[0]],
+            ];
+            let mut local = [TriangleEdgeRef {
+                edge: RegularGridEdgeId(0),
+                reversed: false,
+            }; 3];
+            for (slot, pair) in local_pairs.into_iter().enumerate() {
+                let edge = Self::lookup_edge(&edge_lookup, pair).ok_or(
+                    FieldError::InvalidRegularGridTopology {
+                        message: "triangle edge is absent from edge enumeration",
+                    },
+                )?;
+                let canonical = edges[edge.0];
+                local[slot] = TriangleEdgeRef {
+                    edge,
+                    reversed: pair != canonical,
+                };
+                let incidents = &mut incident_triangles[edge.0];
+                if incidents[0].is_none() {
+                    incidents[0] = Some(triangle.id);
+                } else if incidents[1].is_none() {
+                    incidents[1] = Some(triangle.id);
+                } else {
+                    return Err(FieldError::InvalidRegularGridTopology {
+                        message: "regular-grid edge has more than two incident triangles",
+                    });
+                }
+            }
+            triangle_edges.push(local);
+        }
+        if incident_triangles
+            .iter()
+            .any(|incidents| incidents[0].is_none())
+        {
+            return Err(FieldError::InvalidRegularGridTopology {
+                message: "regular-grid edge has no incident triangle",
+            });
+        }
+        Ok(Self {
+            grid,
+            edges,
+            incident_triangles,
+            triangle_edges,
+            edge_lookup,
+        })
+    }
+
+    /// Return the regular grid owning this topology.
+    pub const fn grid(&self) -> RegularTernaryGrid {
+        self.grid
+    }
+
+    /// Number of dense undirected edges.
+    pub const fn edge_count(&self) -> usize {
+        self.edges.len()
+    }
+
+    /// Canonically oriented endpoint vertices for one edge.
+    pub fn edge_vertices(&self, edge: RegularGridEdgeId) -> Result<[GridVertexId; 2], FieldError> {
+        self.edges
+            .get(edge.0)
+            .copied()
+            .ok_or(FieldError::InvalidGridEdgeIndex {
+                index: edge.0,
+                edge_count: self.edges.len(),
+            })
+    }
+
+    /// Three local edge references for one canonical triangle.
+    pub fn triangle_edges(&self, triangle: usize) -> Result<[TriangleEdgeRef; 3], FieldError> {
+        self.triangle_edges
+            .get(triangle)
+            .copied()
+            .ok_or(FieldError::InvalidGridTriangleIndex {
+                index: triangle,
+                triangle_count: self.triangle_edges.len(),
+            })
+    }
+
+    /// Up to two incident canonical triangle identifiers.
+    pub fn incident_triangles(
+        &self,
+        edge: RegularGridEdgeId,
+    ) -> Result<[Option<usize>; 2], FieldError> {
+        self.incident_triangles
+            .get(edge.0)
+            .copied()
+            .ok_or(FieldError::InvalidGridEdgeIndex {
+                index: edge.0,
+                edge_count: self.edges.len(),
+            })
+    }
+
+    /// Return the triangle across `edge`, or `None` at the outer boundary.
+    pub fn opposite_triangle(
+        &self,
+        edge: RegularGridEdgeId,
+        current_triangle: usize,
+    ) -> Result<Option<usize>, FieldError> {
+        if current_triangle >= self.triangle_edges.len() {
+            return Err(FieldError::InvalidGridTriangleIndex {
+                index: current_triangle,
+                triangle_count: self.triangle_edges.len(),
+            });
+        }
+        let incidents = self.incident_triangles(edge)?;
+        match incidents {
+            [Some(left), right] if left == current_triangle => Ok(right),
+            [Some(left), Some(right)] if right == current_triangle => Ok(Some(left)),
+            _ => Err(FieldError::InvalidRegularGridTopology {
+                message: "triangle is not incident to the requested edge",
+            }),
+        }
+    }
+
+    /// Return the canonical edge joining two vertices, independent of order.
+    pub fn edge_id(&self, first: GridVertexId, second: GridVertexId) -> Option<RegularGridEdgeId> {
+        Self::lookup_edge(&self.edge_lookup, [first, second])
+    }
+
+    fn lookup_edge(
+        lookup: &[([usize; 2], RegularGridEdgeId)],
+        mut vertices: [GridVertexId; 2],
+    ) -> Option<RegularGridEdgeId> {
+        if vertices[1] < vertices[0] {
+            vertices.swap(0, 1);
+        }
+        let key = [vertices[0].0, vertices[1].0];
+        lookup
+            .binary_search_by_key(&key, |entry| entry.0)
+            .ok()
+            .map(|index| lookup[index].1)
+    }
+}
+
 /// Classification of a located point after tolerance snapping.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
@@ -843,6 +1096,63 @@ mod tests {
     }
 
     fn requires_exact_size<I: ExactSizeIterator>(_iterator: I) {}
+
+    #[test]
+    fn regular_sampling_topology_is_dense_and_round_trips() {
+        for subdivisions in 1..=8 {
+            let grid = RegularTernaryGrid::new(subdivisions).unwrap();
+            let topology = RegularSamplingTopology::new(grid).unwrap();
+            assert_eq!(
+                topology.edge_count(),
+                3 * subdivisions * (subdivisions + 1) / 2
+            );
+            let mut boundary_edges = 0;
+            for edge_index in 0..topology.edge_count() {
+                let edge = RegularGridEdgeId(edge_index);
+                let vertices = topology.edge_vertices(edge).unwrap();
+                assert!(vertices[0] < vertices[1]);
+                assert_eq!(topology.edge_id(vertices[0], vertices[1]), Some(edge));
+                assert_eq!(topology.edge_id(vertices[1], vertices[0]), Some(edge));
+                let incidents = topology.incident_triangles(edge).unwrap();
+                assert!(incidents[0].is_some());
+                if incidents[1].is_none() {
+                    boundary_edges += 1;
+                }
+            }
+            assert_eq!(boundary_edges, 3 * subdivisions);
+
+            let triangles = grid.elementary_triangles().unwrap();
+            assert_eq!(triangles.len(), subdivisions * subdivisions);
+            for triangle in triangles {
+                let edges = topology.triangle_edges(triangle.id).unwrap();
+                assert_ne!(edges[0].edge, edges[1].edge);
+                assert_ne!(edges[1].edge, edges[2].edge);
+                assert_ne!(edges[2].edge, edges[0].edge);
+                let local_pairs = [
+                    [triangle.vertices[0], triangle.vertices[1]],
+                    [triangle.vertices[1], triangle.vertices[2]],
+                    [triangle.vertices[2], triangle.vertices[0]],
+                ];
+                for (reference, pair) in edges.into_iter().zip(local_pairs) {
+                    let canonical = topology.edge_vertices(reference.edge).unwrap();
+                    assert_eq!(reference.reversed, pair != canonical);
+                    assert_eq!(topology.edge_id(pair[0], pair[1]), Some(reference.edge));
+                    let opposite = topology
+                        .opposite_triangle(reference.edge, triangle.id)
+                        .unwrap();
+                    if let Some(other) = opposite {
+                        assert_ne!(other, triangle.id);
+                        assert!(
+                            topology
+                                .incident_triangles(reference.edge)
+                                .unwrap()
+                                .contains(&Some(other))
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn grid_iterators_match_field_order_and_accessors() {

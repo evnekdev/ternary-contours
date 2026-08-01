@@ -2,18 +2,18 @@ use std::collections::BTreeSet;
 
 use ternary_contours::{
     FieldInterpolation, LiquidusFieldSpec, PreparedStablePhaseEnsemble, RegularTernaryScalarField,
-    StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource,
-    StableUmbrellaOptions, TernaryCoordinate,
+    StableContourQuantity, StableGridOptions, StablePhaseId, StablePhaseSource, StableScalarSource,
+    TernaryCoordinate,
 };
 
-fn options(subdivisions: usize) -> StableUmbrellaOptions {
-    StableUmbrellaOptions {
+fn options(subdivisions: usize) -> StableGridOptions {
+    StableGridOptions {
         subdivisions,
         value_tolerance: 1.0e-9,
         stability_tolerance: 1.0e-9,
         geometry_tolerance: 1.0e-9,
         parameter_tolerance: 1.0e-12,
-        ..StableUmbrellaOptions::default()
+        ..StableGridOptions::default()
     }
 }
 

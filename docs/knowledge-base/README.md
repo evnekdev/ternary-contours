@@ -18,6 +18,6 @@ The repository-level ZIP bundles are retained as archival convenience copies.
 They are excluded from Cargo packages; these Markdown files are the maintained,
 reviewable source.
 - [`../stable-phase-contours.md`](../stable-phase-contours.md) documents the
-  implemented virtual regular umbrella, exact affine upper-envelope clipping,
+  implemented virtual regular sampling-grid, exact affine upper-envelope clipping,
   phase-labelled height and secondary contours, verification/refinement, and
   deferred stable-atlas and partial-domain work.
