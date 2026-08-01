@@ -31,6 +31,14 @@ microtriangle threshold is measured in the canonical equilateral plane used by
 the Delaunay embedding. Projection relocates after every accepted step and
 backs out candidates outside the convex hull.
 
+Milestone 16 adds deterministic metrics. `IrregularTernaryMesh::metrics()` now
+reports Delaunay-only quality and topology records; shared gradient,
+derived-field, local-quadratic curvature, edge-jump, and contour-response
+analysis applies to regular and irregular fields alike. The mesh retains stable
+incident-edge adjacency and compact per-edge cubic stencil-completion flags.
+This changes implementation status only; it does not alter the authoritative
+edge-alpha algorithm note below.
+
 Not implemented: irregular bands (including cubic-alpha filled bands), virtual-
 stencil persistence APIs, or parallel/local solver execution.
 

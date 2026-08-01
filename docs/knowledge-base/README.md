@@ -9,7 +9,8 @@ ternary contour design and the separate irregular-triangulation research note.
 - [`irregular/README.md`](irregular/README.md) records the irregular roadmap. The
   Delaunay-backed linear fields are implemented behind `irregular-delaunay`;
   self-consistent irregular cubic-alpha point evaluation and irregular isolines
-  are implemented behind `irregular-cubic-alpha`. Irregular bands remain deferred.
+  are implemented behind `irregular-cubic-alpha`. Milestone 16 metrics distinguish
+  Delaunay-only mesh quality from shared regular/irregular field analysis; irregular bands remain deferred.
 - [`../numerical-validation.md`](../numerical-validation.md) records the
   maintained deterministic numerical audit, acceptance envelopes, and limits.
 
