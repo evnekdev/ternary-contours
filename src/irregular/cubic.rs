@@ -587,9 +587,10 @@ impl<'a> IrregularCubicAlphaField<'a> {
                 })?,
             reduced_gradient,
         )
-        .ok_or(IrregularFieldEvaluationError::InvalidLocation {
-            triangle: triangle.id,
-        })?;
+        .ok_or(IrregularFieldEvaluationError::NonFiniteEvaluation)?;
+        if !value.is_finite() || !gradient_ab.into_iter().all(f64::is_finite) {
+            return Err(IrregularFieldEvaluationError::NonFiniteEvaluation);
+        }
         Ok((value, gradient_ab))
     }
     fn evaluate_triangle_unchecked(

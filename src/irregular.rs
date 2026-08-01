@@ -282,6 +282,8 @@ pub enum IrregularFieldEvaluationError {
     IncompatibleLocation,
     /// A cached location is malformed.
     InvalidLocation { triangle: IrregularTriangleId },
+    /// Finite input samples produced a non-finite interpolated value or gradient.
+    NonFiniteEvaluation,
     /// Caller-owned batch output has the wrong length.
     OutputSizeMismatch { expected: usize, actual: usize },
 }
@@ -302,6 +304,9 @@ impl fmt::Display for IrregularFieldEvaluationError {
                 f,
                 "location does not describe canonical triangle {triangle:?}"
             ),
+            Self::NonFiniteEvaluation => {
+                f.write_str("interpolation produced a non-finite value or gradient")
+            }
             Self::OutputSizeMismatch { expected, actual } => write!(
                 f,
                 "batch output requires {expected} values; received {actual}"
@@ -987,7 +992,7 @@ impl<'a> PreparedIrregularTernaryField<'a> {
             .into_iter()
             .zip(location.barycentric)
             .map(|(value, weight)| value * weight)
-            .sum();
+            .sum::<f64>();
         let gradient_ab = global_gradient_ab(
             self.field
                 .mesh
@@ -997,9 +1002,10 @@ impl<'a> PreparedIrregularTernaryField<'a> {
                 })?,
             [values[0] - values[2], values[1] - values[2]],
         )
-        .ok_or(IrregularFieldEvaluationError::InvalidLocation {
-            triangle: triangle.id,
-        })?;
+        .ok_or(IrregularFieldEvaluationError::NonFiniteEvaluation)?;
+        if !value.is_finite() || !gradient_ab.into_iter().all(f64::is_finite) {
+            return Err(IrregularFieldEvaluationError::NonFiniteEvaluation);
+        }
         Ok(IrregularFieldSample {
             value,
             gradient_ab,
