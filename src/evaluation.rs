@@ -6,6 +6,7 @@ use crate::{
     CubicAlphaBuildOptions, FieldError, GridTriangle, LocatedTriangle, PointLocationError,
     RegularTernaryScalarField,
     field::{CubicBuildDiagnostics, CubicGridField},
+    simplex::global_gradient_ab,
 };
 
 /// Interpolation family used by an [`InterpolatedTernaryField`].
@@ -304,6 +305,9 @@ fn global_gradient(
     let v0 = vertex(0)?;
     let v1 = vertex(1)?;
     let v2 = vertex(2)?;
+    global_gradient_ab([v0, v1, v2], local).ok_or(FieldEvaluationError::InvalidLocation {
+        triangle: triangle.id,
+    })
     let da0 = v0[0] - v2[0];
     let da1 = v1[0] - v2[0];
     let db0 = v0[1] - v2[1];

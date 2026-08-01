@@ -2,8 +2,8 @@
 name = "ternary-contours"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
-description = "Backend-independent contours and linear filled bands for regular ternary scalar grids"
+rust-version = "1.97.1"
+description = "Backend-independent contours, fields, and linear filled bands for ternary scalar meshes"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evnekdev/ternary-contours"
 homepage = "https://github.com/evnekdev/ternary-contours"
@@ -25,6 +25,12 @@ exclude = [
 [features]
 default = []
 cubic-alpha = ["dep:spline1d"]
+irregular-delaunay = ["dep:delaunay"]
 
 [dependencies]
+delaunay = { version = "0.8.0", optional = true }
 spline1d = { version = "0.1.0", default-features = false, features = ["alloc"], optional = true }
+
+[[example]]
+name = "interpolate_irregular_field"
+required-features = ["irregular-delaunay"]

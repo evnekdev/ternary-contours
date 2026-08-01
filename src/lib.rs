@@ -1,4 +1,4 @@
-//! Backend-independent regular-grid ternary fields and isoline construction.
+//! Backend-independent ternary fields and isoline construction.
 //!
 //! `ternary-contours` owns regular-lattice indexing, scalar-field validation,
 //! direct regular-grid point location, prepared linear and cubic-alpha field
@@ -17,10 +17,12 @@
 //! coordinates with `c = 1-a-b`. Locations on shared grid edges are assigned to
 //! one canonical owner, so gradients are deterministic without averaging.
 //!
-//! Scope is deliberately limited to regular two-dimensional ternary grids.
-//! Piecewise-linear isolines and filled bands are available. Irregular
-//! triangulations, arbitrary-dimensional grids, Kuhn simplices, viewport
-//! clipping, rendering, and cubic-alpha filled bands are intentionally excluded.
+//! Regular grids provide linear and optional cubic-alpha pointwise evaluation,
+//! isolines, and linear filled bands. With the optional
+//! [`irregular-delaunay`](#cargo-features) feature, immutable irregular 2-D
+//! ternary meshes provide point location and prepared piecewise-linear field
+//! evaluation inside their convex hull. Irregular contour extraction and
+//! cubic-alpha reconstruction remain intentionally excluded.
 
 pub mod contour;
 mod error;
@@ -28,6 +30,9 @@ pub mod evaluation;
 pub mod field;
 pub mod grid;
 pub mod interpolation;
+#[cfg(feature = "irregular-delaunay")]
+pub mod irregular;
+mod simplex;
 
 /// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
 ///
@@ -81,4 +86,13 @@ pub use grid::{
 };
 pub use interpolation::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
+};
+
+#[cfg(feature = "irregular-delaunay")]
+pub use irregular::{
+    IRREGULAR_VERTEX_TOLERANCE, IrregularEdgeId, IrregularFieldError,
+    IrregularFieldEvaluationError, IrregularFieldSample, IrregularMeshEdge, IrregularMeshError,
+    IrregularMeshTriangle, IrregularPointBoundaryLocation, IrregularPointLocationError,
+    IrregularTernaryMesh, IrregularTernaryScalarField, IrregularTriangleId, IrregularVertexId,
+    LocatedIrregularTriangle, PreparedIrregularTernaryField,
 };
