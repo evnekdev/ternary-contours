@@ -26,6 +26,8 @@
 //! once. Irregular linear isolines are available with `irregular-delaunay`;
 //! `irregular-cubic-alpha` additionally enables adaptive cubic isolines over a
 //! converged prepared field. Irregular filled bands remain intentionally excluded.
+//! The maintained numerical validation method and its limits are recorded in
+//! [`docs/numerical-validation.md`](../docs/numerical-validation.md).
 
 pub mod contour;
 mod error;
