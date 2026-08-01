@@ -35,6 +35,10 @@ spline1d = { version = "0.1.0", default-features = false, features = ["alloc"], 
 [[example]]
 name = "interpolate_irregular_field"
 required-features = ["irregular-delaunay"]
+
+[[example]]
+name = "irregular_metrics"
+required-features = ["irregular-delaunay"]
 [[example]]
 name = "interpolate_irregular_cubic_field"
 required-features = ["irregular-cubic-alpha"]
