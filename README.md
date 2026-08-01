@@ -177,6 +177,53 @@ vertex; it is never averaged. Run
 `cargo run --example irregular_contours --features irregular-cubic-alpha` for
 a complete numerical example.
 
+## Metrics and derived analysis
+
+The `metrics` module is a numerical analysis layer; it does not add rendering,
+histogram plotting, maps, contours of derived values, or interpolation families.
+It uses the same canonical equilateral logical plane as irregular Delaunay
+construction and contour lengths.
+
+Triangulation quality is **irregular-only**. `IrregularTernaryMesh::metrics()`
+reports Delaunay triangle, edge, vertex, hull, and topology records. By
+contrast, `TernaryGradient`, derived prepared fields, local quadratic sampled-
+field estimates, interior-edge gradient jumps, and final contour response
+metrics apply to both regular and irregular fields.
+
+| Metric family | Regular grid | Irregular mesh |
+| --- | --- | --- |
+| Triangle-quality distribution | Not needed / analytically uniform | Yes |
+| Delaunay topology and valence | No | Yes |
+| Gradient and gradient norm | Yes | Yes |
+| Gradient jumps | Yes | Yes |
+| Local Hessian estimate | Yes | Yes |
+| Curvature anisotropy | Yes | Yes |
+| Derived-field evaluation | Yes | Yes |
+| Mesh–field alignment | Controlled lattice form | Full irregular form |
+| Alpha-response metrics | Regular cubic continuity | Irregular cubic response |
+| Contour-response metrics | Yes | Yes |
+
+`TernaryGradient` converts the established reduced `[df/da, df/db]` result to
+logical `[gx, gy]` with `gx = gb-ga` and `gy = -(ga+gb)/sqrt(3)`. Its norm is
+`sqrt((4/3) * (ga^2 - ga*gb + gb^2))`, so regular and irregular gradients have
+the same physical units and comparison basis. `FieldSample::gradient()` and
+`IrregularFieldSample::gradient()` retain the existing public `gradient_ab`
+field while adding this invariant representation.
+
+`DerivedRegularTernaryField` and `DerivedIrregularTernaryField` reuse prepared
+evaluators for values, reduced/logical gradient components, and gradient norm.
+`LocalQuadraticEstimate` is a shared interpolation-independent, stable QR fit
+to sampled values: regular fields expand integer lattice rings while irregular
+fields expand stable graph rings. It is not an analytic interpolant Hessian.
+
+For an irregular analysis walkthrough, run:
+
+~~~text
+cargo run --example irregular_metrics --features irregular-delaunay
+~~~
+
+See [irregular-mesh-metrics.md](docs/irregular-mesh-metrics.md) for formulas,
+edge ownership, weighting semantics, feature gates, and limitations.
 ## Extracting isolines
 
 An isoline is the set of compositions satisfying f(a, b, c) = level. The crate
