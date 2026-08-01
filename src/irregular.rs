@@ -356,6 +356,10 @@ struct CandidateTriangle {
 }
 
 impl IrregularTernaryMesh {
+    pub(crate) const fn has_same_identity(&self, other: &Self) -> bool {
+        self.identity == other.identity
+    }
+
     /// Build an immutable two-dimensional Delaunay mesh from semantic A/B/C samples.
     ///
     /// Samples must be finite, normalized within [`POINT_LOCATION_TOLERANCE`],
