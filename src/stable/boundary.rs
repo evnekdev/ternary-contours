@@ -1125,6 +1125,1008 @@ pub(crate) fn topology_diagnostics(
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PointKey([i64; 3]);
+
+#[derive(Clone, Debug, PartialEq)]
+enum TraceFeature {
+    Edge(crate::RegularGridEdgeId),
+    Vertex(crate::GridVertexId),
+    StableBoundary(BinaryBoundary, f64),
+    Invariant,
+    Interior,
+}
+
+#[derive(Clone, Debug)]
+struct FragmentEndpoint {
+    key: PointKey,
+    point: TernaryCoordinate,
+    temperature: f64,
+    tied_phases: Vec<StablePhaseId>,
+    feature: TraceFeature,
+    node: Option<StableInvariantNodeId>,
+}
+
+#[derive(Clone, Debug)]
+struct LocalBoundaryFragment {
+    pair: StablePhasePair,
+    triangle: usize,
+    endpoints: [FragmentEndpoint; 2],
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RegularGridEdgeHit {
+    parameter: f64,
+    point: TernaryCoordinate,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct PendingEndKey {
+    phases: StablePhasePair,
+    node: StableInvariantNodeId,
+    branch: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PendingStableUnivariantEnd {
+    id: StableUnivariantEndId,
+    key: PendingEndKey,
+    fragment: usize,
+    side: usize,
+    consumed: bool,
+}
+
+struct RegularGridTraceMarks {
+    epoch: u32,
+    edges: Vec<[u32; 2]>,
+    triangles: Vec<u32>,
+    vertices: Vec<u32>,
+}
+
+impl RegularGridTraceMarks {
+    fn new(topology: &RegularSamplingTopology) -> Result<Self, StableBoundaryError> {
+        Ok(Self {
+            epoch: 0,
+            edges: vec![[0; 2]; topology.edge_count()],
+            triangles: vec![0; topology.grid().triangle_count()?],
+            vertices: vec![0; topology.grid().vertex_count()],
+        })
+    }
+
+    fn begin(&mut self) {
+        if self.epoch == u32::MAX {
+            self.edges.fill([0; 2]);
+            self.triangles.fill(0);
+            self.vertices.fill(0);
+            self.epoch = 1;
+        } else {
+            self.epoch += 1;
+            if self.epoch == 0 {
+                self.epoch = 1;
+            }
+        }
+    }
+
+    fn mark_triangle(&mut self, triangle: usize) -> Result<(), StableBoundaryError> {
+        let Some(mark) = self.triangles.get_mut(triangle) else {
+            return Err(StableBoundaryError::InvalidRegularGridTopology {
+                message: format!("triangle {triangle} is outside dense trace marks"),
+            });
+        };
+        if *mark == self.epoch {
+            return Err(StableBoundaryError::RepeatedTriangleTransition { triangle });
+        }
+        *mark = self.epoch;
+        Ok(())
+    }
+
+    fn mark_feature(
+        &mut self,
+        feature: &TraceFeature,
+        triangle: usize,
+        topology: &RegularSamplingTopology,
+        diagnostics: &mut StableBoundaryDiagnostics,
+    ) -> Result<(), StableBoundaryError> {
+        match feature {
+            TraceFeature::Edge(edge) => {
+                let incidents = topology.incident_triangles(*edge)?;
+                let slot = if incidents[0] == Some(triangle) {
+                    0
+                } else if incidents[1] == Some(triangle) {
+                    1
+                } else {
+                    return Err(StableBoundaryError::InvalidRegularGridTopology {
+                        message: format!("triangle {triangle} is not incident to edge {}", edge.0),
+                    });
+                };
+                if self.edges[edge.0][slot] == self.epoch {
+                    diagnostics.directed_traversal_rejections += 1;
+                    return Err(StableBoundaryError::RepeatedDirectedEdgeTraversal {
+                        edge: edge.0,
+                        triangle,
+                    });
+                }
+                self.edges[edge.0][slot] = self.epoch;
+                diagnostics.sampling_edge_crossings += 1;
+            }
+            TraceFeature::Vertex(vertex) => {
+                let Some(mark) = self.vertices.get_mut(vertex.0) else {
+                    return Err(StableBoundaryError::InvalidRegularGridTopology {
+                        message: format!("vertex {} is outside dense trace marks", vertex.0),
+                    });
+                };
+                if *mark == self.epoch {
+                    diagnostics.directed_traversal_rejections += 1;
+                    return Err(StableBoundaryError::RepeatedTriangleTransition { triangle });
+                }
+                *mark = self.epoch;
+                diagnostics.sampling_vertex_crossings += 1;
+            }
+            TraceFeature::StableBoundary(_, _)
+            | TraceFeature::Invariant
+            | TraceFeature::Interior => {}
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_boundary_fragments(
+    cells: &[super::partition::StableSamplingCell],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    topology: &RegularSamplingTopology,
+    options: StableBoundaryOptions,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<Vec<LocalBoundaryFragment>, StableBoundaryError> {
+    let mut fragments = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut edge_hits =
+        BTreeMap::<(StablePhasePair, crate::RegularGridEdgeId), RegularGridEdgeHit>::new();
+
+    for cell in cells {
+        for polygon in &cell.polygons {
+            for (&left, &right) in polygon
+                .barycentric
+                .iter()
+                .zip(polygon.barycentric.iter().cycle().skip(1))
+                .take(polygon.barycentric.len())
+            {
+                let midpoint = [
+                    0.5 * (left[0] + right[0]),
+                    0.5 * (left[1] + right[1]),
+                    0.5 * (left[2] + right[2]),
+                ];
+                let (tied, _) = affine_stable_phases(
+                    samples,
+                    phase_ids,
+                    cell,
+                    midpoint,
+                    options.stability_tolerance,
+                );
+                if tied.len() < 2 || !tied.contains(&polygon.phase) {
+                    continue;
+                }
+                for other in tied.iter().copied().filter(|phase| *phase != polygon.phase) {
+                    let pair = StablePhasePair::new(polygon.phase, other);
+                    let mut endpoints = [
+                        canonical_fragment_endpoint(
+                            pair,
+                            cell,
+                            left,
+                            samples,
+                            phase_ids,
+                            topology,
+                            options,
+                            &mut edge_hits,
+                            diagnostics,
+                        )?,
+                        canonical_fragment_endpoint(
+                            pair,
+                            cell,
+                            right,
+                            samples,
+                            phase_ids,
+                            topology,
+                            options,
+                            &mut edge_hits,
+                            diagnostics,
+                        )?,
+                    ];
+                    if endpoints[0].key == endpoints[1].key {
+                        continue;
+                    }
+                    if endpoints[1].key < endpoints[0].key {
+                        endpoints.swap(0, 1);
+                    }
+                    let key = (cell.triangle.id, pair, endpoints[0].key, endpoints[1].key);
+                    if seen.insert(key) {
+                        fragments.push(LocalBoundaryFragment {
+                            pair,
+                            triangle: cell.triangle.id,
+                            endpoints,
+                        });
+                    }
+                }
+            }
+        }
+    }
+    fragments.sort_by(|left, right| {
+        left.pair
+            .cmp(&right.pair)
+            .then_with(|| left.endpoints[0].key.cmp(&right.endpoints[0].key))
+            .then_with(|| left.endpoints[1].key.cmp(&right.endpoints[1].key))
+            .then_with(|| left.triangle.cmp(&right.triangle))
+    });
+    Ok(fragments)
+}
+
+fn affine_stable_phases(
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    cell: &super::partition::StableSamplingCell,
+    barycentric: [f64; 3],
+    tolerance: f64,
+) -> (Vec<StablePhaseId>, f64) {
+    let values = phase_ids
+        .iter()
+        .copied()
+        .enumerate()
+        .filter_map(|(phase, id)| {
+            samples
+                .triangle_height_values(phase, cell.triangle.vertices)
+                .map(|values| (id, super::sample::dot(values, barycentric)))
+        })
+        .collect::<Vec<_>>();
+    let maximum = values
+        .iter()
+        .map(|(_, value)| *value)
+        .fold(f64::NEG_INFINITY, f64::max);
+    let tied = values
+        .into_iter()
+        .filter(|(_, value)| *value >= maximum - tolerance)
+        .map(|(phase, _)| phase)
+        .collect();
+    (tied, maximum)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn canonical_fragment_endpoint(
+    pair: StablePhasePair,
+    cell: &super::partition::StableSamplingCell,
+    barycentric: [f64; 3],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    topology: &RegularSamplingTopology,
+    options: StableBoundaryOptions,
+    edge_hits: &mut BTreeMap<(StablePhasePair, crate::RegularGridEdgeId), RegularGridEdgeHit>,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<FragmentEndpoint, StableBoundaryError> {
+    let mut point = super::partition::point_from_barycentric(cell, barycentric);
+    let (tied_phases, stable_temperature) = affine_stable_phases(
+        samples,
+        phase_ids,
+        cell,
+        barycentric,
+        options.stability_tolerance,
+    );
+    let components = point.as_array();
+    let outer = if components[2].abs() <= options.geometry_tolerance {
+        Some(BinaryBoundary::Ab)
+    } else if components[0].abs() <= options.geometry_tolerance {
+        Some(BinaryBoundary::Bc)
+    } else if components[1].abs() <= options.geometry_tolerance {
+        Some(BinaryBoundary::Ca)
+    } else {
+        None
+    };
+    let zeroes = barycentric
+        .iter()
+        .enumerate()
+        .filter(|(_, value)| value.abs() <= options.geometry_tolerance)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+
+    let feature = if let Some(boundary) = outer {
+        let parameter = boundary.parameter(point)?;
+        point = boundary.composition_unchecked(parameter);
+        TraceFeature::StableBoundary(boundary, parameter)
+    } else if tied_phases.len() >= 3 {
+        TraceFeature::Invariant
+    } else if zeroes.len() >= 2 {
+        let local = barycentric
+            .iter()
+            .enumerate()
+            .max_by(|left, right| left.1.total_cmp(right.1))
+            .map(|(index, _)| index)
+            .ok_or_else(|| StableBoundaryError::InvalidRegularGridTopology {
+                message: "triangle endpoint has no owning vertex".into(),
+            })?;
+        let vertex = cell.triangle.vertices[local];
+        point = TernaryCoordinate::from(samples.grid.composition(vertex)?);
+        TraceFeature::Vertex(vertex)
+    } else if zeroes.len() == 1 {
+        let local_edge = match zeroes[0] {
+            0 => 1,
+            1 => 2,
+            _ => 0,
+        };
+        let edge = topology.triangle_edges(cell.triangle.id)?[local_edge].edge;
+        let vertices = topology.edge_vertices(edge)?;
+        let start = samples.grid.composition(vertices[0])?;
+        let end = samples.grid.composition(vertices[1])?;
+        let raw = point.as_array();
+        let direction = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
+        let denominator = direction.iter().map(|value| value * value).sum::<f64>();
+        if denominator <= 0.0 || !denominator.is_finite() {
+            return Err(StableBoundaryError::InvalidRegularGridTopology {
+                message: format!("edge {} has zero geometric length", edge.0),
+            });
+        }
+        let parameter = raw
+            .iter()
+            .zip(start)
+            .zip(direction)
+            .map(|((value, start), direction)| (value - start) * direction)
+            .sum::<f64>()
+            / denominator;
+        let parameter = parameter.clamp(0.0, 1.0);
+        let canonical = TernaryCoordinate::from([
+            start[0] + parameter * direction[0],
+            start[1] + parameter * direction[1],
+            start[2] + parameter * direction[2],
+        ]);
+        if let Some(previous) = edge_hits.get(&(pair, edge)) {
+            if (previous.parameter - parameter).abs() > options.geometry_tolerance {
+                return Err(StableBoundaryError::InconsistentCanonicalEdgeHit { edge: edge.0 });
+            }
+            point = previous.point;
+            diagnostics.reused_canonical_edge_hits += 1;
+        } else {
+            edge_hits.insert(
+                (pair, edge),
+                RegularGridEdgeHit {
+                    parameter,
+                    point: canonical,
+                },
+            );
+            point = canonical;
+        }
+        TraceFeature::Edge(edge)
+    } else {
+        TraceFeature::Interior
+    };
+
+    let temperature =
+        pair_temperature(pair, cell, barycentric, samples, phase_ids).unwrap_or(stable_temperature);
+    Ok(FragmentEndpoint {
+        key: point_key(point, options.geometry_tolerance),
+        point,
+        temperature,
+        tied_phases,
+        feature,
+        node: None,
+    })
+}
+
+fn pair_temperature(
+    pair: StablePhasePair,
+    cell: &super::partition::StableSamplingCell,
+    barycentric: [f64; 3],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+) -> Option<f64> {
+    let first = phase_ids.binary_search(&pair.first).ok()?;
+    let second = phase_ids.binary_search(&pair.second).ok()?;
+    let first_values = samples.triangle_height_values(first, cell.triangle.vertices)?;
+    let second_values = samples.triangle_height_values(second, cell.triangle.vertices)?;
+    Some(
+        0.5 * (super::sample::dot(first_values, barycentric)
+            + super::sample::dot(second_values, barycentric)),
+    )
+}
+
+fn point_key(point: TernaryCoordinate, tolerance: f64) -> PointKey {
+    PointKey(point.as_array().map(|value| {
+        let scaled = (value / tolerance).round();
+        if scaled <= i64::MIN as f64 {
+            i64::MIN
+        } else if scaled >= i64::MAX as f64 {
+            i64::MAX
+        } else {
+            scaled as i64
+        }
+    }))
+}
+
+fn match_binary_endpoints(
+    fragments: &mut [LocalBoundaryFragment],
+    traces: &[BinaryBoundaryTrace],
+    nodes: &[StableInvariantNode],
+    options: StableBoundaryOptions,
+) -> Result<(), StableBoundaryError> {
+    for fragment in fragments {
+        for endpoint in &mut fragment.endpoints {
+            let TraceFeature::StableBoundary(boundary, parameter) = endpoint.feature else {
+                continue;
+            };
+            let candidate = traces
+                .iter()
+                .filter(|trace| trace.boundary == boundary)
+                .flat_map(|trace| trace.invariants.iter())
+                .filter(|node| {
+                    node.phases.contains(&fragment.pair.first)
+                        && node.phases.contains(&fragment.pair.second)
+                })
+                .min_by(|left, right| {
+                    (left.boundary_parameter - parameter)
+                        .abs()
+                        .total_cmp(&(right.boundary_parameter - parameter).abs())
+                        .then_with(|| left.id.cmp(&right.id))
+                });
+            let Some(candidate) = candidate else {
+                return Err(StableBoundaryError::NoMatchingBinaryNode {
+                    boundary,
+                    parameter,
+                    phases: fragment.pair,
+                });
+            };
+            let tolerance = options
+                .binary_parameter_tolerance
+                .max(options.geometry_tolerance * 4.0);
+            if (candidate.boundary_parameter - parameter).abs() > tolerance {
+                return Err(StableBoundaryError::NoMatchingBinaryNode {
+                    boundary,
+                    parameter,
+                    phases: fragment.pair,
+                });
+            }
+            let canonical = nodes.get(candidate.id.0).ok_or_else(|| {
+                StableBoundaryError::MalformedGraphConnectivity {
+                    message: "binary node ID does not index the canonical node vector".into(),
+                }
+            })?;
+            endpoint.node = Some(candidate.id);
+            endpoint.point = canonical.point();
+            endpoint.temperature = canonical.temperature();
+            endpoint.key = point_key(canonical.point(), options.geometry_tolerance);
+        }
+    }
+    Ok(())
+}
+
+fn canonical_nodes(
+    traces: &[BinaryBoundaryTrace],
+) -> Result<Vec<StableInvariantNode>, StableBoundaryError> {
+    let mut nodes = Vec::new();
+    for trace in traces {
+        for node in &trace.invariants {
+            if node.id.0 != nodes.len() {
+                return Err(StableBoundaryError::MalformedGraphConnectivity {
+                    message: "binary invariant identifiers are not dense".into(),
+                });
+            }
+            nodes.push(StableInvariantNode::Binary(node.clone()));
+        }
+    }
+    Ok(nodes)
+}
+
+fn canonicalize_interior_nodes(
+    fragments: &mut [LocalBoundaryFragment],
+    nodes: &mut Vec<StableInvariantNode>,
+    options: StableBoundaryOptions,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<(), StableBoundaryError> {
+    for fragment in fragments {
+        for endpoint in &mut fragment.endpoints {
+            if !matches!(endpoint.feature, TraceFeature::Invariant)
+                && endpoint.tied_phases.len() < 3
+            {
+                continue;
+            }
+            diagnostics.interior_invariant_candidates += 1;
+            endpoint.tied_phases.sort();
+            endpoint.tied_phases.dedup();
+            let matching = nodes.iter().position(|node| {
+                matches!(node, StableInvariantNode::Interior(_))
+                    && composition_distance(node.point(), endpoint.point)
+                        <= options.geometry_tolerance * 4.0
+                    && (node.temperature() - endpoint.temperature).abs()
+                        <= options.temperature_tolerance * 4.0
+            });
+            let id = if let Some(index) = matching {
+                let node = nodes.get_mut(index).ok_or_else(|| {
+                    StableBoundaryError::MalformedGraphConnectivity {
+                        message: "interior invariant index disappeared".into(),
+                    }
+                })?;
+                let StableInvariantNode::Interior(node) = node else {
+                    return Err(
+                        StableBoundaryError::IncompatibleDuplicateInvariantCandidate {
+                            point: endpoint.point,
+                        },
+                    );
+                };
+                let phases = node
+                    .phases
+                    .iter()
+                    .chain(&endpoint.tied_phases)
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                node.phases = phases.into_iter().collect();
+                diagnostics.known_invariants_revisited += 1;
+                node.id
+            } else {
+                let id = StableInvariantNodeId(nodes.len());
+                nodes.push(StableInvariantNode::Interior(InteriorInvariantNode {
+                    id,
+                    point: endpoint.point,
+                    temperature: endpoint.temperature,
+                    phases: endpoint.tied_phases.clone(),
+                }));
+                diagnostics.interior_invariants_accepted += 1;
+                id
+            };
+            let canonical =
+                nodes
+                    .get(id.0)
+                    .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+                        message: "interior invariant ID does not index the node vector".into(),
+                    })?;
+            endpoint.node = Some(id);
+            endpoint.point = canonical.point();
+            endpoint.temperature = canonical.temperature();
+            endpoint.key = point_key(canonical.point(), options.geometry_tolerance);
+        }
+    }
+    Ok(())
+}
+
+fn composition_distance(left: TernaryCoordinate, right: TernaryCoordinate) -> f64 {
+    crate::simplex::logical_distance(left.as_array(), right.as_array())
+}
+
+fn build_fragment_adjacency(
+    fragments: &[LocalBoundaryFragment],
+) -> BTreeMap<(StablePhasePair, PointKey), Vec<(usize, usize)>> {
+    let mut adjacency = BTreeMap::<(StablePhasePair, PointKey), Vec<(usize, usize)>>::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        for (side, endpoint) in fragment.endpoints.iter().enumerate() {
+            adjacency
+                .entry((fragment.pair, endpoint.key))
+                .or_default()
+                .push((fragment_index, side));
+        }
+    }
+    for entries in adjacency.values_mut() {
+        entries.sort_unstable();
+    }
+    adjacency
+}
+
+fn create_pending_ends(
+    fragments: &[LocalBoundaryFragment],
+    nodes: &[StableInvariantNode],
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<(Vec<PendingStableUnivariantEnd>, Vec<Option<usize>>), StableBoundaryError> {
+    let mut entries = Vec::<(PendingEndKey, usize, usize)>::new();
+    for (fragment_index, fragment) in fragments.iter().enumerate() {
+        for (side, endpoint) in fragment.endpoints.iter().enumerate() {
+            let Some(node) = endpoint.node else {
+                continue;
+            };
+            let canonical = nodes.get(node.0).ok_or_else(|| {
+                StableBoundaryError::MalformedGraphConnectivity {
+                    message: "fragment endpoint references an absent node".into(),
+                }
+            })?;
+            if !canonical.phases().contains(&fragment.pair.first)
+                || !canonical.phases().contains(&fragment.pair.second)
+            {
+                return Err(StableBoundaryError::MalformedGraphConnectivity {
+                    message: format!(
+                        "node {} does not contain both phases of {:?}",
+                        node.0, fragment.pair
+                    ),
+                });
+            }
+            entries.push((
+                PendingEndKey {
+                    phases: fragment.pair,
+                    node,
+                    branch: fragment_index * 2 + side,
+                },
+                fragment_index,
+                side,
+            ));
+            match canonical {
+                StableInvariantNode::Binary(_) => diagnostics.pending_ends_initially_created += 1,
+                StableInvariantNode::Interior(_) => {
+                    diagnostics.pending_ends_created_at_interior_invariants += 1;
+                }
+            }
+        }
+    }
+    entries.sort_by_key(|entry| entry.0);
+    let mut pending_lookup = vec![None; fragments.len().saturating_mul(2)];
+    let mut pending = Vec::with_capacity(entries.len());
+    for (index, (key, fragment, side)) in entries.into_iter().enumerate() {
+        pending_lookup[fragment * 2 + side] = Some(index);
+        pending.push(PendingStableUnivariantEnd {
+            id: StableUnivariantEndId(index),
+            key,
+            fragment,
+            side,
+            consumed: false,
+        });
+    }
+    Ok((pending, pending_lookup))
+}
+
+fn append_path_point(
+    points: &mut Vec<TernaryCoordinate>,
+    temperatures: &mut Vec<f64>,
+    endpoint: &FragmentEndpoint,
+    tolerance: f64,
+) {
+    if points
+        .last()
+        .is_some_and(|previous| composition_distance(*previous, endpoint.point) <= tolerance)
+    {
+        if let Some(last) = points.last_mut() {
+            *last = endpoint.point;
+        }
+        if let Some(last) = temperatures.last_mut() {
+            *last = endpoint.temperature;
+        }
+        return;
+    }
+    points.push(endpoint.point);
+    temperatures.push(endpoint.temperature);
+}
+
+fn oriented_direction(fragment: &LocalBoundaryFragment, entry_side: usize) -> [f64; 2] {
+    let start =
+        crate::simplex::logical_from_composition(fragment.endpoints[entry_side].point.as_array());
+    let end = crate::simplex::logical_from_composition(
+        fragment.endpoints[1 - entry_side].point.as_array(),
+    );
+    [end[0] - start[0], end[1] - start[1]]
+}
+
+fn choose_forward_fragment(
+    candidates: &[(usize, usize)],
+    fragments: &[LocalBoundaryFragment],
+    used: &[bool],
+    current_fragment: usize,
+    incoming: [f64; 2],
+) -> Result<Option<(usize, usize)>, StableBoundaryError> {
+    let incoming_norm = incoming[0].hypot(incoming[1]);
+    let mut viable = Vec::<(f64, usize, usize)>::new();
+    for &(fragment_index, entry_side) in candidates {
+        if fragment_index == current_fragment || used[fragment_index] {
+            continue;
+        }
+        let direction = oriented_direction(&fragments[fragment_index], entry_side);
+        let norm = direction[0].hypot(direction[1]);
+        if !norm.is_finite() || norm <= f64::EPSILON || incoming_norm <= f64::EPSILON {
+            continue;
+        }
+        let cosine =
+            (incoming[0] * direction[0] + incoming[1] * direction[1]) / (incoming_norm * norm);
+        viable.push((cosine, fragment_index, entry_side));
+    }
+    viable.sort_by(|left, right| {
+        right
+            .0
+            .total_cmp(&left.0)
+            .then_with(|| left.1.cmp(&right.1))
+            .then_with(|| left.2.cmp(&right.2))
+    });
+    if viable.len() >= 2 && (viable[0].0 - viable[1].0).abs() <= 1.0e-12 {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "ambiguous forward continuation at a sampling-grid feature".into(),
+        });
+    }
+    Ok(viable.first().map(|entry| (entry.1, entry.2)))
+}
+
+fn consume_pending(
+    pending: &mut [PendingStableUnivariantEnd],
+    pending_lookup: &[Option<usize>],
+    fragment: usize,
+    side: usize,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<(), StableBoundaryError> {
+    let Some(index) = pending_lookup.get(fragment * 2 + side).copied().flatten() else {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "node endpoint has no pending-end record".into(),
+        });
+    };
+    let end =
+        pending
+            .get_mut(index)
+            .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+                message: "pending-end lookup points outside its dense array".into(),
+            })?;
+    if end.consumed {
+        return Err(StableBoundaryError::NoMatchingPendingEnd {
+            node: end.key.node,
+            phases: end.key.phases,
+        });
+    }
+    end.consumed = true;
+    diagnostics.pending_ends_consumed += 1;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trace_one_univariant(
+    start_pending: usize,
+    pending: &mut [PendingStableUnivariantEnd],
+    pending_lookup: &[Option<usize>],
+    fragments: &[LocalBoundaryFragment],
+    adjacency: &BTreeMap<(StablePhasePair, PointKey), Vec<(usize, usize)>>,
+    used: &mut [bool],
+    nodes: &[StableInvariantNode],
+    topology: &RegularSamplingTopology,
+    marks: &mut RegularGridTraceMarks,
+    options: StableBoundaryOptions,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<StableUnivariantPath, StableBoundaryError> {
+    let start_record = pending.get(start_pending).ok_or_else(|| {
+        StableBoundaryError::MalformedGraphConnectivity {
+            message: "starting pending end is outside its dense array".into(),
+        }
+    })?;
+    let start_id = start_record.id;
+    let phases = start_record.key.phases;
+    let start_node = start_record.key.node;
+    let mut fragment_index = start_record.fragment;
+    let mut entry_side = start_record.side;
+    consume_pending(
+        pending,
+        pending_lookup,
+        fragment_index,
+        entry_side,
+        diagnostics,
+    )?;
+    diagnostics.univariant_traces_started += 1;
+    marks.begin();
+
+    let start =
+        nodes
+            .get(start_node.0)
+            .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+                message: "starting node is absent".into(),
+            })?;
+    let mut points = vec![start.point()];
+    let mut temperatures = vec![start.temperature()];
+    let mut terminal = None;
+
+    for step in 0..options.maximum_trace_steps {
+        if used[fragment_index] {
+            diagnostics.directed_traversal_rejections += 1;
+            return Err(StableBoundaryError::RepeatedTriangleTransition {
+                triangle: fragments[fragment_index].triangle,
+            });
+        }
+        used[fragment_index] = true;
+        let fragment = &fragments[fragment_index];
+        if fragment.pair != phases {
+            return Err(StableBoundaryError::UnivariantLeftStablePairRegion {
+                phases,
+                point: fragment.endpoints[entry_side].point,
+            });
+        }
+        marks.mark_triangle(fragment.triangle)?;
+        let exit_side = 1 - entry_side;
+        let exit = &fragment.endpoints[exit_side];
+        append_path_point(
+            &mut points,
+            &mut temperatures,
+            exit,
+            options.geometry_tolerance,
+        );
+        if let Some(node) = exit.node {
+            consume_pending(
+                pending,
+                pending_lookup,
+                fragment_index,
+                exit_side,
+                diagnostics,
+            )?;
+            terminal = Some(node);
+            diagnostics.maximum_trace_length = diagnostics.maximum_trace_length.max(step + 1);
+            break;
+        }
+
+        let candidates = adjacency
+            .get(&(phases, exit.key))
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let incoming = oriented_direction(fragment, entry_side);
+        let Some((next_fragment, next_entry_side)) =
+            choose_forward_fragment(candidates, fragments, used, fragment_index, incoming)?
+        else {
+            return Err(StableBoundaryError::MalformedGraphConnectivity {
+                message: format!(
+                    "univariant {:?} terminates away from an invariant node",
+                    phases
+                ),
+            });
+        };
+        marks.mark_feature(&exit.feature, fragment.triangle, topology, diagnostics)?;
+        fragment_index = next_fragment;
+        entry_side = next_entry_side;
+    }
+    let Some(end_node) = terminal else {
+        return Err(StableBoundaryError::TraceStepLimitExceeded { start: start_id });
+    };
+
+    if end_node == start_node {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "boundary-seeded trace returned to its starting invariant".into(),
+        });
+    }
+    let end =
+        nodes
+            .get(end_node.0)
+            .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+                message: "terminal node is absent".into(),
+            })?;
+    if let Some(first) = points.first_mut() {
+        *first = start.point();
+    }
+    if let Some(last) = points.last_mut() {
+        *last = end.point();
+    }
+    if let Some(first) = temperatures.first_mut() {
+        *first = start.temperature();
+    }
+    if let Some(last) = temperatures.last_mut() {
+        *last = end.temperature();
+    }
+    if points.len() < 2
+        || points
+            .windows(2)
+            .any(|pair| composition_distance(pair[0], pair[1]) <= options.geometry_tolerance)
+    {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "univariant contains a duplicate or zero-length segment".into(),
+        });
+    }
+    Ok(StableUnivariantPath {
+        id: StableUnivariantId(0),
+        phases,
+        start: start_node,
+        end: end_node,
+        points,
+        temperatures,
+    })
+}
+
+fn validate_network(network: &StableBoundaryNetwork) -> Result<(), StableBoundaryError> {
+    if network.incidence.len() != network.nodes.len() {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "incidence array does not match the node count".into(),
+        });
+    }
+    for (index, node) in network.nodes.iter().enumerate() {
+        if node.id().0 != index {
+            return Err(StableBoundaryError::MalformedGraphConnectivity {
+                message: "node identifiers are not dense".into(),
+            });
+        }
+    }
+    for (index, path) in network.univariants.iter().enumerate() {
+        if path.id.0 != index
+            || path.points.len() != path.temperatures.len()
+            || path.points.len() < 2
+        {
+            return Err(StableBoundaryError::MalformedGraphConnectivity {
+                message: "univariant identifiers or point arrays are malformed".into(),
+            });
+        }
+        let start = network.nodes.get(path.start.0).ok_or_else(|| {
+            StableBoundaryError::MalformedGraphConnectivity {
+                message: "univariant start node is absent".into(),
+            }
+        })?;
+        let end = network.nodes.get(path.end.0).ok_or_else(|| {
+            StableBoundaryError::MalformedGraphConnectivity {
+                message: "univariant end node is absent".into(),
+            }
+        })?;
+        if path.points.first() != Some(&start.point()) || path.points.last() != Some(&end.point()) {
+            return Err(StableBoundaryError::MalformedGraphConnectivity {
+                message: "univariant endpoints are not canonical node coordinates".into(),
+            });
+        }
+        if !network.incidence[path.start.0].contains(&path.id)
+            || !network.incidence[path.end.0].contains(&path.id)
+        {
+            return Err(StableBoundaryError::MalformedGraphConnectivity {
+                message: "univariant is absent from terminal-node incidence".into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn build_stable_boundary_network(
+    traces: Vec<BinaryBoundaryTrace>,
+    cells: &[super::partition::StableSamplingCell],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    options: StableBoundaryOptions,
+) -> Result<StableBoundaryNetwork, StableBoundaryError> {
+    options.validate()?;
+    let topology = RegularSamplingTopology::new(samples.grid)?;
+    let mut diagnostics = StableBoundaryDiagnostics::default();
+    aggregate_binary_diagnostics(&traces, &mut diagnostics);
+    topology_diagnostics(&topology, &mut diagnostics)?;
+    let mut nodes = canonical_nodes(&traces)?;
+    let mut fragments = collect_boundary_fragments(
+        cells,
+        samples,
+        phase_ids,
+        &topology,
+        options,
+        &mut diagnostics,
+    )?;
+    match_binary_endpoints(&mut fragments, &traces, &nodes, options)?;
+    canonicalize_interior_nodes(&mut fragments, &mut nodes, options, &mut diagnostics)?;
+    let adjacency = build_fragment_adjacency(&fragments);
+    let (mut pending, pending_lookup) = create_pending_ends(&fragments, &nodes, &mut diagnostics)?;
+    let mut used = vec![false; fragments.len()];
+    let mut marks = RegularGridTraceMarks::new(&topology)?;
+    let mut univariants = Vec::new();
+    for pending_index in 0..pending.len() {
+        if pending[pending_index].consumed {
+            continue;
+        }
+        let mut path = trace_one_univariant(
+            pending_index,
+            &mut pending,
+            &pending_lookup,
+            &fragments,
+            &adjacency,
+            &mut used,
+            &nodes,
+            &topology,
+            &mut marks,
+            options,
+            &mut diagnostics,
+        )?;
+        path.id = StableUnivariantId(univariants.len());
+        univariants.push(path);
+    }
+    let unresolved = pending.iter().filter(|end| !end.consumed).count();
+    if unresolved != 0 {
+        return Err(StableBoundaryError::UnresolvedPendingEnds { count: unresolved });
+    }
+    let mut incidence = vec![Vec::new(); nodes.len()];
+    for path in &univariants {
+        incidence[path.start.0].push(path.id);
+        incidence[path.end.0].push(path.id);
+    }
+    for paths in &mut incidence {
+        paths.sort();
+        paths.dedup();
+    }
+    diagnostics.completed_univariants = univariants.len();
+    let network = StableBoundaryNetwork {
+        nodes,
+        univariants,
+        binary_traces: traces,
+        diagnostics,
+        incidence,
+    };
+    validate_network(&network)?;
+    Ok(network)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1267,6 +2269,55 @@ mod tests {
         assert_eq!(
             higher[0].phases,
             [StablePhaseId(1), StablePhaseId(2), StablePhaseId(3)]
+        );
+    }
+
+    #[test]
+    fn affine_three_phase_network_connects_binary_nodes_to_one_interior_invariant() {
+        let alpha = |[a, _b, _c]: [f64; 3]| defined(a);
+        let beta = |[_a, b, _c]: [f64; 3]| defined(b);
+        let gamma = |[_a, _b, c]: [f64; 3]| defined(c);
+        let phases = [
+            StablePhaseSource::new(StablePhaseId(30), StableScalarSource::evaluator(&gamma)),
+            StablePhaseSource::new(StablePhaseId(10), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(20), StableScalarSource::evaluator(&beta)),
+        ];
+        let prepared = PreparedStablePhaseEnsemble::new(
+            phases,
+            StableContourQuantity::Height,
+            StableGridOptions {
+                subdivisions: 12,
+                ..StableGridOptions::default()
+            },
+        )
+        .unwrap();
+        let network = prepared
+            .stable_boundaries(StableBoundaryOptions::default())
+            .unwrap();
+        assert_eq!(network.nodes.len(), 4);
+        assert_eq!(network.univariants.len(), 3);
+        let interior = network
+            .nodes
+            .iter()
+            .find(|node| matches!(node, StableInvariantNode::Interior(_)))
+            .unwrap();
+        assert_eq!(interior.phases().len(), 3);
+        for path in &network.univariants {
+            assert_eq!(
+                path.points.first(),
+                Some(&network.nodes[path.start.0].point())
+            );
+            assert_eq!(path.points.last(), Some(&network.nodes[path.end.0].point()));
+            assert!(
+                path.points
+                    .windows(2)
+                    .all(|points| { composition_distance(points[0], points[1]) > 1.0e-9 })
+            );
+            assert!(path.start == interior.id() || path.end == interior.id());
+        }
+        assert_eq!(
+            network.incident_univariants(interior.id()).unwrap().len(),
+            3
         );
     }
 
