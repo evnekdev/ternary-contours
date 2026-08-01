@@ -54,6 +54,8 @@ pub enum FieldEvaluationError {
     },
     /// A manually corrupted or otherwise invalid location was supplied.
     InvalidLocation { triangle: usize },
+    /// Finite input samples produced a non-finite interpolated value or gradient.
+    NonFiniteEvaluation,
     /// Cubic-alpha evaluation was selected without the `cubic-alpha` feature.
     CubicFeatureUnavailable,
     /// Construction of the shared cubic-alpha field model failed.
@@ -77,6 +79,12 @@ impl fmt::Display for FieldEvaluationError {
                 write!(
                     formatter,
                     "location does not describe canonical triangle {triangle}"
+                )
+            }
+            Self::NonFiniteEvaluation => {
+                write!(
+                    formatter,
+                    "interpolation produced a non-finite value or gradient"
                 )
             }
             Self::CubicFeatureUnavailable => write!(
@@ -205,9 +213,13 @@ impl<'a> InterpolatedTernaryField<'a> {
                     triangle: triangle.id,
                 })?,
         };
+        let gradient_ab = global_gradient(self.field, triangle, local_gradient)?;
+        if !value.is_finite() || !gradient_ab.into_iter().all(f64::is_finite) {
+            return Err(FieldEvaluationError::NonFiniteEvaluation);
+        }
         Ok(FieldSample {
             value,
-            gradient_ab: global_gradient(self.field, triangle, local_gradient)?,
+            gradient_ab,
             location: *location,
         })
     }
@@ -305,9 +317,7 @@ fn global_gradient(
     let v0 = vertex(0)?;
     let v1 = vertex(1)?;
     let v2 = vertex(2)?;
-    global_gradient_ab([v0, v1, v2], local).ok_or(FieldEvaluationError::InvalidLocation {
-        triangle: triangle.id,
-    })
+    global_gradient_ab([v0, v1, v2], local).ok_or(FieldEvaluationError::NonFiniteEvaluation)
 }
 
 #[cfg(test)]

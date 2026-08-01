@@ -134,6 +134,14 @@ impl ContourSet {
     pub fn diagnostics(&self) -> Option<&CubicContourDiagnostics> {
         self.diagnostics.as_ref()
     }
+
+    /// Return contour levels in their validated increasing scalar order.
+    ///
+    /// This accessor is equivalent to borrowing [`Self::levels`] and is
+    /// provided for callers that do not need to depend on the result layout.
+    pub fn levels(&self) -> &[ContourLevel] {
+        &self.levels
+    }
 }
 
 fn validated_levels(levels: &[f64], tolerance: f64) -> Result<Vec<f64>, ContourError> {

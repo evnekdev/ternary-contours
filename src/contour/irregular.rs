@@ -365,6 +365,14 @@ impl IrregularContourSet {
     pub const fn diagnostics(&self) -> &IrregularContourDiagnostics {
         &self.diagnostics
     }
+
+    /// Return contour levels in their validated increasing scalar order.
+    ///
+    /// This accessor is equivalent to borrowing [`Self::levels`] and is
+    /// provided for callers that do not need to depend on the result layout.
+    pub fn levels(&self) -> &[ContourLevel] {
+        &self.levels
+    }
 }
 
 /// Failures specific to irregular numerical contour construction.
