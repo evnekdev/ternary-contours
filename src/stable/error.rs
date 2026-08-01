@@ -42,6 +42,9 @@ impl std::error::Error for StableSourceEvaluationError {
 #[non_exhaustive]
 pub enum StableContourError {
     EmptyPhaseEnsemble,
+    NoPhaseDefined {
+        composition: [f64; 3],
+    },
     DuplicatePhaseId {
         phase: StablePhaseId,
     },
@@ -150,6 +153,10 @@ impl fmt::Display for StableContourError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyPhaseEnsemble => formatter.write_str("stable phase ensemble is empty"),
+            Self::NoPhaseDefined { composition } => write!(
+                formatter,
+                "no stable phase is defined at composition {composition:?}"
+            ),
             Self::DuplicatePhaseId { phase } => {
                 write!(formatter, "stable phase ID {phase:?} is duplicated")
             }

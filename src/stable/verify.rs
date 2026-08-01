@@ -29,9 +29,9 @@ pub(crate) fn verify_sampling_grid(
     }
     let barycentric_points = verification_points(verification);
     let mut hints = vec![SourceLocationHint::default(); groups.len()];
-    let mut direct_heights = vec![0.0; samples.phase_count];
+    let mut direct_heights = vec![None; samples.phase_count];
     let mut direct_secondary =
-        (quantity == StableContourQuantity::Secondary).then(|| vec![0.0; samples.phase_count]);
+        (quantity == StableContourQuantity::Secondary).then(|| vec![None; samples.phase_count]);
     let mut squared_height_error = 0.0;
     let mut height_error_count = 0usize;
     let mut worst_triangle_score = f64::NEG_INFINITY;
@@ -57,28 +57,46 @@ pub(crate) fn verify_sampling_grid(
             let predicted_heights = samples.affine_heights(triangle.vertices, barycentric);
             let mut point_unresolved = false;
             for (&direct, &predicted) in direct_heights.iter().zip(&predicted_heights) {
-                let error = (direct - predicted).abs();
-                pass.maximum_height_approximation_error =
-                    pass.maximum_height_approximation_error.max(error);
-                squared_height_error += error * error;
-                height_error_count += 1;
-                if error > verification.height_error_tolerance {
-                    point_unresolved = true;
+                match (direct, predicted) {
+                    (Some(direct), Some(predicted)) => {
+                        let error = (direct - predicted).abs();
+                        pass.maximum_height_approximation_error =
+                            pass.maximum_height_approximation_error.max(error);
+                        squared_height_error += error * error;
+                        height_error_count += 1;
+                        if error > verification.height_error_tolerance {
+                            point_unresolved = true;
+                        }
+                        triangle_score = triangle_score.max(error);
+                    }
+                    (None, None) => {}
+                    _ => {
+                        point_unresolved = true;
+                        triangle_score = triangle_score.max(1.0);
+                    }
                 }
-                triangle_score = triangle_score.max(error);
             }
             if let (Some(direct), Some(predicted)) = (
                 direct_secondary.as_deref(),
                 samples.affine_secondary(triangle.vertices, barycentric),
             ) {
                 for (&direct, &predicted) in direct.iter().zip(&predicted) {
-                    let error = (direct - predicted).abs();
-                    pass.maximum_secondary_approximation_error =
-                        pass.maximum_secondary_approximation_error.max(error);
-                    if error > verification.secondary_error_tolerance {
-                        point_unresolved = true;
+                    match (direct, predicted) {
+                        (Some(direct), Some(predicted)) => {
+                            let error = (direct - predicted).abs();
+                            pass.maximum_secondary_approximation_error =
+                                pass.maximum_secondary_approximation_error.max(error);
+                            if error > verification.secondary_error_tolerance {
+                                point_unresolved = true;
+                            }
+                            triangle_score = triangle_score.max(error);
+                        }
+                        (None, None) => {}
+                        _ => {
+                            point_unresolved = true;
+                            triangle_score = triangle_score.max(1.0);
+                        }
                     }
-                    triangle_score = triangle_score.max(error);
                 }
             }
             let direct_stable = stable_set(&direct_heights, verification.ownership_tolerance);
@@ -156,32 +174,36 @@ fn affine_candidate_set(
     tolerance: f64,
 ) -> BTreeSet<usize> {
     let bounds: Vec<_> = (0..samples.phase_count)
-        .map(|phase| {
-            let values = samples.triangle_height_values(phase, triangle.vertices);
-            (
+        .filter_map(|phase| {
+            let values = samples.triangle_height_values(phase, triangle.vertices)?;
+            Some((
+                phase,
                 values.into_iter().fold(f64::INFINITY, f64::min),
                 values.into_iter().fold(f64::NEG_INFINITY, f64::max),
-            )
+            ))
         })
         .collect();
     let envelope_floor = bounds
         .iter()
-        .map(|(minimum, _)| *minimum)
+        .map(|(_, minimum, _)| *minimum)
         .fold(f64::NEG_INFINITY, f64::max);
     bounds
-        .iter()
-        .enumerate()
-        .filter(|(_, (_, maximum))| *maximum >= envelope_floor - tolerance)
-        .map(|(phase, _)| phase)
+        .into_iter()
+        .filter(|(_, _, maximum)| *maximum >= envelope_floor - tolerance)
+        .map(|(phase, _, _)| phase)
         .collect()
 }
 
-fn stable_set(values: &[f64], tolerance: f64) -> BTreeSet<usize> {
-    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+fn stable_set(values: &[Option<f64>], tolerance: f64) -> BTreeSet<usize> {
+    let maximum = values
+        .iter()
+        .flatten()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
     values
         .iter()
         .enumerate()
-        .filter(|(_, value)| **value >= maximum - tolerance)
+        .filter(|(_, value)| value.is_some_and(|value| value >= maximum - tolerance))
         .map(|(index, _)| index)
         .collect()
 }

@@ -1,5 +1,6 @@
 //! Stable phase contours on a common virtual regular sampling grid.
 
+mod boundary;
 mod clip;
 mod diagnostics;
 mod error;
@@ -15,11 +16,20 @@ mod verify;
 #[cfg(test)]
 mod tests;
 
+pub use boundary::{
+    BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
+    BinaryStableRegion, InteriorInvariantNode, StableBoundaryDiagnostics, StableBoundaryError,
+    StableBoundaryNetwork, StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId,
+    StablePhasePair, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
+};
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
 pub use error::{StableContourError, StableSourceEvaluationError};
 pub use options::{StableGridOptions, StableGridVerification};
 pub use prepare::PreparedStablePhaseEnsemble;
-pub use source::{StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource};
+pub use source::{
+    StableContourQuantity, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
+    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
+};
 
 use crate::TernaryCoordinate;
 

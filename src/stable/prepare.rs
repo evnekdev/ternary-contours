@@ -27,7 +27,7 @@ pub struct PreparedStablePhaseEnsemble<'a> {
     samples: RegularSamplingGrid,
     cells: Vec<StableSamplingCell>,
     diagnostics: StableContourDiagnostics,
-    _layers: Vec<PreparedSourceLayer<'a>>,
+    layers: Vec<PreparedSourceLayer<'a>>,
     _groups: Vec<SourceGeometryGroup<'a>>,
 }
 
@@ -157,11 +157,18 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             samples,
             cells,
             diagnostics,
-            _layers: layers,
+            layers,
             _groups: groups,
         })
     }
 
+    /// Discover ordered stable invariants on all three outer binary boundaries.
+    pub fn binary_boundary_traces(
+        &self,
+        options: super::StableBoundaryOptions,
+    ) -> Result<Vec<super::BinaryBoundaryTrace>, super::StableBoundaryError> {
+        super::boundary::trace_binary_boundaries(&self.layers, &self.phase_ids, options)
+    }
     /// Trace phase-labelled contours at finite levels.
     ///
     /// Levels are returned in ascending order. Stable polygons and sampled

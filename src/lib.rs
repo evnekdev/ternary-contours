@@ -139,11 +139,16 @@ pub use metrics::{
     IrregularAlphaEdgeMetrics, IrregularAlphaResponseMetrics, IrregularCubicEdgeContinuityMetrics,
 };
 pub use stable::{
-    PreparedStablePhaseEnsemble, StableContourDiagnostics, StableContourError,
-    StableContourJunction, StableContourJunctionKind, StableContourLevel, StableContourPath,
-    StableContourQuantity, StableContourSet, StableGridOptions, StableGridVerification,
-    StableJunctionId, StablePhaseId, StablePhaseSource, StableScalarSource,
-    StableSourceEvaluationError, StableVerificationPassDiagnostics,
+    BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
+    BinaryStableRegion, InteriorInvariantNode, PreparedStablePhaseEnsemble,
+    StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork, StableBoundaryOptions,
+    StableContourDiagnostics, StableContourError, StableContourJunction, StableContourJunctionKind,
+    StableContourLevel, StableContourPath, StableContourQuantity, StableContourSet,
+    StableGridOptions, StableGridVerification, StableInvariantNode, StableInvariantNodeId,
+    StableJunctionId, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair,
+    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
+    StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
+    StableVerificationPassDiagnostics,
 };
 
 #[cfg(feature = "irregular-delaunay")]

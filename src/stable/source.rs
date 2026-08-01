@@ -5,6 +5,41 @@ use crate::{IrregularFieldInterpolation, IrregularTernaryScalarField};
 /// Stable user-defined identifier for one phase in an ensemble.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct StablePhaseId(pub u32);
+/// Expected outcome of evaluating one phase-specific scalar field.
+#[derive(Clone, Debug, PartialEq)]
+#[non_exhaustive]
+pub enum StablePhaseEvaluation {
+    /// The phase field is defined at the requested composition.
+    Defined { value: f64 },
+    /// The phase field is intentionally unavailable at this composition.
+    Undefined { reason: StablePhaseUndefinedReason },
+}
+
+/// Why a phase-specific scalar field is undefined at one composition.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[non_exhaustive]
+pub enum StablePhaseUndefinedReason {
+    TargetSearchDidNotConverge,
+    NoSinglePhaseLiquidus,
+    OutsidePhaseDomain,
+    NonFiniteResult,
+    SourceEvaluationFailure,
+}
+
+/// Black-box phase evaluator supporting explicit partial-domain semantics.
+pub trait StablePhaseEvaluator {
+    /// Evaluate one normalized semantic A/B/C composition.
+    fn evaluate(&self, composition: [f64; 3]) -> StablePhaseEvaluation;
+}
+
+impl<F> StablePhaseEvaluator for F
+where
+    F: Fn([f64; 3]) -> StablePhaseEvaluation,
+{
+    fn evaluate(&self, composition: [f64; 3]) -> StablePhaseEvaluation {
+        self(composition)
+    }
+}
 
 /// Quantity traced after height-defined stable regions have been constructed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +56,7 @@ pub enum StableContourQuantity {
 /// The selected source interpolation is prepared once. Regardless of this
 /// choice, the resulting sampling-grid representation is affine per sampling-grid
 /// triangle.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub enum StableScalarSource<'a> {
     /// A regular scalar field with linear or optional cubic-alpha sampling.
@@ -39,8 +74,37 @@ pub enum StableScalarSource<'a> {
         /// Interpolation used while resampling.
         interpolation: IrregularFieldInterpolation,
     },
+    /// Direct evaluator with explicit defined/undefined semantics.
+    Evaluator {
+        /// Borrowed deterministic evaluator.
+        evaluator: &'a dyn StablePhaseEvaluator,
+    },
 }
 
+impl core::fmt::Debug for StableScalarSource<'_> {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Regular {
+                field,
+                interpolation,
+            } => formatter
+                .debug_struct("Regular")
+                .field("subdivisions", &field.subdivisions())
+                .field("interpolation", interpolation)
+                .finish(),
+            #[cfg(feature = "irregular-delaunay")]
+            Self::Irregular {
+                field,
+                interpolation,
+            } => formatter
+                .debug_struct("Irregular")
+                .field("vertex_count", &field.mesh().vertex_count())
+                .field("interpolation", interpolation)
+                .finish(),
+            Self::Evaluator { .. } => formatter.write_str("Evaluator(..)"),
+        }
+    }
+}
 impl<'a> StableScalarSource<'a> {
     /// Construct a regular source layer.
     pub const fn regular(
@@ -65,11 +129,20 @@ impl<'a> StableScalarSource<'a> {
         }
     }
 
+    /// Construct a direct partial-domain evaluator source.
+    pub const fn evaluator(evaluator: &'a dyn StablePhaseEvaluator) -> Self {
+        Self::Evaluator { evaluator }
+    }
+
     pub(crate) fn geometry_key(self) -> SourceGeometryKey<'a> {
         match self {
             Self::Regular { field, .. } => SourceGeometryKey::regular(field.subdivisions()),
             #[cfg(feature = "irregular-delaunay")]
             Self::Irregular { field, .. } => SourceGeometryKey::Irregular(field.mesh()),
+            Self::Evaluator { evaluator } => SourceGeometryKey::Evaluator(
+                evaluator as *const dyn StablePhaseEvaluator as *const () as usize,
+                core::marker::PhantomData,
+            ),
         }
     }
 
@@ -82,7 +155,9 @@ impl<'a> StableScalarSource<'a> {
             (Self::Irregular { field: left, .. }, Self::Irregular { field: right, .. }) => {
                 left.mesh().has_same_identity(right.mesh())
             }
-            #[cfg(feature = "irregular-delaunay")]
+            (Self::Evaluator { evaluator: left }, Self::Evaluator { evaluator: right }) => {
+                core::ptr::eq(left, right)
+            }
             _ => false,
         }
     }
@@ -133,6 +208,7 @@ pub(crate) enum SourceGeometryKey<'a> {
     Regular(usize, core::marker::PhantomData<&'a ()>),
     #[cfg(feature = "irregular-delaunay")]
     Irregular(&'a crate::IrregularTernaryMesh),
+    Evaluator(usize, core::marker::PhantomData<&'a ()>),
 }
 
 impl<'a> SourceGeometryKey<'a> {
@@ -145,13 +221,24 @@ impl<'a> SourceGeometryKey<'a> {
             (Self::Regular(left, _), Self::Regular(right, _)) => left == right,
             #[cfg(feature = "irregular-delaunay")]
             (Self::Irregular(left), Self::Irregular(right)) => left.has_same_identity(right),
-            #[cfg(feature = "irregular-delaunay")]
+            (Self::Evaluator(left, _), Self::Evaluator(right, _)) => left == right,
             _ => false,
         }
     }
 
     pub(crate) const fn is_regular(self) -> bool {
         matches!(self, Self::Regular(_, _))
+    }
+
+    pub(crate) const fn is_irregular(self) -> bool {
+        #[cfg(feature = "irregular-delaunay")]
+        {
+            matches!(self, Self::Irregular(_))
+        }
+        #[cfg(not(feature = "irregular-delaunay"))]
+        {
+            false
+        }
     }
 }
 

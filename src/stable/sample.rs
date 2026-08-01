@@ -9,13 +9,14 @@ use crate::{
 };
 
 use super::{
-    StableContourDiagnostics, StableContourError, StableContourQuantity, StablePhaseId,
-    StablePhaseSource, StableSourceEvaluationError,
+    StableContourDiagnostics, StableContourError, StableContourQuantity, StablePhaseEvaluation,
+    StablePhaseId, StablePhaseSource, StableSourceEvaluationError,
     source::{ScalarRole, SourceGeometryKey},
 };
 
 pub(crate) enum PreparedSourceEvaluator<'a> {
     Regular(InterpolatedTernaryField<'a>),
+    Evaluator(&'a dyn super::StablePhaseEvaluator),
     #[cfg(feature = "irregular-delaunay")]
     Irregular(InterpolatedIrregularTernaryField<'a>),
 }
@@ -42,8 +43,8 @@ pub(crate) struct SourceLocationHint {
 pub(crate) struct RegularSamplingGrid {
     pub grid: RegularTernaryGrid,
     pub phase_count: usize,
-    heights: Vec<f64>,
-    secondary: Option<Vec<f64>>,
+    heights: Vec<Option<f64>>,
+    secondary: Option<Vec<Option<f64>>>,
 }
 
 impl RegularSamplingGrid {
@@ -51,18 +52,25 @@ impl RegularSamplingGrid {
         self.grid.vertex_count()
     }
 
-    pub fn height(&self, phase: usize, vertex: GridVertexId) -> f64 {
+    pub fn height(&self, phase: usize, vertex: GridVertexId) -> Option<f64> {
         self.heights[phase * self.vertex_count() + vertex.0]
     }
 
     pub fn secondary(&self, phase: usize, vertex: GridVertexId) -> Option<f64> {
         self.secondary
             .as_ref()
-            .map(|values| values[phase * self.vertex_count() + vertex.0])
+            .and_then(|values| values[phase * self.vertex_count() + vertex.0])
     }
 
-    pub fn triangle_height_values(&self, phase: usize, vertices: [GridVertexId; 3]) -> [f64; 3] {
-        vertices.map(|vertex| self.height(phase, vertex))
+    pub fn triangle_height_values(
+        &self,
+        phase: usize,
+        vertices: [GridVertexId; 3],
+    ) -> Option<[f64; 3]> {
+        match vertices.map(|vertex| self.height(phase, vertex)) {
+            [Some(first), Some(second), Some(third)] => Some([first, second, third]),
+            _ => None,
+        }
     }
 
     pub fn triangle_secondary_values(
@@ -70,14 +78,22 @@ impl RegularSamplingGrid {
         phase: usize,
         vertices: [GridVertexId; 3],
     ) -> Option<[f64; 3]> {
-        self.secondary
-            .as_ref()
-            .map(|_| vertices.map(|vertex| self.secondary(phase, vertex).unwrap()))
+        match vertices.map(|vertex| self.secondary(phase, vertex)) {
+            [Some(first), Some(second), Some(third)] => Some([first, second, third]),
+            _ => None,
+        }
     }
 
-    pub fn affine_heights(&self, vertices: [GridVertexId; 3], barycentric: [f64; 3]) -> Vec<f64> {
+    pub fn affine_heights(
+        &self,
+        vertices: [GridVertexId; 3],
+        barycentric: [f64; 3],
+    ) -> Vec<Option<f64>> {
         (0..self.phase_count)
-            .map(|phase| dot(self.triangle_height_values(phase, vertices), barycentric))
+            .map(|phase| {
+                self.triangle_height_values(phase, vertices)
+                    .map(|values| dot(values, barycentric))
+            })
             .collect()
     }
 
@@ -85,20 +101,17 @@ impl RegularSamplingGrid {
         &self,
         vertices: [GridVertexId; 3],
         barycentric: [f64; 3],
-    ) -> Option<Vec<f64>> {
+    ) -> Option<Vec<Option<f64>>> {
         self.secondary.as_ref().map(|_| {
             (0..self.phase_count)
                 .map(|phase| {
-                    dot(
-                        self.triangle_secondary_values(phase, vertices).unwrap(),
-                        barycentric,
-                    )
+                    self.triangle_secondary_values(phase, vertices)
+                        .map(|values| dot(values, barycentric))
                 })
                 .collect()
         })
     }
 }
-
 pub(crate) fn prepare_sources<'a>(
     phases: &[StablePhaseSource<'a>],
     quantity: StableContourQuantity,
@@ -151,8 +164,10 @@ pub(crate) fn prepare_sources<'a>(
         .iter()
         .filter(|group| group.geometry.is_regular())
         .count();
-    diagnostics.irregular_geometry_group_count =
-        groups.len() - diagnostics.regular_geometry_group_count;
+    diagnostics.irregular_geometry_group_count = groups
+        .iter()
+        .filter(|group| group.geometry.is_irregular())
+        .count();
     Ok((layers, groups))
 }
 
@@ -181,6 +196,9 @@ fn prepare_layer<'a>(
             .map_err(|error| {
                 preparation_error(phase, role, StableSourceEvaluationError::Irregular(error))
             })?,
+        super::StableScalarSource::Evaluator { evaluator } => {
+            PreparedSourceEvaluator::Evaluator(evaluator)
+        }
     };
     Ok(PreparedSourceLayer {
         phase_index,
@@ -232,11 +250,11 @@ pub(crate) fn sample_regular_grid(
     let sample_count = phase_count
         .checked_mul(grid.vertex_count())
         .ok_or(StableContourError::SamplingSubdivisionOverflow)?;
-    let mut heights = vec![0.0; sample_count];
+    let mut heights = vec![None; sample_count];
     let mut secondary =
-        (quantity == StableContourQuantity::Secondary).then(|| vec![0.0; sample_count]);
-    let mut scratch_heights = vec![0.0; phase_count];
-    let mut scratch_secondary = secondary.as_ref().map(|_| vec![0.0; phase_count]);
+        (quantity == StableContourQuantity::Secondary).then(|| vec![None; sample_count]);
+    let mut scratch_heights = vec![None; phase_count];
+    let mut scratch_secondary = secondary.as_ref().map(|_| vec![None; phase_count]);
     let mut hints = vec![SourceLocationHint::default(); groups.len()];
 
     for (vertex, composition) in grid.indexed_compositions() {
@@ -274,11 +292,15 @@ pub(crate) fn evaluate_sources_at_point(
     groups: &[SourceGeometryGroup<'_>],
     composition: [f64; 3],
     hints: &mut [SourceLocationHint],
-    heights: &mut [f64],
-    mut secondary: Option<&mut [f64]>,
+    heights: &mut [Option<f64>],
+    mut secondary: Option<&mut [Option<f64>]>,
     diagnostics: &mut StableContourDiagnostics,
     coverage_vertex: Option<GridVertexId>,
 ) -> Result<(), StableContourError> {
+    heights.fill(None);
+    if let Some(values) = secondary.as_deref_mut() {
+        values.fill(None);
+    }
     #[cfg(not(feature = "irregular-delaunay"))]
     let _ = coverage_vertex;
     for (group_index, group) in groups.iter().enumerate() {
@@ -289,15 +311,9 @@ pub(crate) fn evaluate_sources_at_point(
         match group.geometry {
             SourceGeometryKey::Regular(_, _) => {
                 let first = &layers[group.layers[0]];
-                #[cfg(feature = "irregular-delaunay")]
                 let grid = match &first.evaluator {
                     PreparedSourceEvaluator::Regular(evaluator) => evaluator.field().grid(),
-                    PreparedSourceEvaluator::Irregular(_) => unreachable!(),
-                };
-                #[cfg(not(feature = "irregular-delaunay"))]
-                let grid = {
-                    let PreparedSourceEvaluator::Regular(evaluator) = &first.evaluator;
-                    evaluator.field().grid()
+                    _ => unreachable!("geometry group and evaluator kind must agree"),
                 };
                 let location = grid.locate(composition).map_err(|error| {
                     evaluation_error(
@@ -345,7 +361,19 @@ pub(crate) fn evaluate_sources_at_point(
                     secondary.as_deref_mut(),
                 )?;
             }
+            SourceGeometryKey::Evaluator(_, _) => {
+                evaluate_direct_group(
+                    layers,
+                    group,
+                    composition,
+                    heights,
+                    secondary.as_deref_mut(),
+                )?;
+            }
         }
+    }
+    if heights.iter().all(Option::is_none) {
+        return Err(StableContourError::NoPhaseDefined { composition });
     }
     Ok(())
 }
@@ -355,20 +383,14 @@ fn evaluate_regular_group(
     group: &SourceGeometryGroup<'_>,
     location: &LocatedTriangle,
     composition: [f64; 3],
-    heights: &mut [f64],
-    mut secondary: Option<&mut [f64]>,
+    heights: &mut [Option<f64>],
+    mut secondary: Option<&mut [Option<f64>]>,
 ) -> Result<(), StableContourError> {
     for &layer_index in &group.layers {
         let layer = &layers[layer_index];
-        #[cfg(feature = "irregular-delaunay")]
         let evaluator = match &layer.evaluator {
             PreparedSourceEvaluator::Regular(evaluator) => evaluator,
-            PreparedSourceEvaluator::Irregular(_) => unreachable!(),
-        };
-        #[cfg(not(feature = "irregular-delaunay"))]
-        let evaluator = {
-            let PreparedSourceEvaluator::Regular(evaluator) = &layer.evaluator;
-            evaluator
+            _ => unreachable!("geometry group and evaluator kind must agree"),
         };
         let value = evaluator.value_at_location(location).map_err(|error| {
             evaluation_error(
@@ -388,14 +410,15 @@ fn evaluate_irregular_group(
     group: &SourceGeometryGroup<'_>,
     location: &LocatedIrregularTriangle,
     composition: [f64; 3],
-    heights: &mut [f64],
-    mut secondary: Option<&mut [f64]>,
+    heights: &mut [Option<f64>],
+    mut secondary: Option<&mut [Option<f64>]>,
 ) -> Result<(), StableContourError> {
     for &layer_index in &group.layers {
         let layer = &layers[layer_index];
         let evaluator = match &layer.evaluator {
             PreparedSourceEvaluator::Irregular(evaluator) => evaluator,
             PreparedSourceEvaluator::Regular(_) => unreachable!(),
+            PreparedSourceEvaluator::Evaluator(_) => unreachable!(),
         };
         let value = evaluator.value_at_location(location).map_err(|error| {
             evaluation_error(
@@ -409,12 +432,51 @@ fn evaluate_irregular_group(
     Ok(())
 }
 
+fn evaluate_direct_group(
+    layers: &[PreparedSourceLayer<'_>],
+    group: &SourceGeometryGroup<'_>,
+    composition: [f64; 3],
+    heights: &mut [Option<f64>],
+    mut secondary: Option<&mut [Option<f64>]>,
+) -> Result<(), StableContourError> {
+    for &layer_index in &group.layers {
+        let layer = &layers[layer_index];
+        let evaluator = match &layer.evaluator {
+            PreparedSourceEvaluator::Evaluator(evaluator) => *evaluator,
+            _ => unreachable!("geometry group and evaluator kind must agree"),
+        };
+        match evaluator.evaluate(composition) {
+            StablePhaseEvaluation::Defined { value } if value.is_finite() => {
+                store_value(layer, value, composition, heights, secondary.as_deref_mut())?;
+            }
+            StablePhaseEvaluation::Defined { .. } | StablePhaseEvaluation::Undefined { .. } => {
+                store_undefined(layer, heights, secondary.as_deref_mut());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn store_undefined(
+    layer: &PreparedSourceLayer<'_>,
+    heights: &mut [Option<f64>],
+    secondary: Option<&mut [Option<f64>]>,
+) {
+    match layer.role {
+        ScalarRole::Height => heights[layer.phase_index] = None,
+        ScalarRole::Secondary => {
+            if let Some(values) = secondary {
+                values[layer.phase_index] = None;
+            }
+        }
+    }
+}
 fn store_value(
     layer: &PreparedSourceLayer<'_>,
     value: f64,
     composition: [f64; 3],
-    heights: &mut [f64],
-    secondary: Option<&mut [f64]>,
+    heights: &mut [Option<f64>],
+    secondary: Option<&mut [Option<f64>]>,
 ) -> Result<(), StableContourError> {
     if !value.is_finite() {
         return Err(StableContourError::NonFiniteSourceEvaluation {
@@ -424,15 +486,73 @@ fn store_value(
         });
     }
     match layer.role {
-        ScalarRole::Height => heights[layer.phase_index] = value,
+        ScalarRole::Height => heights[layer.phase_index] = Some(value),
         ScalarRole::Secondary => {
-            secondary.expect("secondary storage exists for a secondary layer")[layer.phase_index] =
-                value;
+            let values = secondary
+                .ok_or(StableContourError::MissingSecondaryScalar { phase: layer.phase })?;
+            values[layer.phase_index] = Some(value);
         }
     }
     Ok(())
 }
 
+pub(crate) fn evaluate_layer_at_point(
+    layer: &PreparedSourceLayer<'_>,
+    composition: [f64; 3],
+) -> Result<StablePhaseEvaluation, StableContourError> {
+    let evaluation = match &layer.evaluator {
+        PreparedSourceEvaluator::Regular(evaluator) => {
+            let location = evaluator
+                .field()
+                .grid()
+                .locate(composition)
+                .map_err(|error| {
+                    evaluation_error(
+                        layer,
+                        composition,
+                        StableSourceEvaluationError::Regular(error.into()),
+                    )
+                })?;
+            let value = evaluator.value_at_location(&location).map_err(|error| {
+                evaluation_error(
+                    layer,
+                    composition,
+                    StableSourceEvaluationError::Regular(error),
+                )
+            })?;
+            StablePhaseEvaluation::Defined { value }
+        }
+        #[cfg(feature = "irregular-delaunay")]
+        PreparedSourceEvaluator::Irregular(evaluator) => {
+            let location = match evaluator.field().mesh().locate(composition) {
+                Ok(location) => location,
+                Err(_) => {
+                    return Ok(StablePhaseEvaluation::Undefined {
+                        reason: super::StablePhaseUndefinedReason::OutsidePhaseDomain,
+                    });
+                }
+            };
+            let value = evaluator.value_at_location(&location).map_err(|error| {
+                evaluation_error(
+                    layer,
+                    composition,
+                    StableSourceEvaluationError::Irregular(error),
+                )
+            })?;
+            StablePhaseEvaluation::Defined { value }
+        }
+        PreparedSourceEvaluator::Evaluator(evaluator) => evaluator.evaluate(composition),
+    };
+    Ok(match evaluation {
+        StablePhaseEvaluation::Defined { value } if value.is_finite() => {
+            StablePhaseEvaluation::Defined { value }
+        }
+        StablePhaseEvaluation::Defined { .. } => StablePhaseEvaluation::Undefined {
+            reason: super::StablePhaseUndefinedReason::NonFiniteResult,
+        },
+        undefined @ StablePhaseEvaluation::Undefined { .. } => undefined,
+    })
+}
 fn evaluation_error(
     layer: &PreparedSourceLayer<'_>,
     composition: [f64; 3],

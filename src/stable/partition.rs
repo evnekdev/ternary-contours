@@ -46,15 +46,15 @@ pub(crate) fn build_stable_partition(
             .iter()
             .copied()
             .enumerate()
-            .map(|(phase_index, phase)| {
-                let values = samples.triangle_height_values(phase_index, triangle.vertices);
-                PhaseBounds {
+            .filter_map(|(phase_index, phase)| {
+                let values = samples.triangle_height_values(phase_index, triangle.vertices)?;
+                Some(PhaseBounds {
                     phase_index,
                     phase,
                     values,
                     minimum: values.into_iter().fold(f64::INFINITY, f64::min),
                     maximum: values.into_iter().fold(f64::NEG_INFINITY, f64::max),
-                }
+                })
             })
             .collect();
         if bounds.iter().any(|bound| {
@@ -181,15 +181,17 @@ fn triangle_vertices(
 }
 
 fn wins_any_triangle_vertex(phase_index: usize, bounds: &[PhaseBounds], tolerance: f64) -> bool {
+    let Some(owner) = bounds.iter().find(|bound| bound.phase_index == phase_index) else {
+        return false;
+    };
     (0..3).any(|vertex| {
         let maximum = bounds
             .iter()
             .map(|bound| bound.values[vertex])
             .fold(f64::NEG_INFINITY, f64::max);
-        bounds[phase_index].values[vertex] >= maximum - tolerance
+        owner.values[vertex] >= maximum - tolerance
     })
 }
-
 fn reject_positive_area_ties(
     triangle: GridTriangle,
     candidates: &[PhaseBounds],
