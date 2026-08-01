@@ -57,13 +57,15 @@ pub(crate) fn extract_level_segments(
     let mut segments = Vec::new();
     for cell in cells {
         for polygon in &cell.polygons {
-            let target_values = match quantity {
+            let Some(target_values) = (match quantity {
                 StableContourQuantity::Height => {
                     samples.triangle_height_values(polygon.phase_index, cell.triangle.vertices)
                 }
-                StableContourQuantity::Secondary => samples
-                    .triangle_secondary_values(polygon.phase_index, cell.triangle.vertices)
-                    .expect("secondary samples exist in secondary mode"),
+                StableContourQuantity::Secondary => {
+                    samples.triangle_secondary_values(polygon.phase_index, cell.triangle.vertices)
+                }
+            }) else {
+                continue;
             };
             let minimum = target_values.into_iter().fold(f64::INFINITY, f64::min);
             let maximum = target_values.into_iter().fold(f64::NEG_INFINITY, f64::max);
@@ -463,20 +465,20 @@ fn tied_phases(
     tolerance: f64,
 ) -> Vec<StablePhaseId> {
     let values: Vec<_> = (0..samples.phase_count)
-        .map(|phase| {
-            dot(
-                samples.triangle_height_values(phase, cell.triangle.vertices),
-                barycentric,
-            )
+        .filter_map(|phase| {
+            samples
+                .triangle_height_values(phase, cell.triangle.vertices)
+                .map(|values| (phase, dot(values, barycentric)))
         })
         .collect();
-    let maximum = values.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    phase_ids
+    let maximum = values
         .iter()
-        .copied()
-        .zip(values)
+        .map(|(_, value)| *value)
+        .fold(f64::NEG_INFINITY, f64::max);
+    values
+        .into_iter()
         .filter(|(_, value)| *value >= maximum - tolerance)
-        .map(|(phase, _)| phase)
+        .map(|(phase, _)| phase_ids[phase])
         .collect()
 }
 
