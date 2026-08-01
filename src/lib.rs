@@ -51,6 +51,7 @@ pub mod interpolation;
 #[cfg(feature = "irregular-delaunay")]
 pub mod irregular;
 pub mod metrics;
+mod path;
 mod simplex;
 pub mod stable;
 /// Deterministic analytical fields used by examples and regression tests.
@@ -138,6 +139,7 @@ pub use metrics::{
 pub use metrics::{
     IrregularAlphaEdgeMetrics, IrregularAlphaResponseMetrics, IrregularCubicEdgeContinuityMetrics,
 };
+pub use path::PathRegularizationOptions;
 pub use stable::{
     BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
     BinaryStableRegion, InteriorInvariantNode, PreparedStablePhaseEnsemble,
@@ -148,7 +150,7 @@ pub use stable::{
     StableJunctionId, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair,
     StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
     StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
-    StableVerificationPassDiagnostics,
+    StableUnivariantRegularizationDiagnostics, StableVerificationPassDiagnostics,
 };
 
 #[cfg(feature = "irregular-delaunay")]

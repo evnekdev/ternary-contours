@@ -186,6 +186,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             &self.cells,
             &self.samples,
             &self.phase_ids,
+            &self.layers,
             options,
         )
     }

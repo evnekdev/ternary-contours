@@ -52,55 +52,8 @@ impl AdaptiveContourOptions {
     }
 }
 
-/// Equal-arclength redistribution and implicit-level projection settings.
-///
-/// Lengths are measured in the canonical equilateral logical plane, not pixels.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ContourRegularization {
-    /// Target logical spacing between redistributed path points.
-    pub spacing: f64,
-    /// Number of redistribution/project passes; zero still performs one pass.
-    pub redistribution_passes: usize,
-    /// Accepted absolute level residual after projection.
-    pub projection_tolerance: f64,
-    /// Maximum damped normal/Newton iterations for one point.
-    pub max_projection_iterations: usize,
-    /// Maximum semantic `(a,b)` correction length per iteration.
-    pub max_normal_step: f64,
-}
-impl Default for ContourRegularization {
-    fn default() -> Self {
-        Self {
-            spacing: 0.0125,
-            redistribution_passes: 2,
-            projection_tolerance: 1.0e-9,
-            max_projection_iterations: 16,
-            max_normal_step: 0.05,
-        }
-    }
-}
-impl ContourRegularization {
-    pub(crate) fn validate(self) -> Result<(), ContourError> {
-        if !self.spacing.is_finite() || self.spacing <= 0.0 {
-            return Err(ContourError::InvalidRegularizationSpacing {
-                spacing: self.spacing,
-            });
-        }
-        if !self.projection_tolerance.is_finite()
-            || self.projection_tolerance <= 0.0
-            || self.max_projection_iterations == 0
-            || !self.max_normal_step.is_finite()
-            || self.max_normal_step <= 0.0
-        {
-            return Err(ContourError::InvalidProjectionOptions {
-                tolerance: self.projection_tolerance,
-                iterations: self.max_projection_iterations,
-                max_step: self.max_normal_step,
-            });
-        }
-        Ok(())
-    }
-}
+/// Backward-compatible contour name for shared path regularization controls.
+pub use crate::PathRegularizationOptions as ContourRegularization;
 
 /// Cubic-alpha construction policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -189,7 +142,19 @@ impl ContourOptions {
             options.adaptive.validate()?;
         }
         if let Some(regularization) = self.regularization {
-            regularization.validate()?;
+            match crate::path::validate_regularization(regularization) {
+                Ok(()) => {}
+                Err(crate::path::PathProcessingError::InvalidSpacing { spacing }) => {
+                    return Err(ContourError::InvalidRegularizationSpacing { spacing });
+                }
+                Err(_) => {
+                    return Err(ContourError::InvalidProjectionOptions {
+                        tolerance: regularization.projection_tolerance,
+                        iterations: regularization.max_projection_iterations,
+                        max_step: regularization.max_normal_step,
+                    });
+                }
+            }
         }
         Ok(())
     }

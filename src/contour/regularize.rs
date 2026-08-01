@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::simplex::logical_from_composition;
-use crate::{RegularTernaryScalarField, TernaryCoordinate, simplex::logical_distance};
+use crate::{RegularTernaryScalarField, TernaryCoordinate};
 
 #[cfg(feature = "cubic-alpha")]
 use super::locate::ContourCubicField;
@@ -30,7 +30,19 @@ pub(crate) fn regularize_paths(
     options: ContourRegularization,
     evaluator: &FieldEvaluator<'_>,
 ) -> Result<(), ContourError> {
-    options.validate()?;
+    match crate::path::validate_regularization(options) {
+        Ok(()) => {}
+        Err(crate::path::PathProcessingError::InvalidSpacing { spacing }) => {
+            return Err(ContourError::InvalidRegularizationSpacing { spacing });
+        }
+        Err(_) => {
+            return Err(ContourError::InvalidProjectionOptions {
+                tolerance: options.projection_tolerance,
+                iterations: options.max_projection_iterations,
+                max_step: options.max_normal_step,
+            });
+        }
+    }
     for path in paths {
         let original_start = path.points.first().copied();
         let original_end = path.points.last().copied();
@@ -61,141 +73,74 @@ fn redistribute(
     closed: bool,
     spacing: f64,
 ) -> Result<Vec<TernaryCoordinate>, ContourError> {
-    if points.len() < 2 {
-        return Err(ContourError::ZeroLengthPath);
+    let cleaned = crate::path::cleanup(points, closed, 1.0e-12).map_err(path_error)?;
+    crate::path::redistribute(&cleaned, closed, spacing)
+        .map(|points| points.into_iter().map(|point| point.point).collect())
+        .map_err(path_error)
+}
+
+fn path_error(error: crate::path::PathProcessingError) -> ContourError {
+    match error {
+        crate::path::PathProcessingError::InvalidSpacing { spacing } => {
+            ContourError::InvalidRegularizationSpacing { spacing }
+        }
+        crate::path::PathProcessingError::InvalidProjection => {
+            ContourError::InvalidProjectionOptions {
+                tolerance: f64::NAN,
+                iterations: 0,
+                max_step: f64::NAN,
+            }
+        }
+        crate::path::PathProcessingError::InvalidCoordinate
+        | crate::path::PathProcessingError::ZeroLength => ContourError::ZeroLengthPath,
     }
-    let edge_count = if closed {
-        points.len()
-    } else {
-        points.len() - 1
-    };
-    let mut cumulative = vec![0.0];
-    for index in 0..edge_count {
-        let next = (index + 1) % points.len();
-        cumulative.push(cumulative.last().unwrap() + distance(points[index], points[next]));
-    }
-    let total = *cumulative.last().unwrap();
-    if total <= f64::EPSILON {
-        return Err(ContourError::ZeroLengthPath);
-    }
-    let intervals = (total / spacing).ceil().max(if closed { 3.0 } else { 1.0 }) as usize;
-    let sample_count = if closed { intervals } else { intervals + 1 };
-    let mut result = Vec::with_capacity(sample_count);
-    for sample in 0..sample_count {
-        let target = total * sample as f64 / intervals as f64;
-        let edge = cumulative
-            .windows(2)
-            .position(|window| target <= window[1])
-            .unwrap_or(edge_count - 1);
-        let span = cumulative[edge + 1] - cumulative[edge];
-        let t = if span == 0.0 {
-            0.0
-        } else {
-            (target - cumulative[edge]) / span
-        };
-        result.push(lerp(points[edge], points[(edge + 1) % points.len()], t));
-    }
-    Ok(result)
 }
 
 fn project_point(
-    mut point: TernaryCoordinate,
+    point: TernaryCoordinate,
     level: f64,
     options: ContourRegularization,
     evaluator: &FieldEvaluator<'_>,
     mut trace: Option<&mut Vec<f64>>,
 ) -> Result<TernaryCoordinate, ContourError> {
-    for iteration in 0..options.max_projection_iterations {
-        let located = evaluator.locate(point)?;
+    let result = crate::path::project_implicit(point, options, |candidate| {
+        let located = evaluator
+            .locate(candidate)
+            .map_err(crate::path::ProjectionEvaluationError::Fatal)?;
         let residual = located.value - level;
         if let Some(values) = trace.as_deref_mut() {
             values.push(residual.abs());
         }
-        if residual.abs() <= options.projection_tolerance {
-            return Ok(point);
+        Ok(crate::path::ImplicitSample {
+            residual,
+            gradient_ab: located.gradient_ab,
+        })
+    });
+    match result {
+        Ok(outcome) => Ok(outcome.point),
+        Err(crate::path::ImplicitProjectionError::Evaluation(error)) => Err(error),
+        Err(crate::path::ImplicitProjectionError::ZeroGradient { residual }) => {
+            Err(ContourError::ProjectionZeroGradient { residual })
         }
-        let norm2 = located.gradient_ab[0].powi(2) + located.gradient_ab[1].powi(2);
-        if !norm2.is_finite() || norm2 <= 1e-24 {
-            return Err(ContourError::ProjectionZeroGradient { residual });
+        Err(crate::path::ImplicitProjectionError::NonConvergence {
+            residual,
+            iterations,
+        }) => Err(ContourError::ProjectionNonConvergence {
+            residual,
+            iterations,
+        }),
+        Err(crate::path::ImplicitProjectionError::RejectedInitialPoint) => {
+            Err(ContourError::ProjectionNonConvergence {
+                residual: f64::NAN,
+                iterations: 0,
+            })
         }
-        let factor = -residual / norm2;
-        let mut delta = [
-            factor * located.gradient_ab[0],
-            factor * located.gradient_ab[1],
-        ];
-        let length = delta[0].hypot(delta[1]);
-        if length > options.max_normal_step {
-            let scale = options.max_normal_step / length;
-            delta[0] *= scale;
-            delta[1] *= scale;
-        }
-        let source = point.as_array();
-        let mut accepted = None;
-        let mut damping = 1.0;
-        for _ in 0..24 {
-            let a = source[0] + delta[0] * damping;
-            let b = source[1] + delta[1] * damping;
-            let c = 1.0 - a - b;
-            let candidate =
-                normalized_candidate(a, b, c, options.projection_tolerance.max(1.0e-12));
-            if let Some(candidate) = candidate
-                && let Ok(next) = evaluator.locate(candidate)
-                && (next.value - level).abs() < residual.abs()
-            {
-                accepted = Some(candidate);
-                break;
-            }
-            damping *= 0.5;
-        }
-        let Some(candidate) = accepted else {
-            return Err(ContourError::ProjectionNonConvergence {
-                residual,
-                iterations: iteration + 1,
-            });
-        };
-        point = candidate;
     }
-    let residual = evaluator.locate(point)?.value - level;
-    Err(ContourError::ProjectionNonConvergence {
-        residual,
-        iterations: options.max_projection_iterations,
-    })
-}
-
-fn normalized_candidate(a: f64, b: f64, c: f64, tolerance: f64) -> Option<TernaryCoordinate> {
-    if ![a, b, c].into_iter().all(f64::is_finite)
-        || [a, b, c].into_iter().any(|value| value < -tolerance)
-    {
-        return None;
-    }
-    let components = [a.max(0.0), b.max(0.0), c.max(0.0)];
-    let sum = components.into_iter().sum::<f64>();
-    if !sum.is_finite() || sum <= tolerance {
-        return None;
-    }
-    Some(TernaryCoordinate::new(
-        components[0] / sum,
-        components[1] / sum,
-        components[2] / sum,
-    ))
 }
 #[cfg(test)]
 fn xy(point: TernaryCoordinate) -> [f64; 2] {
     logical_from_composition(point.as_array())
 }
-fn distance(left: TernaryCoordinate, right: TernaryCoordinate) -> f64 {
-    logical_distance(left.as_array(), right.as_array())
-}
-fn lerp(left: TernaryCoordinate, right: TernaryCoordinate, t: f64) -> TernaryCoordinate {
-    let a = left.as_array();
-    let b = right.as_array();
-    TernaryCoordinate::new(
-        a[0] + (b[0] - a[0]) * t,
-        a[1] + (b[1] - a[1]) * t,
-        a[2] + (b[2] - a[2]) * t,
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -338,6 +283,10 @@ mod tests {
         .unwrap();
         assert!((projected.as_array()[0] - 0.35).abs() < 1.0e-9);
         assert!((projected.as_array()[0] - start.as_array()[0]).abs() > 2.0 / n as f64);
+    }
+
+    fn distance(left: TernaryCoordinate, right: TernaryCoordinate) -> f64 {
+        crate::simplex::logical_distance(left.as_array(), right.as_array())
     }
 
     fn signed_area(points: &[TernaryCoordinate]) -> f64 {
