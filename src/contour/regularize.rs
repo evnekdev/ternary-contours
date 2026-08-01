@@ -1,6 +1,6 @@
-use crate::{RegularTernaryScalarField, TernaryCoordinate};
-
-const EQUILATERAL_TRIANGLE_HEIGHT: f64 = 0.866_025_403_784_438_6;
+#[cfg(test)]
+use crate::simplex::logical_from_composition;
+use crate::{RegularTernaryScalarField, TernaryCoordinate, simplex::logical_distance};
 
 #[cfg(feature = "cubic-alpha")]
 use super::locate::ContourCubicField;
@@ -179,14 +179,12 @@ fn normalized_candidate(a: f64, b: f64, c: f64, tolerance: f64) -> Option<Ternar
         components[2] / sum,
     ))
 }
+#[cfg(test)]
 fn xy(point: TernaryCoordinate) -> [f64; 2] {
-    let [a, _b, c] = point.as_array();
-    [c + 0.5 * a, EQUILATERAL_TRIANGLE_HEIGHT * a]
+    logical_from_composition(point.as_array())
 }
 fn distance(left: TernaryCoordinate, right: TernaryCoordinate) -> f64 {
-    let left = xy(left);
-    let right = xy(right);
-    (left[0] - right[0]).hypot(left[1] - right[1])
+    logical_distance(left.as_array(), right.as_array())
 }
 fn lerp(left: TernaryCoordinate, right: TernaryCoordinate, t: f64) -> TernaryCoordinate {
     let a = left.as_array();

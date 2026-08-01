@@ -5,21 +5,19 @@
 
 use core::fmt;
 
+#[cfg(feature = "irregular-cubic-alpha")]
+use crate::interpolation::evaluate_pair;
 use crate::interpolation::{
     AlphaInterval, BinaryExtrapolation, CubicAlphaMethod, CubicBoundaryPolicy,
     DirectedAlphaInterval,
 };
-#[cfg(feature = "irregular-cubic-alpha")]
-use crate::{interpolation::evaluate_pair, simplex::global_gradient_ab};
+use crate::{POINT_LOCATION_TOLERANCE, simplex::global_gradient_ab};
 
 use super::{
-    IrregularEdgeId, IrregularFieldEvaluationError, IrregularFieldSample,
+    IrregularEdgeId, IrregularFieldEvaluationError, IrregularFieldSample, IrregularMeshTriangle,
     IrregularPointLocationError, IrregularTernaryMesh, IrregularTernaryScalarField,
     IrregularTriangleId, LocatedIrregularTriangle, PreparedIrregularTernaryField,
 };
-
-#[cfg(feature = "irregular-cubic-alpha")]
-use super::IrregularMeshTriangle;
 
 /// Interpolation family used by [`InterpolatedIrregularTernaryField`].
 ///
@@ -290,6 +288,73 @@ impl<'a> InterpolatedIrregularTernaryField<'a> {
         })
     }
 
+    /// Return the interpolation family selected at construction time.
+    pub fn interpolation(&self) -> IrregularFieldInterpolation {
+        match &self.interpolation {
+            PreparedIrregularInterpolation::Linear(_) => IrregularFieldInterpolation::Linear,
+            #[cfg(feature = "irregular-cubic-alpha")]
+            PreparedIrregularInterpolation::CubicAlpha(cubic) => {
+                IrregularFieldInterpolation::CubicAlpha(cubic.diagnostics.options)
+            }
+        }
+    }
+
+    /// Evaluate one already-known mesh-local barycentric position without
+    /// performing global point location.
+    ///
+    /// This crate-private hook is used by adaptive contour extraction. Public
+    /// callers should use [`Self::evaluate_at_location`] so mesh identity and
+    /// semantic composition validation remain explicit.
+    pub(crate) fn evaluate_in_triangle(
+        &self,
+        triangle: IrregularMeshTriangle,
+        barycentric: [f64; 3],
+    ) -> Result<(f64, [f64; 2]), IrregularFieldEvaluationError> {
+        let expected = self
+            .field
+            .mesh
+            .triangles
+            .get(triangle.id.0)
+            .copied()
+            .ok_or(IrregularFieldEvaluationError::InvalidLocation {
+                triangle: triangle.id,
+            })?;
+        if expected != triangle
+            || !crate::simplex::valid_barycentric(barycentric, POINT_LOCATION_TOLERANCE)
+        {
+            return Err(IrregularFieldEvaluationError::InvalidLocation {
+                triangle: triangle.id,
+            });
+        }
+        match &self.interpolation {
+            PreparedIrregularInterpolation::Linear(_) => {
+                let values = triangle.vertices.map(|vertex| self.field.values[vertex.0]);
+                let value = values
+                    .into_iter()
+                    .zip(barycentric)
+                    .map(|(sample, weight)| sample * weight)
+                    .sum();
+                let gradient_ab = global_gradient_ab(
+                    self.field
+                        .mesh
+                        .triangle_compositions(triangle.id)
+                        .map_err(|_| IrregularFieldEvaluationError::InvalidLocation {
+                            triangle: triangle.id,
+                        })?,
+                    [values[0] - values[2], values[1] - values[2]],
+                )
+                .ok_or(IrregularFieldEvaluationError::InvalidLocation {
+                    triangle: triangle.id,
+                })?;
+                Ok((value, gradient_ab))
+            }
+            #[cfg(feature = "irregular-cubic-alpha")]
+            PreparedIrregularInterpolation::CubicAlpha(cubic) => {
+                cubic.evaluate_triangle(triangle, barycentric)
+            }
+        }
+    }
+
     /// Return the sampled scalar field used by this evaluator.
     pub const fn field(&self) -> &'a IrregularTernaryScalarField {
         self.field
@@ -442,7 +507,6 @@ struct TriangleAlphaAccess {
 struct IrregularCubicAlphaField<'a> {
     field: &'a IrregularTernaryScalarField,
     intervals: Box<[AlphaInterval]>,
-    _stencils: Box<[EdgeStencil]>,
     triangle_access: Box<[TriangleAlphaAccess]>,
     diagnostics: IrregularCubicAlphaDiagnostics,
 }
@@ -468,7 +532,6 @@ impl<'a> IrregularCubicAlphaField<'a> {
         Ok(Self {
             field,
             intervals: intervals.into_boxed_slice(),
-            _stencils: stencils.into_boxed_slice(),
             triangle_access: triangle_access.into_boxed_slice(),
             diagnostics,
         })
