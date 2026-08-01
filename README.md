@@ -151,6 +151,32 @@ hull returns a typed error. There are no holes, constrained edges, or
 non-convex domains. Run `cargo run --example interpolate_irregular_field --features irregular-delaunay`
 for linear evaluation, or `cargo run --example interpolate_irregular_cubic_field --features irregular-cubic-alpha`
 for cubic preparation, diagnostics, and alpha inspection.
+
+### Irregular isolines
+
+`IrregularContourSet` adds backend-independent isolines over the mesh convex
+hull. `IrregularContourOptions::linear()` uses one exact affine segment per
+Delaunay triangle. `IrregularContourOptions::cubic_alpha(...)` prepares the
+edge-alpha field once, then adaptively subdivides each source triangle in local
+barycentric coordinates. The cubic extractor calculates canonical roots of each
+shared edge interval once per level, so adjacent triangles use the same
+semantic endpoint even when their interior refinement differs.
+
+Use `IrregularContourSet::compute_prepared` when one
+`InterpolatedIrregularTernaryField` should serve point queries, alpha
+inspection, and multiple contour sets without repeating the Jacobi solve. The
+optional `ContourRegularization` redistributes chord lengths in the same
+canonical equilateral plane used for the Delaunay embedding, then projects
+interior points using the prepared global field. Each accepted projection step
+relocates in the mesh; candidates leaving its convex hull are backtracked.
+Open-path endpoints remain fixed and closed paths have no duplicate final point.
+
+Irregular cubic contours are C0, not C1, across mesh edges. Their reported
+gradient is the deterministic owner-triangle gradient at a shared edge or
+vertex; it is never averaged. Run
+`cargo run --example irregular_contours --features irregular-cubic-alpha` for
+a complete numerical example.
+
 ## Extracting isolines
 
 An isoline is the set of compositions satisfying f(a, b, c) = level. The crate
@@ -251,19 +277,20 @@ paths and regions should become PNG or SVG ternary diagrams.
 - cubic-alpha: edge-derived cubic-alpha contour construction, adaptive topology,
   and optional regularization. It enables the optional spline1d dependency.
 - irregular-delaunay: irregular 2-D Delaunay meshes, backend-assisted point
-  location, and prepared piecewise-linear scalar evaluation. It enables the
-  optional `delaunay` dependency.
-- irregular-cubic-alpha: self-consistent cubic-alpha point evaluation on an
-  irregular mesh. It enables both `irregular-delaunay` and `cubic-alpha`.
+  location, prepared piecewise-linear scalar evaluation, and linear isolines.
+  It enables the optional `delaunay` dependency.
+- irregular-cubic-alpha: self-consistent cubic-alpha point evaluation and
+  adaptive cubic isolines on an irregular mesh. It enables both
+  `irregular-delaunay` and `cubic-alpha`.
 
 The current minimum supported Rust version is 1.97.1, selected explicitly for
 maintained `delaunay` 0.8 support.
 
 ## Limits
 
-- Irregular meshes support prepared linear and optional pointwise cubic-alpha
-  values and gradients only; their domain is the samples' convex hull.
-- No irregular isolines or irregular bands.
+- Irregular meshes support linear and optional cubic-alpha isolines, values,
+  and gradients only inside their samples' convex hull.
+- No irregular filled bands.
 - No constrained Delaunay meshing, holes, or non-convex domains.
 - No cubic-alpha filled bands.
 - No rendering, pixels, chart clipping, or labels.

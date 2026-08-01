@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented here.
 
+## Unreleased
+
+- Added backend-independent irregular Delaunay isolines for prepared linear
+  fields and converged irregular cubic-alpha fields.
+- Added deterministic mesh-edge ownership, canonical shared cubic-edge roots,
+  scale-aware adaptive barycentric extraction, and field-aware regularization
+  with global convex-hull-aware projection.
+- Centralized canonical equilateral logical geometry for Delaunay construction
+  and contour arclength measurements.
 ## 0.1.0 - 2026-07-31
 
 First release of `ternary-contours`.
