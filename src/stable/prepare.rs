@@ -169,6 +169,27 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
     ) -> Result<Vec<super::BinaryBoundaryTrace>, super::StableBoundaryError> {
         super::boundary::trace_binary_boundaries(&self.layers, &self.phase_ids, options)
     }
+    /// Construct the raw boundary-connected stable invariant and univariant graph.
+    ///
+    /// Binary invariant discovery is performed from the original prepared phase
+    /// evaluators. Interior paths use the cached affine stable partition on the
+    /// common regular sampling grid. Isolated closed univariant loops that have
+    /// no invariant-node seed are intentionally deferred.
+    pub fn stable_boundaries(
+        &self,
+        options: super::StableBoundaryOptions,
+    ) -> Result<super::StableBoundaryNetwork, super::StableBoundaryError> {
+        let traces =
+            super::boundary::trace_binary_boundaries(&self.layers, &self.phase_ids, options)?;
+        super::boundary::build_stable_boundary_network(
+            traces,
+            &self.cells,
+            &self.samples,
+            &self.phase_ids,
+            options,
+        )
+    }
+
     /// Trace phase-labelled contours at finite levels.
     ///
     /// Levels are returned in ascending order. Stable polygons and sampled
