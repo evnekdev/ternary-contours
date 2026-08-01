@@ -1645,6 +1645,77 @@ mod tests {
 
     #[cfg(feature = "irregular-cubic-alpha")]
     #[test]
+    fn cubic_shared_edge_roots_are_exact_from_each_incident_triangle() {
+        let field = IrregularTernaryScalarField::from_fn(
+            IrregularTernaryMesh::new(samples()).unwrap(),
+            |[a, b, c]| (a - 0.31).powi(2) + 0.7 * (b - 0.27).powi(2) + 0.2 * c + 0.15 * a * b,
+        )
+        .unwrap();
+        let prepared = InterpolatedIrregularTernaryField::new(
+            &field,
+            IrregularFieldInterpolation::CubicAlpha(IrregularCubicAlphaOptions::default()),
+        )
+        .unwrap();
+        let level = 0.18;
+        let roots = canonical_edge_roots(&prepared, level, 1.0e-10).unwrap();
+        for edge in prepared.mesh().edges().filter(|edge| !edge.is_boundary()) {
+            for root in &roots[edge.id.0] {
+                for triangle in edge.triangles.into_iter().flatten() {
+                    let barycentric = crate::simplex::canonical_barycentric(
+                        crate::simplex::barycentric_ab(
+                            prepared.mesh().triangle_compositions(triangle).unwrap(),
+                            root.point.as_array(),
+                        )
+                        .unwrap(),
+                        crate::POINT_LOCATION_TOLERANCE,
+                    )
+                    .unwrap();
+                    close(
+                        prepared
+                            .evaluate_in_triangle(
+                                prepared.mesh().triangle(triangle).unwrap(),
+                                barycentric,
+                            )
+                            .unwrap()
+                            .0,
+                        level,
+                    );
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "irregular-cubic-alpha")]
+    #[test]
+    fn cubic_maximum_depth_is_reported_without_silently_dropping_cells() {
+        let field = IrregularTernaryScalarField::from_fn(
+            IrregularTernaryMesh::new(samples()).unwrap(),
+            |[a, b, c]| (a - 0.31).powi(2) + 0.7 * (b - 0.27).powi(2) + 0.2 * c + 0.15 * a * b,
+        )
+        .unwrap();
+        let prepared = InterpolatedIrregularTernaryField::new(
+            &field,
+            IrregularFieldInterpolation::CubicAlpha(IrregularCubicAlphaOptions::default()),
+        )
+        .unwrap();
+        let contours = IrregularContourSet::compute_prepared(
+            &prepared,
+            &[0.18],
+            IrregularContourGeometryOptions {
+                adaptive: IrregularAdaptiveContourOptions {
+                    max_depth: 2,
+                    flatness_tolerance: 1.0e-14,
+                    maximum_microtriangle_diameter: 1.0e-5,
+                },
+                ..IrregularContourGeometryOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(contours.diagnostics().levels[0].maximum_depth_hits > 0);
+        assert!(!contours.levels[0].paths.is_empty());
+    }
+    #[cfg(feature = "irregular-cubic-alpha")]
+    #[test]
     fn cubic_edge_root_solver_preserves_reversal_and_multiple_roots() {
         let interval = crate::interpolation::AlphaInterval::new(16.0, -32.0);
         let forward = interval_roots(interval, 0.0, 0.0, 1.0, 1.0e-10, IrregularEdgeId(0)).unwrap();
