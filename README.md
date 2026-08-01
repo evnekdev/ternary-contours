@@ -224,6 +224,77 @@ cargo run --example irregular_metrics --features irregular-delaunay
 
 See [irregular-mesh-metrics.md](docs/irregular-mesh-metrics.md) for formulas,
 edge ownership, weighting semantics, feature gates, and limitations.
+
+## Stable phase ensembles
+
+`PreparedStablePhaseEnsemble` traces phase-labelled contours over the stable
+upper envelope `max_i h_i(a,b,c)`. Each phase supplies a required height source
+and may supply a topology-matched secondary scalar. Height mode traces `h_i=L`
+where phase `i` is stable; secondary mode traces `q_i=L` in the same
+height-defined region. Secondary values never choose phase ownership.
+
+Sources may be regular linear fields, optional regular cubic-alpha fields,
+irregular linear fields, or optional irregular cubic-alpha fields. Preparation
+groups sources sharing geometry, locates once per group and point, and samples
+every layer onto one virtual `RegularTernaryGrid`. Cubic source interpolation
+changes sampled vertex values; all final umbrella fields and stable contours
+remain affine inside each umbrella triangle.
+
+~~~rust
+use ternary_contours::{
+    FieldInterpolation, PreparedStablePhaseEnsemble, RegularTernaryScalarField,
+    StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource,
+    StableUmbrellaOptions,
+};
+
+let alpha = RegularTernaryScalarField::from_fn(12, |[a, _, _]| a)?;
+let beta = RegularTernaryScalarField::from_fn(12, |[_, b, _]| b)?;
+let prepared = PreparedStablePhaseEnsemble::new(
+    [
+        StablePhaseSource::new(
+            StablePhaseId(1),
+            StableScalarSource::regular(&alpha, FieldInterpolation::Linear),
+        ),
+        StablePhaseSource::new(
+            StablePhaseId(2),
+            StableScalarSource::regular(&beta, FieldInterpolation::Linear),
+        ),
+    ],
+    StableContourQuantity::Height,
+    StableUmbrellaOptions::default(),
+)?;
+let result = prepared.contours(&[0.3, 0.4])?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+~~~
+
+Stable regions are exact convex half-plane intersections for the final affine
+umbrella model. They are not inferred from phase labels at triangle vertices,
+so an interior stable polygon can be recovered even when its phase wins no
+triangle vertex. Exact affine min/max bounds safely prune phases and competitor
+comparisons before clipping.
+
+Height paths retain their phase IDs and end at shared canonical univariant or
+invariant junctions without joining across phases. Secondary paths terminate
+independently at stable height boundaries unless their coordinates genuinely
+coincide. Local intersections and global assembly enforce strict forward
+progress and return typed errors for retracing, branching, directed cycles,
+positive-area height ties, or target lines coincident with stable boundaries.
+
+Optional centroid/edge-midpoint verification compares original prepared source
+fields with umbrella-affine predictions and can double the global subdivisions
+until configured tolerances pass. This is a practical resolution check, not a
+proof that no smaller feature exists. Stable results are exact for the final
+piecewise-linear umbrella representation, not necessarily for the original
+source interpolants.
+
+See [stable-phase-contours.md](docs/stable-phase-contours.md) for the full model,
+secondary semantics, diagnostics, complexity, feature gates, degeneracies, and
+roadmap. Run the mixed numerical example with:
+
+~~~text
+cargo run --example stable_phase_contours --features irregular-delaunay
+~~~
+
 ## Extracting isolines
 
 An isoline is the set of compositions satisfying f(a, b, c) = level. The crate
@@ -320,7 +391,8 @@ paths and regions should become PNG or SVG ternary diagrams.
 
 ## Features
 
-- Default: regular-grid fields, linear contours, and linear filled bands.
+- Default: regular-grid fields, linear contours, linear filled bands, and stable
+  height/secondary ensembles sampled from regular linear sources.
 - cubic-alpha: edge-derived cubic-alpha contour construction, adaptive topology,
   and optional regularization. It enables the optional spline1d dependency.
 - irregular-delaunay: irregular 2-D Delaunay meshes, backend-assisted point
@@ -340,6 +412,10 @@ maintained `delaunay` 0.8 support.
 - No irregular filled bands.
 - No constrained Delaunay meshing, holes, or non-convex domains.
 - No cubic-alpha filled bands.
+- Stable ensembles currently require every source to cover the complete simplex;
+  partial domains and local adaptive umbrella refinement are deferred.
+- Stable contours are piecewise linear on the final umbrella grid; direct nonlinear
+  upper-envelope topology and stable filled regions are deferred.
 - No rendering, pixels, chart clipping, or labels.
 - No C1 global surface guarantee for cubic-alpha fields.
 
