@@ -12,7 +12,10 @@ use crate::{
 use crate::{
     GridVertexId,
     grid::{GridEdgeKey, LatticeCoordinate},
-    interpolation::{AlphaInterval, CubicAlphaMethod, CubicBoundaryPolicy, DirectedAlphaInterval},
+    interpolation::{
+        AlphaInterval, CubicAlphaMethod, CubicBoundaryPolicy, DirectedAlphaInterval,
+        cubic_method_kind,
+    },
 };
 
 /// Counts produced while deriving shared regular-grid cubic intervals.
@@ -203,7 +206,7 @@ fn build_edge_intervals(
 #[cfg(feature = "cubic-alpha")]
 fn alpha_for_interval(method: CubicAlphaMethod, values: &[f64], index: usize) -> AlphaInterval {
     use spline1d::{cubic_single_left_alpha, cubic_single_middle_alpha, cubic_single_right_alpha};
-    let kind = method_kind(method);
+    let kind = cubic_method_kind(method);
     let alpha = if index == 0 {
         cubic_single_left_alpha(kind, 0.0, values[0], 1.0, values[1], 2.0, values[2])
     } else if index + 1 == values.len() - 1 {
@@ -231,16 +234,6 @@ fn alpha_for_interval(method: CubicAlphaMethod, values: &[f64], index: usize) ->
         )
     };
     AlphaInterval::new(alpha[0], alpha[1])
-}
-
-#[cfg(feature = "cubic-alpha")]
-fn method_kind(method: CubicAlphaMethod) -> spline1d::InterpolationType<f64> {
-    match method {
-        CubicAlphaMethod::Akima => spline1d::InterpolationType::AKIMA,
-        CubicAlphaMethod::Makima => spline1d::InterpolationType::MAKIMA,
-        CubicAlphaMethod::Pchip => spline1d::InterpolationType::PCHIP,
-        CubicAlphaMethod::Steffen => spline1d::InterpolationType::STEFFEN,
-    }
 }
 
 #[cfg(all(test, feature = "cubic-alpha"))]

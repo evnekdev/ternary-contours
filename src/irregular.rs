@@ -1,4 +1,4 @@
-//! Delaunay-backed irregular two-dimensional ternary meshes and linear fields.
+//! Delaunay-backed irregular two-dimensional ternary meshes and scalar fields.
 //!
 //! `delaunay` supplies construction and robust point location. Its handles and
 //! types remain private implementation details of this module.
@@ -17,6 +17,9 @@ use delaunay::{
     geometry::{Point, kernel::AdaptiveKernel},
     tds::{SimplexKey, Vertex, VertexKey},
 };
+
+mod cubic;
+pub use cubic::*;
 
 use crate::{
     POINT_LOCATION_TOLERANCE,
@@ -269,6 +272,10 @@ impl std::error::Error for IrregularFieldError {}
 pub enum IrregularFieldEvaluationError {
     /// Point validation or location failed.
     PointLocation(IrregularPointLocationError),
+    /// Cubic-alpha evaluation was selected without the `irregular-cubic-alpha` feature.
+    CubicFeatureUnavailable,
+    /// Construction of the self-consistent irregular cubic-alpha field failed.
+    CubicConstruction(Box<IrregularCubicAlphaBuildError>),
     /// A cached location belongs to another mesh.
     IncompatibleLocation,
     /// A cached location is malformed.
@@ -280,6 +287,12 @@ impl fmt::Display for IrregularFieldEvaluationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::PointLocation(error) => write!(f, "point location failed: {error}"),
+            Self::CubicFeatureUnavailable => f.write_str(
+                "irregular cubic-alpha field evaluation requires the `irregular-cubic-alpha` feature",
+            ),
+            Self::CubicConstruction(error) => {
+                write!(f, "irregular cubic-alpha field construction failed: {error}")
+            }
             Self::IncompatibleLocation => {
                 f.write_str("location belongs to an incompatible irregular mesh")
             }
@@ -298,6 +311,7 @@ impl std::error::Error for IrregularFieldEvaluationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::PointLocation(error) => Some(error),
+            Self::CubicConstruction(error) => Some(error),
             _ => None,
         }
     }
@@ -917,10 +931,10 @@ impl IrregularTernaryScalarField {
     }
 }
 
-/// A linear field sample with value, global gradient, and cached location.
+/// An irregular field sample with value, global gradient, and cached location.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IrregularFieldSample {
-    /// Piecewise-linear scalar value.
+    /// Interpolated scalar value (linear or cubic-alpha, as selected).
     pub value: f64,
     /// Global `(df/da, df/db)` with `c = 1-a-b`.
     pub gradient_ab: [f64; 2],
