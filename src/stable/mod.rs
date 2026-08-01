@@ -21,6 +21,7 @@ pub use boundary::{
     BinaryStableRegion, InteriorInvariantNode, StableBoundaryDiagnostics, StableBoundaryError,
     StableBoundaryNetwork, StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId,
     StablePhasePair, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
+    StableUnivariantRegularizationDiagnostics,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
 pub use error::{StableContourError, StableSourceEvaluationError};

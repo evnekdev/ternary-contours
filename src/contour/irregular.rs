@@ -163,7 +163,9 @@ impl IrregularContourOptions {
                     redistribution_passes: 2,
                     projection_tolerance: 1.0e-9,
                     max_projection_iterations: 16,
+                    max_backtracking_steps: 24,
                     max_normal_step: 0.05,
+                    protected_endpoint_distance: 0.025,
                 }),
             },
         }
@@ -558,24 +560,12 @@ fn validated_levels(levels: &[f64], tolerance: f64) -> Result<Vec<f64>, Irregula
 }
 
 fn validate_regularization(options: ContourRegularization) -> Result<(), IrregularContourError> {
-    if !options.spacing.is_finite() || options.spacing <= 0.0 {
-        return Err(IrregularContourError::InvalidRegularization {
-            message: "spacing must be finite and positive",
-        });
-    }
-    if !options.projection_tolerance.is_finite()
-        || options.projection_tolerance <= 0.0
-        || options.max_projection_iterations == 0
-        || !options.max_normal_step.is_finite()
-        || options.max_normal_step <= 0.0
-    {
-        return Err(IrregularContourError::InvalidRegularization {
-            message: "projection tolerance, iteration limit, and maximum step must be positive",
-        });
-    }
-    Ok(())
+    crate::path::validate_regularization(options).map_err(|_| {
+        IrregularContourError::InvalidRegularization {
+            message: "spacing, projection controls, and endpoint protection must be finite and valid",
+        }
+    })
 }
-
 fn linear_paths(
     field: &InterpolatedIrregularTernaryField<'_>,
     level: f64,
@@ -1263,157 +1253,77 @@ fn redistribute(
     closed: bool,
     spacing: f64,
 ) -> Result<Vec<TernaryCoordinate>, IrregularContourError> {
-    if points.len() < 2 {
-        return Err(IrregularContourError::ZeroLengthPath);
-    }
-    let edge_count = if closed {
-        points.len()
-    } else {
-        points.len() - 1
-    };
-    let mut cumulative = vec![0.0];
-    for index in 0..edge_count {
-        let next = (index + 1) % points.len();
-        cumulative.push(
-            cumulative.last().copied().unwrap_or_default()
-                + crate::simplex::logical_distance(
-                    points[index].as_array(),
-                    points[next].as_array(),
-                ),
-        );
-    }
-    let total = cumulative.last().copied().unwrap_or_default();
-    if total <= f64::EPSILON {
-        return Err(IrregularContourError::ZeroLengthPath);
-    }
-    let intervals = (total / spacing).ceil().max(if closed { 3.0 } else { 1.0 }) as usize;
-    let sample_count = if closed { intervals } else { intervals + 1 };
-    let mut result = Vec::with_capacity(sample_count);
-    for sample in 0..sample_count {
-        let target = total * sample as f64 / intervals as f64;
-        let edge = cumulative
-            .windows(2)
-            .position(|window| target <= window[1])
-            .unwrap_or(edge_count - 1);
-        let span = cumulative[edge + 1] - cumulative[edge];
-        let fraction = if span <= f64::EPSILON {
-            0.0
-        } else {
-            (target - cumulative[edge]) / span
-        };
-        result.push(lerp(
-            points[edge],
-            points[(edge + 1) % points.len()],
-            fraction,
-        ));
-    }
-    Ok(result)
+    let cleaned = crate::path::cleanup(points, closed, 1.0e-12)
+        .map_err(|_| IrregularContourError::ZeroLengthPath)?;
+    crate::path::redistribute(&cleaned, closed, spacing)
+        .map(|points| points.into_iter().map(|point| point.point).collect())
+        .map_err(|_| IrregularContourError::ZeroLengthPath)
 }
-
 fn project_point(
     field: &InterpolatedIrregularTernaryField<'_>,
-    mut point: TernaryCoordinate,
+    point: TernaryCoordinate,
     level: f64,
     options: ContourRegularization,
     diagnostics: &mut IrregularContourLevelDiagnostics,
 ) -> Result<TernaryCoordinate, IrregularContourError> {
-    for iteration in 0..options.max_projection_iterations {
-        let located = field
-            .evaluate(point.as_array())
-            .map_err(IrregularContourError::FieldEvaluation)?;
-        let residual = located.value - level;
-        diagnostics.projection_iterations += 1;
-        if residual.abs() <= options.projection_tolerance {
-            return Ok(point);
-        }
-        let norm2 = located.gradient_ab[0].powi(2) + located.gradient_ab[1].powi(2);
-        if !norm2.is_finite() || norm2 <= 1.0e-24 {
-            diagnostics.zero_gradient_encounters += 1;
-            return Err(IrregularContourError::ProjectionZeroGradient { residual });
-        }
-        let factor = -residual / norm2;
-        let mut delta = [
-            factor * located.gradient_ab[0],
-            factor * located.gradient_ab[1],
-        ];
-        let magnitude = delta[0].hypot(delta[1]);
-        if magnitude > options.max_normal_step {
-            let scale = options.max_normal_step / magnitude;
-            delta[0] *= scale;
-            delta[1] *= scale;
-        }
-        let source = point.as_array();
-        let mut accepted = None;
-        let mut damping = 1.0;
-        for _ in 0..24 {
-            let Some(candidate) = normalized_candidate(
-                source[0] + damping * delta[0],
-                source[1] + damping * delta[1],
-                1.0 - source[0] - source[1] - damping * (delta[0] + delta[1]),
-                options.projection_tolerance.max(1.0e-12),
-            ) else {
-                diagnostics.projection_backtracking_steps += 1;
-                damping *= 0.5;
-                continue;
-            };
-            match field.evaluate(candidate.as_array()) {
-                Ok(next) if (next.value - level).abs() < residual.abs() => {
-                    if next.location.triangle.id != located.location.triangle.id {
-                        diagnostics.triangle_boundary_crossings += 1;
-                    }
-                    accepted = Some(candidate);
-                    break;
-                }
-                Err(IrregularFieldEvaluationError::PointLocation(
-                    crate::IrregularPointLocationError::OutsideConvexHull { .. },
-                )) => {
-                    diagnostics.convex_hull_candidate_rejections += 1;
-                }
-                Err(IrregularFieldEvaluationError::PointLocation(
-                    crate::IrregularPointLocationError::OutsideSimplex { .. },
-                )) => {}
-                Err(error) => return Err(IrregularContourError::FieldEvaluation(error)),
-                Ok(_) => {}
+    let initial = field
+        .evaluate(point.as_array())
+        .map_err(IrregularContourError::FieldEvaluation)?;
+    let result = crate::path::project_implicit(point, options, |candidate| {
+        match field.evaluate(candidate.as_array()) {
+            Ok(sample) => Ok(crate::path::ImplicitSample {
+                residual: sample.value - level,
+                gradient_ab: sample.gradient_ab,
+            }),
+            Err(IrregularFieldEvaluationError::PointLocation(
+                crate::IrregularPointLocationError::OutsideConvexHull { .. },
+            )) => {
+                diagnostics.convex_hull_candidate_rejections += 1;
+                Err(crate::path::ProjectionEvaluationError::Reject)
             }
-            diagnostics.projection_backtracking_steps += 1;
-            damping *= 0.5;
+            Err(IrregularFieldEvaluationError::PointLocation(
+                crate::IrregularPointLocationError::OutsideSimplex { .. },
+            )) => Err(crate::path::ProjectionEvaluationError::Reject),
+            Err(error) => Err(crate::path::ProjectionEvaluationError::Fatal(error)),
         }
-        let Some(candidate) = accepted else {
-            return Err(IrregularContourError::ProjectionNonConvergence {
+    });
+    match result {
+        Ok(outcome) => {
+            diagnostics.projection_iterations += outcome.iterations;
+            diagnostics.projection_backtracking_steps += outcome.backtracking_steps;
+            let final_sample = field
+                .evaluate(outcome.point.as_array())
+                .map_err(IrregularContourError::FieldEvaluation)?;
+            if final_sample.location.triangle.id != initial.location.triangle.id {
+                diagnostics.triangle_boundary_crossings += 1;
+            }
+            Ok(outcome.point)
+        }
+        Err(crate::path::ImplicitProjectionError::Evaluation(error)) => {
+            Err(IrregularContourError::FieldEvaluation(error))
+        }
+        Err(crate::path::ImplicitProjectionError::ZeroGradient { residual }) => {
+            diagnostics.zero_gradient_encounters += 1;
+            Err(IrregularContourError::ProjectionZeroGradient { residual })
+        }
+        Err(crate::path::ImplicitProjectionError::NonConvergence {
+            residual,
+            iterations,
+        }) => {
+            diagnostics.projection_iterations += iterations;
+            Err(IrregularContourError::ProjectionNonConvergence {
                 residual,
-                iterations: iteration + 1,
-            });
-        };
-        point = candidate;
+                iterations,
+            })
+        }
+        Err(crate::path::ImplicitProjectionError::RejectedInitialPoint) => {
+            Err(IrregularContourError::ProjectionNonConvergence {
+                residual: initial.value - level,
+                iterations: 0,
+            })
+        }
     }
-    let residual = field
-        .value(point.as_array())
-        .map_err(IrregularContourError::FieldEvaluation)?
-        - level;
-    Err(IrregularContourError::ProjectionNonConvergence {
-        residual,
-        iterations: options.max_projection_iterations,
-    })
 }
-
-fn normalized_candidate(a: f64, b: f64, c: f64, tolerance: f64) -> Option<TernaryCoordinate> {
-    if ![a, b, c].into_iter().all(f64::is_finite)
-        || [a, b, c].into_iter().any(|value| value < -tolerance)
-    {
-        return None;
-    }
-    let components = [a.max(0.0), b.max(0.0), c.max(0.0)];
-    let sum = components.into_iter().sum::<f64>();
-    if !sum.is_finite() || sum <= tolerance {
-        return None;
-    }
-    Some(TernaryCoordinate::new(
-        components[0] / sum,
-        components[1] / sum,
-        components[2] / sum,
-    ))
-}
-
 fn spacing_coefficient_of_variation(paths: &[ContourPath]) -> Option<f64> {
     let lengths = paths
         .iter()

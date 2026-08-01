@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::{FieldError, RegularSamplingTopology, TernaryCoordinate};
+use crate::{FieldError, PathRegularizationOptions, RegularSamplingTopology, TernaryCoordinate};
 
 use super::{
     StableContourError, StablePhaseEvaluation, StablePhaseId,
@@ -167,6 +167,23 @@ impl StableInvariantNode {
     }
 }
 
+/// Summary of optional post-topology univariant regularization.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StableUnivariantRegularizationDiagnostics {
+    pub raw_point_count: usize,
+    pub final_point_count: usize,
+    pub accepted_projections: usize,
+    pub projection_iterations: usize,
+    pub backtracked_projections: usize,
+    pub rejected_unstable_projections: usize,
+    pub rejected_undefined_projections: usize,
+    pub sampling_triangle_relocations: usize,
+    pub maximum_pair_residual: f64,
+    pub raw_logical_length: f64,
+    pub final_logical_length: f64,
+    pub spacing_cv_before: f64,
+    pub spacing_cv_after: f64,
+}
 /// One complete phase-pair path between invariant nodes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StableUnivariantPath {
@@ -176,6 +193,8 @@ pub struct StableUnivariantPath {
     pub end: StableInvariantNodeId,
     pub points: Vec<TernaryCoordinate>,
     pub temperatures: Vec<f64>,
+    /// Present when optional post-topology regularization was requested.
+    pub regularization: Option<StableUnivariantRegularizationDiagnostics>,
 }
 
 /// Ordered discovery result for one outer edge.
@@ -214,6 +233,8 @@ pub struct StableBoundaryOptions {
     pub local_maximum_subdivision_depth: u8,
     pub minimum_segment_parameter_width: f64,
     pub maximum_trace_steps: usize,
+    /// Optional quantity-independent cleanup, redistribution, and projection.
+    pub regularization: Option<PathRegularizationOptions>,
 }
 
 impl Default for StableBoundaryOptions {
@@ -229,6 +250,7 @@ impl Default for StableBoundaryOptions {
             local_maximum_subdivision_depth: 8,
             minimum_segment_parameter_width: 1.0e-10,
             maximum_trace_steps: 100_000,
+            regularization: None,
         }
     }
 }
@@ -280,6 +302,13 @@ impl StableBoundaryOptions {
                     ),
                 });
             }
+        }
+        if let Some(regularization) = self.regularization {
+            crate::path::validate_regularization(regularization).map_err(|error| {
+                StableBoundaryError::InvalidOptions {
+                    message: format!("invalid path regularization: {error:?}"),
+                }
+            })?;
         }
         self.binary_initial_subdivisions
             .checked_shl(self.binary_maximum_depth.into())
@@ -438,6 +467,27 @@ pub enum StableBoundaryError {
     MalformedGraphConnectivity {
         message: String,
     },
+    RegularizationUndefinedPhase {
+        phase: StablePhaseId,
+        point: TernaryCoordinate,
+    },
+    RegularizationUnstableProjection {
+        phases: StablePhasePair,
+        point: TernaryCoordinate,
+    },
+    RegularizationZeroGradient {
+        phases: StablePhasePair,
+        residual: f64,
+    },
+    RegularizationNonConvergence {
+        phases: StablePhasePair,
+        residual: f64,
+        iterations: usize,
+    },
+    RegularizationBranchSwitch {
+        phases: StablePhasePair,
+        point: TernaryCoordinate,
+    },
     StablePreparation {
         source: Box<StableContourError>,
     },
@@ -583,6 +633,33 @@ impl fmt::Display for StableBoundaryError {
             Self::MalformedGraphConnectivity { message } => {
                 write!(formatter, "malformed stable-boundary graph: {message}")
             }
+            Self::RegularizationUndefinedPhase { phase, point } => write!(
+                formatter,
+                "phase {phase:?} became undefined while regularizing at {:?}",
+                point.as_array()
+            ),
+            Self::RegularizationUnstableProjection { phases, point } => write!(
+                formatter,
+                "regularized pair {phases:?} left the stable envelope at {:?}",
+                point.as_array()
+            ),
+            Self::RegularizationZeroGradient { phases, residual } => write!(
+                formatter,
+                "regularized pair {phases:?} has zero difference gradient at residual {residual:?}"
+            ),
+            Self::RegularizationNonConvergence {
+                phases,
+                residual,
+                iterations,
+            } => write!(
+                formatter,
+                "regularized pair {phases:?} did not converge after {iterations} iterations; residual={residual:?}"
+            ),
+            Self::RegularizationBranchSwitch { phases, point } => write!(
+                formatter,
+                "regularized pair {phases:?} attempted to leave its local branch near {:?}",
+                point.as_array()
+            ),
             Self::StablePreparation { source } => {
                 write!(formatter, "stable preparation failed: {source}")
             }
@@ -1543,6 +1620,7 @@ fn match_binary_endpoints(
     fragments: &mut [LocalBoundaryFragment],
     traces: &[BinaryBoundaryTrace],
     nodes: &[StableInvariantNode],
+    sampling_subdivisions: usize,
     options: StableBoundaryOptions,
 ) -> Result<(), StableBoundaryError> {
     for fragment in fragments {
@@ -1571,9 +1649,11 @@ fn match_binary_endpoints(
                     phases: fragment.pair,
                 });
             };
+            let sampling_resolution = 1.0 / sampling_subdivisions as f64;
             let tolerance = options
                 .binary_parameter_tolerance
-                .max(options.geometry_tolerance * 4.0);
+                .max(options.geometry_tolerance * 4.0)
+                .max(sampling_resolution);
             if (candidate.boundary_parameter - parameter).abs() > tolerance {
                 return Err(StableBoundaryError::NoMatchingBinaryNode {
                     boundary,
@@ -2004,9 +2084,434 @@ fn trace_one_univariant(
         end: end_node,
         points,
         temperatures,
+        regularization: None,
     })
 }
 
+#[derive(Clone, Copy, Debug)]
+enum StableProjectionRejection {
+    Undefined(StablePhaseId, TernaryCoordinate),
+    Unstable(TernaryCoordinate),
+    Branch(TernaryCoordinate),
+}
+
+struct StablePairEvaluation {
+    sample: crate::path::ImplicitSample,
+    temperature: f64,
+    triangle: usize,
+}
+
+fn height_layer<'a>(
+    layers: &'a [PreparedSourceLayer<'a>],
+    phase: StablePhaseId,
+) -> Result<&'a PreparedSourceLayer<'a>, StableBoundaryError> {
+    layers
+        .iter()
+        .find(|layer| layer.role == ScalarRole::Height && layer.phase == phase)
+        .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+            message: format!("phase {phase:?} has no prepared height layer"),
+        })
+}
+
+fn phase_value_at(
+    layers: &[PreparedSourceLayer<'_>],
+    phase: StablePhaseId,
+    point: TernaryCoordinate,
+) -> Result<Option<f64>, StableBoundaryError> {
+    let layer = height_layer(layers, phase)?;
+    Ok(match evaluate_layer_at_point(layer, point.as_array())? {
+        StablePhaseEvaluation::Defined { value } => Some(value),
+        StablePhaseEvaluation::Undefined { .. } => None,
+    })
+}
+
+fn sampled_pair_gradient(
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    pair: StablePhasePair,
+    point: TernaryCoordinate,
+) -> Result<([f64; 2], usize), StableBoundaryError> {
+    let location = samples.grid.locate(point.as_array()).map_err(|error| {
+        StableBoundaryError::InvalidRegularGridTopology {
+            message: error.to_string(),
+        }
+    })?;
+    let first = phase_ids.binary_search(&pair.first).map_err(|_| {
+        StableBoundaryError::MalformedGraphConnectivity {
+            message: format!("phase {:?} is absent from sampling data", pair.first),
+        }
+    })?;
+    let second = phase_ids.binary_search(&pair.second).map_err(|_| {
+        StableBoundaryError::MalformedGraphConnectivity {
+            message: format!("phase {:?} is absent from sampling data", pair.second),
+        }
+    })?;
+    let first_values = samples
+        .triangle_height_values(first, location.triangle.vertices)
+        .ok_or(StableBoundaryError::RegularizationUndefinedPhase {
+            phase: pair.first,
+            point,
+        })?;
+    let second_values = samples
+        .triangle_height_values(second, location.triangle.vertices)
+        .ok_or(StableBoundaryError::RegularizationUndefinedPhase {
+            phase: pair.second,
+            point,
+        })?;
+    let differences = [
+        first_values[0] - second_values[0],
+        first_values[1] - second_values[1],
+        first_values[2] - second_values[2],
+    ];
+    let vertices = location
+        .triangle
+        .vertices
+        .map(|vertex| samples.grid.composition(vertex))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    let vertices: [[f64; 3]; 3] =
+        vertices
+            .try_into()
+            .map_err(|_| StableBoundaryError::InvalidRegularGridTopology {
+                message: "located triangle does not have three vertices".into(),
+            })?;
+    let gradient = crate::simplex::global_gradient_ab(
+        vertices,
+        [
+            differences[0] - differences[2],
+            differences[1] - differences[2],
+        ],
+    )
+    .ok_or(StableBoundaryError::RegularizationZeroGradient {
+        phases: pair,
+        residual: f64::NAN,
+    })?;
+    Ok((gradient, location.triangle.id))
+}
+
+fn evaluate_stable_pair(
+    layers: &[PreparedSourceLayer<'_>],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    pair: StablePhasePair,
+    point: TernaryCoordinate,
+    stability_tolerance: f64,
+) -> Result<Result<StablePairEvaluation, StableProjectionRejection>, StableBoundaryError> {
+    let Some(first) = phase_value_at(layers, pair.first, point)? else {
+        return Ok(Err(StableProjectionRejection::Undefined(pair.first, point)));
+    };
+    let Some(second) = phase_value_at(layers, pair.second, point)? else {
+        return Ok(Err(StableProjectionRejection::Undefined(
+            pair.second,
+            point,
+        )));
+    };
+    let pair_floor = first.min(second);
+    for &phase in phase_ids {
+        if pair.contains(phase) {
+            continue;
+        }
+        if let Some(value) = phase_value_at(layers, phase, point)?
+            && value > pair_floor + stability_tolerance
+        {
+            return Ok(Err(StableProjectionRejection::Unstable(point)));
+        }
+    }
+    let (gradient_ab, triangle) = sampled_pair_gradient(samples, phase_ids, pair, point)?;
+    Ok(Ok(StablePairEvaluation {
+        sample: crate::path::ImplicitSample {
+            residual: first - second,
+            gradient_ab,
+        },
+        temperature: 0.5 * (first + second),
+        triangle,
+    }))
+}
+
+fn branch_candidate_valid(
+    candidate: TernaryCoordinate,
+    seed: TernaryCoordinate,
+    segment: [TernaryCoordinate; 2],
+    maximum_distance: f64,
+) -> bool {
+    if composition_distance(candidate, seed) > maximum_distance {
+        return false;
+    }
+    let candidate = crate::simplex::logical_from_composition(candidate.as_array());
+    let start = crate::simplex::logical_from_composition(segment[0].as_array());
+    let end = crate::simplex::logical_from_composition(segment[1].as_array());
+    let direction = [end[0] - start[0], end[1] - start[1]];
+    let denominator = direction[0].powi(2) + direction[1].powi(2);
+    if denominator <= f64::EPSILON {
+        return false;
+    }
+    let parameter = ((candidate[0] - start[0]) * direction[0]
+        + (candidate[1] - start[1]) * direction[1])
+        / denominator;
+    (-0.5..=1.5).contains(&parameter)
+}
+
+fn rejection_error(
+    rejection: Option<StableProjectionRejection>,
+    phases: StablePhasePair,
+    residual: f64,
+    iterations: usize,
+) -> StableBoundaryError {
+    match rejection {
+        Some(StableProjectionRejection::Undefined(phase, point)) => {
+            StableBoundaryError::RegularizationUndefinedPhase { phase, point }
+        }
+        Some(StableProjectionRejection::Unstable(point)) => {
+            StableBoundaryError::RegularizationUnstableProjection { phases, point }
+        }
+        Some(StableProjectionRejection::Branch(point)) => {
+            StableBoundaryError::RegularizationBranchSwitch { phases, point }
+        }
+        None => StableBoundaryError::RegularizationNonConvergence {
+            phases,
+            residual,
+            iterations,
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn regularize_univariant(
+    path: &mut StableUnivariantPath,
+    nodes: &[StableInvariantNode],
+    layers: &[PreparedSourceLayer<'_>],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    boundary_options: StableBoundaryOptions,
+    options: PathRegularizationOptions,
+) -> Result<(), StableBoundaryError> {
+    let start = nodes[path.start.0].point();
+    let end = nodes[path.end.0].point();
+    let raw = crate::path::cleanup(&path.points, false, boundary_options.geometry_tolerance)
+        .map_err(|error| StableBoundaryError::InvalidOptions {
+            message: format!("raw univariant cleanup failed: {error:?}"),
+        })?;
+    let raw_self_intersection =
+        crate::path::has_self_intersection(&raw, false, boundary_options.geometry_tolerance);
+    let mut diagnostics = StableUnivariantRegularizationDiagnostics {
+        raw_point_count: raw.len(),
+        raw_logical_length: crate::path::path_length(&raw, false),
+        spacing_cv_before: crate::path::spacing_coefficient_of_variation(&raw, false),
+        ..StableUnivariantRegularizationDiagnostics::default()
+    };
+    let mut current = raw;
+    for _ in 0..options.redistribution_passes.max(1) {
+        let redistributed =
+            crate::path::redistribute(&current, false, options.spacing).map_err(|error| {
+                StableBoundaryError::InvalidOptions {
+                    message: format!("univariant redistribution failed: {error:?}"),
+                }
+            })?;
+        let source_total = crate::path::path_length(&current, false);
+        let seeds = redistributed
+            .iter()
+            .map(|sample| sample.point)
+            .collect::<Vec<_>>();
+        let mut projected = Vec::with_capacity(redistributed.len());
+        for (index, sample) in redistributed.iter().enumerate() {
+            if index == 0 {
+                projected.push(start);
+                continue;
+            }
+            if index + 1 == redistributed.len() {
+                projected.push(end);
+                continue;
+            }
+            let segment = [
+                current[sample.source_segment],
+                current[sample.source_segment + 1],
+            ];
+            let initial = evaluate_stable_pair(
+                layers,
+                samples,
+                phase_ids,
+                path.phases,
+                sample.point,
+                boundary_options.stability_tolerance,
+            )?;
+            let protected = sample.source_arclength <= options.protected_endpoint_distance
+                || source_total - sample.source_arclength <= options.protected_endpoint_distance;
+            if protected
+                && initial
+                    .as_ref()
+                    .is_ok_and(|state| state.sample.residual.abs() <= options.projection_tolerance)
+            {
+                projected.push(sample.point);
+                continue;
+            }
+            let initial_triangle = initial.as_ref().ok().map(|state| state.triangle);
+            let mut last_rejection = initial.err();
+            let maximum_distance = (options.max_normal_step * 2.0)
+                .max(options.spacing * 2.0)
+                .max(boundary_options.geometry_tolerance * 8.0);
+            let result = crate::path::project_implicit(sample.point, options, |candidate| {
+                if !branch_candidate_valid(candidate, sample.point, segment, maximum_distance) {
+                    last_rejection = Some(StableProjectionRejection::Branch(candidate));
+                    return Err(crate::path::ProjectionEvaluationError::Reject);
+                }
+                match evaluate_stable_pair(
+                    layers,
+                    samples,
+                    phase_ids,
+                    path.phases,
+                    candidate,
+                    boundary_options.stability_tolerance,
+                ) {
+                    Ok(Ok(state)) => Ok(state.sample),
+                    Ok(Err(rejection)) => {
+                        match rejection {
+                            StableProjectionRejection::Undefined(_, _) => {
+                                diagnostics.rejected_undefined_projections += 1;
+                            }
+                            StableProjectionRejection::Unstable(_) => {
+                                diagnostics.rejected_unstable_projections += 1;
+                            }
+                            StableProjectionRejection::Branch(_) => {}
+                        }
+                        last_rejection = Some(rejection);
+                        Err(crate::path::ProjectionEvaluationError::Reject)
+                    }
+                    Err(error) => Err(crate::path::ProjectionEvaluationError::Fatal(error)),
+                }
+            });
+            let outcome = match result {
+                Ok(outcome) => outcome,
+                Err(crate::path::ImplicitProjectionError::Evaluation(error)) => return Err(error),
+                Err(crate::path::ImplicitProjectionError::ZeroGradient { residual }) => {
+                    return Err(StableBoundaryError::RegularizationZeroGradient {
+                        phases: path.phases,
+                        residual,
+                    });
+                }
+                Err(crate::path::ImplicitProjectionError::NonConvergence {
+                    residual,
+                    iterations,
+                }) => {
+                    return Err(rejection_error(
+                        last_rejection,
+                        path.phases,
+                        residual,
+                        iterations,
+                    ));
+                }
+                Err(crate::path::ImplicitProjectionError::RejectedInitialPoint) => {
+                    return Err(rejection_error(last_rejection, path.phases, f64::NAN, 0));
+                }
+            };
+            diagnostics.accepted_projections += 1;
+            diagnostics.projection_iterations += outcome.iterations;
+            diagnostics.backtracked_projections += outcome.backtracking_steps;
+            let final_state = evaluate_stable_pair(
+                layers,
+                samples,
+                phase_ids,
+                path.phases,
+                outcome.point,
+                boundary_options.stability_tolerance,
+            )?
+            .map_err(|rejection| rejection_error(Some(rejection), path.phases, f64::NAN, 0))?;
+            if initial_triangle.is_some_and(|triangle| triangle != final_state.triangle) {
+                diagnostics.sampling_triangle_relocations += 1;
+            }
+            projected.push(outcome.point);
+        }
+        if projected
+            .windows(2)
+            .zip(seeds.windows(2))
+            .any(|(final_pair, raw_pair)| {
+                let final_start =
+                    crate::simplex::logical_from_composition(final_pair[0].as_array());
+                let final_end = crate::simplex::logical_from_composition(final_pair[1].as_array());
+                let raw_start = crate::simplex::logical_from_composition(raw_pair[0].as_array());
+                let raw_end = crate::simplex::logical_from_composition(raw_pair[1].as_array());
+                (final_end[0] - final_start[0]) * (raw_end[0] - raw_start[0])
+                    + (final_end[1] - final_start[1]) * (raw_end[1] - raw_start[1])
+                    < -boundary_options.geometry_tolerance
+            })
+        {
+            return Err(StableBoundaryError::RegularizationBranchSwitch {
+                phases: path.phases,
+                point: projected[0],
+            });
+        }
+        current = crate::path::cleanup(&projected, false, boundary_options.geometry_tolerance)
+            .map_err(|error| StableBoundaryError::InvalidOptions {
+                message: format!("regularized univariant cleanup failed: {error:?}"),
+            })?;
+        current[0] = start;
+        *current
+            .last_mut()
+            .ok_or_else(|| StableBoundaryError::MalformedGraphConnectivity {
+                message: "regularized path lost its terminal endpoint".into(),
+            })? = end;
+    }
+
+    if !raw_self_intersection
+        && crate::path::has_self_intersection(&current, false, boundary_options.geometry_tolerance)
+    {
+        return Err(StableBoundaryError::RegularizationBranchSwitch {
+            phases: path.phases,
+            point: current[0],
+        });
+    }
+    let mut temperatures = Vec::with_capacity(current.len());
+    for &point in &current {
+        let state = evaluate_stable_pair(
+            layers,
+            samples,
+            phase_ids,
+            path.phases,
+            point,
+            boundary_options.stability_tolerance,
+        )?
+        .map_err(|rejection| rejection_error(Some(rejection), path.phases, f64::NAN, 0))?;
+        diagnostics.maximum_pair_residual = diagnostics
+            .maximum_pair_residual
+            .max(state.sample.residual.abs());
+        if state.sample.residual.abs() > options.projection_tolerance {
+            return Err(StableBoundaryError::RegularizationNonConvergence {
+                phases: path.phases,
+                residual: state.sample.residual,
+                iterations: options.max_projection_iterations,
+            });
+        }
+        temperatures.push(state.temperature);
+    }
+    diagnostics.final_point_count = current.len();
+    diagnostics.final_logical_length = crate::path::path_length(&current, false);
+    diagnostics.spacing_cv_after = crate::path::spacing_coefficient_of_variation(&current, false);
+    path.points = current;
+    path.temperatures = temperatures;
+    path.regularization = Some(diagnostics);
+    Ok(())
+}
+
+fn regularize_network(
+    network: &mut StableBoundaryNetwork,
+    layers: &[PreparedSourceLayer<'_>],
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    boundary_options: StableBoundaryOptions,
+    options: PathRegularizationOptions,
+) -> Result<(), StableBoundaryError> {
+    for path in &mut network.univariants {
+        regularize_univariant(
+            path,
+            &network.nodes,
+            layers,
+            samples,
+            phase_ids,
+            boundary_options,
+            options,
+        )?;
+    }
+    Ok(())
+}
 fn validate_network(network: &StableBoundaryNetwork) -> Result<(), StableBoundaryError> {
     if network.incidence.len() != network.nodes.len() {
         return Err(StableBoundaryError::MalformedGraphConnectivity {
@@ -2060,6 +2565,7 @@ pub(crate) fn build_stable_boundary_network(
     cells: &[super::partition::StableSamplingCell],
     samples: &super::sample::RegularSamplingGrid,
     phase_ids: &[StablePhaseId],
+    layers: &[PreparedSourceLayer<'_>],
     options: StableBoundaryOptions,
 ) -> Result<StableBoundaryNetwork, StableBoundaryError> {
     options.validate()?;
@@ -2076,7 +2582,13 @@ pub(crate) fn build_stable_boundary_network(
         options,
         &mut diagnostics,
     )?;
-    match_binary_endpoints(&mut fragments, &traces, &nodes, options)?;
+    match_binary_endpoints(
+        &mut fragments,
+        &traces,
+        &nodes,
+        samples.grid.subdivisions(),
+        options,
+    )?;
     canonicalize_interior_nodes(&mut fragments, &mut nodes, options, &mut diagnostics)?;
     let adjacency = build_fragment_adjacency(&fragments);
     let (mut pending, pending_lookup) = create_pending_ends(&fragments, &nodes, &mut diagnostics)?;
@@ -2117,7 +2629,7 @@ pub(crate) fn build_stable_boundary_network(
         paths.dedup();
     }
     diagnostics.completed_univariants = univariants.len();
-    let network = StableBoundaryNetwork {
+    let mut network = StableBoundaryNetwork {
         nodes,
         univariants,
         binary_traces: traces,
@@ -2125,6 +2637,17 @@ pub(crate) fn build_stable_boundary_network(
         incidence,
     };
     validate_network(&network)?;
+    if let Some(regularization) = options.regularization {
+        regularize_network(
+            &mut network,
+            layers,
+            samples,
+            phase_ids,
+            options,
+            regularization,
+        )?;
+        validate_network(&network)?;
+    }
     Ok(network)
 }
 #[cfg(test)]
@@ -2319,6 +2842,204 @@ mod tests {
             network.incident_univariants(interior.id()).unwrap().len(),
             3
         );
+    }
+
+    #[test]
+    fn affine_univariant_regularization_preserves_nodes_pairs_and_connectivity() {
+        let alpha = |[a, _b, _c]: [f64; 3]| defined(a);
+        let beta = |[_a, b, _c]: [f64; 3]| defined(b);
+        let gamma = |[_a, _b, c]: [f64; 3]| defined(c);
+        let phases = [
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&beta)),
+            StablePhaseSource::new(StablePhaseId(3), StableScalarSource::evaluator(&gamma)),
+        ];
+        let prepared = PreparedStablePhaseEnsemble::new(
+            phases,
+            StableContourQuantity::Height,
+            StableGridOptions {
+                subdivisions: 12,
+                ..StableGridOptions::default()
+            },
+        )
+        .unwrap();
+        let raw = prepared
+            .stable_boundaries(StableBoundaryOptions::default())
+            .unwrap();
+        let regularized = prepared
+            .stable_boundaries(StableBoundaryOptions {
+                regularization: Some(PathRegularizationOptions {
+                    spacing: 0.025,
+                    protected_endpoint_distance: 0.0,
+                    ..PathRegularizationOptions::default()
+                }),
+                ..StableBoundaryOptions::default()
+            })
+            .unwrap();
+        assert_eq!(regularized.nodes, raw.nodes);
+        assert_eq!(regularized.univariants.len(), raw.univariants.len());
+        for (path, raw_path) in regularized.univariants.iter().zip(&raw.univariants) {
+            assert_eq!(path.phases, raw_path.phases);
+            assert_eq!((path.start, path.end), (raw_path.start, raw_path.end));
+            assert_eq!(path.points[0], regularized.nodes[path.start.0].point());
+            assert_eq!(
+                path.points.last(),
+                Some(&regularized.nodes[path.end.0].point())
+            );
+            let diagnostics = path.regularization.as_ref().unwrap();
+            assert_eq!(diagnostics.raw_point_count, raw_path.points.len());
+            assert_eq!(diagnostics.final_point_count, path.points.len());
+            assert!(diagnostics.maximum_pair_residual <= 1.0e-9);
+            assert!(
+                path.points
+                    .windows(2)
+                    .all(|points| { composition_distance(points[0], points[1]) > 1.0e-9 })
+            );
+        }
+        for node in &regularized.nodes {
+            assert_eq!(
+                regularized.incident_univariants(node.id()).unwrap(),
+                raw.incident_univariants(node.id()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn curved_univariant_is_projected_to_pair_equality_across_sampling_cells() {
+        let alpha = |[a, _b, c]: [f64; 3]| defined(a + 0.4 * c * c);
+        let beta = |[_a, b, _c]: [f64; 3]| defined(b);
+        let phases = [
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&beta)),
+        ];
+        let prepared = PreparedStablePhaseEnsemble::new(
+            phases,
+            StableContourQuantity::Height,
+            StableGridOptions {
+                subdivisions: 8,
+                ..StableGridOptions::default()
+            },
+        )
+        .unwrap();
+        let network = prepared
+            .stable_boundaries(StableBoundaryOptions {
+                regularization: Some(PathRegularizationOptions {
+                    spacing: 0.02,
+                    protected_endpoint_distance: 0.0,
+                    max_normal_step: 0.2,
+                    ..PathRegularizationOptions::default()
+                }),
+                ..StableBoundaryOptions::default()
+            })
+            .unwrap();
+        assert_eq!(network.univariants.len(), 1);
+        let path = &network.univariants[0];
+        assert!(path.points.len() > 10);
+        for point in &path.points {
+            let [a, b, c] = point.as_array();
+            assert!((a + 0.4 * c * c - b).abs() <= 1.0e-9);
+        }
+        let diagnostics = path.regularization.as_ref().unwrap();
+        assert!(diagnostics.accepted_projections > 0);
+        assert!(diagnostics.maximum_pair_residual <= 1.0e-9);
+    }
+
+    #[test]
+    fn phase_input_permutation_and_repeated_raw_construction_are_exact() {
+        let alpha = |[a, _b, _c]: [f64; 3]| defined(a);
+        let beta = |[_a, b, _c]: [f64; 3]| defined(b);
+        let gamma = |[_a, _b, c]: [f64; 3]| defined(c);
+        let make = |phases| {
+            PreparedStablePhaseEnsemble::new(
+                phases,
+                StableContourQuantity::Height,
+                StableGridOptions {
+                    subdivisions: 9,
+                    ..StableGridOptions::default()
+                },
+            )
+            .unwrap()
+        };
+        let first = make([
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&beta)),
+            StablePhaseSource::new(StablePhaseId(3), StableScalarSource::evaluator(&gamma)),
+        ]);
+        let second = make([
+            StablePhaseSource::new(StablePhaseId(3), StableScalarSource::evaluator(&gamma)),
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&beta)),
+        ]);
+        let expected = first
+            .stable_boundaries(StableBoundaryOptions::default())
+            .unwrap();
+        assert_eq!(
+            expected,
+            first
+                .stable_boundaries(StableBoundaryOptions::default())
+                .unwrap()
+        );
+        assert_eq!(
+            expected,
+            second
+                .stable_boundaries(StableBoundaryOptions::default())
+                .unwrap()
+        );
+        assert!(
+            expected
+                .univariants
+                .iter()
+                .all(|path| path.regularization.is_none())
+        );
+    }
+
+    #[test]
+    fn isolated_closed_univariant_is_explicitly_deferred_without_a_boundary_seed() {
+        let island = |[a, b, c]: [f64; 3]| {
+            let radius =
+                (a - 1.0 / 3.0).powi(2) + (b - 1.0 / 3.0).powi(2) + (c - 1.0 / 3.0).powi(2);
+            defined(0.04 - radius)
+        };
+        let matrix = |_: [f64; 3]| defined(0.0);
+        let prepared = PreparedStablePhaseEnsemble::new(
+            [
+                StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&island)),
+                StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&matrix)),
+            ],
+            StableContourQuantity::Height,
+            StableGridOptions {
+                subdivisions: 24,
+                ..StableGridOptions::default()
+            },
+        )
+        .unwrap();
+        let network = prepared
+            .stable_boundaries(StableBoundaryOptions::default())
+            .unwrap();
+        assert!(network.nodes.is_empty());
+        assert!(network.univariants.is_empty());
+    }
+
+    #[test]
+    fn dense_trace_marks_reject_repeated_directed_states() {
+        let topology =
+            RegularSamplingTopology::new(crate::RegularTernaryGrid::new(2).unwrap()).unwrap();
+        let mut marks = RegularGridTraceMarks::new(&topology).unwrap();
+        let mut diagnostics = StableBoundaryDiagnostics::default();
+        marks.begin();
+        marks.mark_triangle(0).unwrap();
+        assert!(matches!(
+            marks.mark_triangle(0),
+            Err(StableBoundaryError::RepeatedTriangleTransition { triangle: 0 })
+        ));
+        let feature = TraceFeature::Edge(topology.triangle_edges(0).unwrap()[0].edge);
+        marks
+            .mark_feature(&feature, 0, &topology, &mut diagnostics)
+            .unwrap();
+        assert!(matches!(
+            marks.mark_feature(&feature, 0, &topology, &mut diagnostics),
+            Err(StableBoundaryError::RepeatedDirectedEdgeTraversal { .. })
+        ));
     }
 
     #[test]
