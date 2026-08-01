@@ -87,6 +87,7 @@ pub use grid::{
 pub use interpolation::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
 };
+
 #[cfg(feature = "irregular-delaunay")]
 pub use irregular::{
     IRREGULAR_VERTEX_TOLERANCE, IrregularEdgeId, IrregularFieldError,

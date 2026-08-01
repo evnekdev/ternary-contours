@@ -308,6 +308,20 @@ fn global_gradient(
     global_gradient_ab([v0, v1, v2], local).ok_or(FieldEvaluationError::InvalidLocation {
         triangle: triangle.id,
     })
+    let da0 = v0[0] - v2[0];
+    let da1 = v1[0] - v2[0];
+    let db0 = v0[1] - v2[1];
+    let db1 = v1[1] - v2[1];
+    let determinant = da0 * db1 - da1 * db0;
+    if determinant == 0.0 {
+        return Err(FieldEvaluationError::InvalidLocation {
+            triangle: triangle.id,
+        });
+    }
+    Ok([
+        (local[0] * db1 - db0 * local[1]) / determinant,
+        (da0 * local[1] - local[0] * da1) / determinant,
+    ])
 }
 
 #[cfg(test)]
