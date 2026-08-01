@@ -41,6 +41,23 @@ pub struct FieldSample {
     pub location: LocatedTriangle,
 }
 
+impl FieldSample {
+    /// Return this sample's gradient in shared invariant ternary coordinates.
+    pub const fn gradient(&self) -> crate::TernaryGradient {
+        crate::TernaryGradient::from_reduced_ab(self.gradient_ab)
+    }
+
+    /// Return the gradient in canonical logical `(x, y)` coordinates.
+    pub fn gradient_logical_xy(&self) -> [f64; 2] {
+        self.gradient().logical_xy()
+    }
+
+    /// Return the invariant gradient magnitude per unit logical distance.
+    pub fn gradient_norm(&self) -> f64 {
+        self.gradient().norm()
+    }
+}
+
 /// Failure while preparing or evaluating an interpolated scalar field.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -159,6 +176,11 @@ impl<'a> InterpolatedTernaryField<'a> {
         FieldEvaluationError::CubicFeatureUnavailable
     }
 
+    /// Return the sampled scalar field used by this prepared evaluator.
+    pub const fn field(&self) -> &'a RegularTernaryScalarField {
+        self.field
+    }
+
     /// Evaluate only the scalar value at one semantic composition.
     pub fn value(&self, composition: [f64; 3]) -> Result<f64, FieldEvaluationError> {
         Ok(self.evaluate(composition)?.value)
@@ -222,6 +244,52 @@ impl<'a> InterpolatedTernaryField<'a> {
             gradient_ab,
             location: *location,
         })
+    }
+
+    /// Evaluate one known triangle-local barycentric position without point location.
+    ///
+    /// This crate-private hook supports deterministic one-sided metric probes.
+    pub(crate) fn evaluate_in_triangle(
+        &self,
+        triangle: GridTriangle,
+        barycentric: [f64; 3],
+    ) -> Result<(f64, [f64; 2]), FieldEvaluationError> {
+        if self.field.grid().triangle(triangle.id).ok() != Some(triangle)
+            || !valid_barycentric(barycentric)
+        {
+            return Err(FieldEvaluationError::InvalidLocation {
+                triangle: triangle.id,
+            });
+        }
+        let local_gradient = match &self.interpolation {
+            PreparedInterpolation::Linear => {
+                let values = triangle.vertices.map(|id| self.field.values()[id.0]);
+                [values[0] - values[2], values[1] - values[2]]
+            }
+            PreparedInterpolation::CubicAlpha(model) => model
+                .gradient_in_triangle(triangle.id, barycentric[0], barycentric[1])
+                .ok_or(FieldEvaluationError::InvalidLocation {
+                    triangle: triangle.id,
+                })?,
+        };
+        let value = match &self.interpolation {
+            PreparedInterpolation::Linear => triangle
+                .vertices
+                .into_iter()
+                .zip(barycentric)
+                .map(|(id, weight)| self.field.values()[id.0] * weight)
+                .sum(),
+            PreparedInterpolation::CubicAlpha(model) => model
+                .value_in_triangle(triangle.id, barycentric)
+                .ok_or(FieldEvaluationError::InvalidLocation {
+                    triangle: triangle.id,
+                })?,
+        };
+        let gradient = global_gradient(self.field, triangle, local_gradient)?;
+        if !value.is_finite() || !gradient.into_iter().all(f64::is_finite) {
+            return Err(FieldEvaluationError::NonFiniteEvaluation);
+        }
+        Ok((value, gradient))
     }
 
     /// Lazily evaluate a batch without rebuilding the prepared model.

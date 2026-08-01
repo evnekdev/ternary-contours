@@ -28,6 +28,11 @@
 //! converged prepared field. Irregular filled bands remain intentionally excluded.
 //! The maintained numerical validation method and its limits are recorded in
 //! [`docs/numerical-validation.md`](../docs/numerical-validation.md).
+//! [`metrics`] adds deterministic shared gradient, local quadratic sampled-field,
+//! derived-evaluator, edge-jump, and final-contour analysis. Delaunay geometry
+//! quality remains specific to [`IrregularTernaryMesh`] behind `irregular-delaunay`;
+//! the corrected capability split is documented in
+//! [`docs/irregular-mesh-metrics.md`](../docs/irregular-mesh-metrics.md).
 
 pub mod contour;
 mod error;
@@ -37,6 +42,7 @@ pub mod grid;
 pub mod interpolation;
 #[cfg(feature = "irregular-delaunay")]
 pub mod irregular;
+pub mod metrics;
 mod simplex;
 
 /// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
@@ -98,6 +104,27 @@ pub use grid::{
 };
 pub use interpolation::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
+};
+#[cfg(feature = "cubic-alpha")]
+pub use metrics::RegularCubicEdgeContinuityMetrics;
+pub use metrics::{
+    ContourLevelResponseMetrics, ContourPathResponseMetrics, DerivedFieldQuantity,
+    DerivedFieldSample, DerivedRegularTernaryField, DistributionError, DistributionQuantiles,
+    DistributionSummary, GradientJump, Histogram, HistogramBinning, HistogramError,
+    LocalQuadraticError, LocalQuadraticEstimate, LocalQuadraticOptions, MetricWeighting,
+    RegularFieldMetrics, RegularGradientJump, RegularTriangleFieldMetrics,
+    RegularTriangleOrientation, ScalarFieldDistributionMetrics, TernaryGradient,
+};
+#[cfg(feature = "irregular-delaunay")]
+pub use metrics::{
+    DerivedIrregularTernaryField, IrregularEdgeFieldMetrics, IrregularEdgeGeometryMetrics,
+    IrregularFieldMetrics, IrregularGradientJump, IrregularMeshMetrics, IrregularMeshSummary,
+    IrregularTriangleFieldMetrics, IrregularTriangleGeometryMetrics,
+    IrregularVertexGeometryMetrics, TriangleFieldAlignmentMetrics,
+};
+#[cfg(feature = "irregular-cubic-alpha")]
+pub use metrics::{
+    IrregularAlphaEdgeMetrics, IrregularAlphaResponseMetrics, IrregularCubicEdgeContinuityMetrics,
 };
 
 #[cfg(feature = "irregular-delaunay")]

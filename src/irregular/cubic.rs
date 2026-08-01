@@ -444,6 +444,24 @@ impl<'a> InterpolatedIrregularTernaryField<'a> {
             PreparedIrregularInterpolation::CubicAlpha(cubic) => Some(cubic.intervals()),
         }
     }
+    /// Return compact per-edge stencil-completion flags in dense edge-ID order.
+    ///
+    /// `true` means both virtual endpoint locations were available during
+    /// construction; `false` records a linear boundary fallback. No virtual
+    /// locations or stencil geometry are retained by this API.
+    pub fn cubic_alpha_stencil_complete(&self) -> Option<&[bool]> {
+        match &self.interpolation {
+            PreparedIrregularInterpolation::Linear(_) => None,
+            #[cfg(feature = "irregular-cubic-alpha")]
+            PreparedIrregularInterpolation::CubicAlpha(cubic) => Some(cubic.stencil_complete()),
+        }
+    }
+    /// Return whether one edge had a complete cubic-alpha virtual stencil.
+    pub fn cubic_alpha_stencil_is_complete(&self, edge: IrregularEdgeId) -> Option<bool> {
+        self.cubic_alpha_stencil_complete()
+            .and_then(|complete| complete.get(edge.0))
+            .copied()
+    }
     /// Return one final canonical alpha interval by mesh edge ID.
     pub fn cubic_alpha_interval(&self, edge: IrregularEdgeId) -> Option<AlphaInterval> {
         self.cubic_alpha_intervals()
@@ -509,6 +527,7 @@ struct IrregularCubicAlphaField<'a> {
     field: &'a IrregularTernaryScalarField,
     intervals: Box<[AlphaInterval]>,
     triangle_access: Box<[TriangleAlphaAccess]>,
+    stencil_complete: Box<[bool]>,
     diagnostics: IrregularCubicAlphaDiagnostics,
 }
 
@@ -522,6 +541,10 @@ impl<'a> IrregularCubicAlphaField<'a> {
         let mesh = field.mesh();
         let mut diagnostics = IrregularCubicAlphaDiagnostics::new(options, mesh.edge_count());
         let stencils = build_stencils(mesh, options.boundary_policy, &mut diagnostics)?;
+        let stencil_complete = stencils
+            .iter()
+            .map(|stencil| matches!(stencil, EdgeStencil::Complete { .. }))
+            .collect::<Vec<_>>();
         let triangle_access = build_triangle_access(mesh);
         let intervals = solve_intervals(
             field,
@@ -534,6 +557,7 @@ impl<'a> IrregularCubicAlphaField<'a> {
             field,
             intervals: intervals.into_boxed_slice(),
             triangle_access: triangle_access.into_boxed_slice(),
+            stencil_complete: stencil_complete.into_boxed_slice(),
             diagnostics,
         })
     }
@@ -542,6 +566,9 @@ impl<'a> IrregularCubicAlphaField<'a> {
     }
     fn intervals(&self) -> &[AlphaInterval] {
         &self.intervals
+    }
+    fn stencil_complete(&self) -> &[bool] {
+        &self.stencil_complete
     }
     fn triangle_intervals(
         &self,

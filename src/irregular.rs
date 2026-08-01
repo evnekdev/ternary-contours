@@ -342,6 +342,7 @@ pub struct IrregularTernaryMesh {
     edges: Vec<IrregularMeshEdge>,
     triangles: Vec<IrregularMeshTriangle>,
     vertex_triangles: Vec<Vec<IrregularTriangleId>>,
+    vertex_edges: Vec<Vec<IrregularEdgeId>>,
     backend: BackendTriangulation,
     backend_triangles: HashMap<SimplexKey, IrregularTriangleId>,
     triangle_backend_keys: Vec<SimplexKey>,
@@ -504,12 +505,18 @@ impl IrregularTernaryMesh {
                 message: "an edge has no incident triangle".to_owned(),
             });
         }
+        let mut vertex_edges = vec![Vec::new(); compositions.len()];
+        for edge in &edges {
+            vertex_edges[edge.vertices[0].0].push(edge.id);
+            vertex_edges[edge.vertices[1].0].push(edge.id);
+        }
         Ok(Self {
             compositions,
             vertex_lookup,
             edges,
             triangles,
             vertex_triangles,
+            vertex_edges,
             backend,
             backend_triangles,
             triangle_backend_keys,
@@ -588,6 +595,16 @@ impl IrregularTernaryMesh {
         vertex: IrregularVertexId,
     ) -> Result<&[IrregularTriangleId], IrregularMeshError> {
         self.vertex_triangles
+            .get(vertex.0)
+            .map(Vec::as_slice)
+            .ok_or(IrregularMeshError::InvalidVertex { vertex })
+    }
+    /// Return canonical edge IDs incident to one vertex in stable edge-ID order.
+    pub fn incident_edges(
+        &self,
+        vertex: IrregularVertexId,
+    ) -> Result<&[IrregularEdgeId], IrregularMeshError> {
+        self.vertex_edges
             .get(vertex.0)
             .map(Vec::as_slice)
             .ok_or(IrregularMeshError::InvalidVertex { vertex })
@@ -947,6 +964,23 @@ pub struct IrregularFieldSample {
     pub gradient_ab: [f64; 2],
     /// The deterministic containing triangle and barycentric location.
     pub location: LocatedIrregularTriangle,
+}
+
+impl IrregularFieldSample {
+    /// Return this sample's gradient in shared invariant ternary coordinates.
+    pub const fn gradient(&self) -> crate::TernaryGradient {
+        crate::TernaryGradient::from_reduced_ab(self.gradient_ab)
+    }
+
+    /// Return the gradient in canonical logical `(x, y)` coordinates.
+    pub fn gradient_logical_xy(&self) -> [f64; 2] {
+        self.gradient().logical_xy()
+    }
+
+    /// Return the invariant gradient magnitude per unit logical distance.
+    pub fn gradient_norm(&self) -> f64 {
+        self.gradient().norm()
+    }
 }
 
 /// Prepared piecewise-linear evaluator for an irregular ternary scalar field.
