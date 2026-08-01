@@ -1,7 +1,9 @@
-//! Backend-independent line contours over a regular ternary composition grid.
+//! Backend-independent line contours over regular grids and optional irregular Delaunay meshes.
 
 mod bands;
 mod error;
+#[cfg(feature = "irregular-delaunay")]
+mod irregular;
 mod linear;
 mod locate;
 mod options;
@@ -11,6 +13,13 @@ mod topology;
 
 pub use bands::{ContourBand, ContourBandOptions, ContourBandSet, ContourFragment, ContourRegion};
 pub use error::ContourError;
+#[cfg(feature = "irregular-delaunay")]
+pub use irregular::{
+    IrregularAdaptiveContourOptions, IrregularContourDiagnostics, IrregularContourError,
+    IrregularContourGeometryOptions, IrregularContourInterpolation,
+    IrregularContourLevelDiagnostics, IrregularContourOptions, IrregularContourSet,
+    IrregularCubicContourSourceDiagnostics,
+};
 pub use options::{
     AdaptiveContourOptions, ContourInterpolation, ContourOptions, ContourRegularization,
     CubicAlphaMethod, CubicAlphaOptions, CubicBoundaryPolicy, CubicContourDiagnostics,

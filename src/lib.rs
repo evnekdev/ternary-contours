@@ -23,7 +23,9 @@
 //! fields inside their convex hull. `irregular-cubic-alpha` additionally builds
 //! a cached self-consistent edge-alpha field with synchronous Jacobi sweeps;
 //! its virtual locations and one interval per canonical mesh edge are prepared
-//! once. Irregular contour extraction and bands remain intentionally excluded.
+//! once. Irregular linear isolines are available with `irregular-delaunay`;
+//! `irregular-cubic-alpha` additionally enables adaptive cubic isolines over a
+//! converged prepared field. Irregular filled bands remain intentionally excluded.
 
 pub mod contour;
 mod error;
@@ -75,6 +77,13 @@ pub use contour::{
     AdaptiveContourOptions, ContourBand, ContourBandOptions, ContourBandSet, ContourError,
     ContourFragment, ContourInterpolation, ContourLevel, ContourOptions, ContourPath,
     ContourRegion, ContourRegularization, ContourSet, CubicAlphaOptions, CubicContourDiagnostics,
+};
+#[cfg(feature = "irregular-delaunay")]
+pub use contour::{
+    IrregularAdaptiveContourOptions, IrregularContourDiagnostics, IrregularContourError,
+    IrregularContourGeometryOptions, IrregularContourInterpolation,
+    IrregularContourLevelDiagnostics, IrregularContourOptions, IrregularContourSet,
+    IrregularCubicContourSourceDiagnostics,
 };
 pub use error::{FieldError, GridEvaluationError};
 pub use evaluation::{
