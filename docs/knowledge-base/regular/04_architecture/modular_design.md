@@ -33,7 +33,7 @@ regular/irregular topology and point location
         -> ordinary contour or metric consumers
 
 heterogeneous prepared source evaluators
-        -> geometry-grouped umbrella sampling
+        -> geometry-grouped sampling-grid sampling
         -> optional verification and global refinement
         -> exact affine upper-envelope polygon clipping
         -> phase-labelled target segments
@@ -60,7 +60,7 @@ segments/paths
     target intersection, forward progress, junctions, and assembly
 ```
 
-The source interpolation family is independent from the umbrella model.
+The source interpolation family is independent from the sampling-grid model.
 Muggianu, Kohler, and RawBarycentric remain policies inside cubic-alpha source
 interpolation. Stable ownership is always the sampled height upper envelope;
 secondary fields cannot influence it.
@@ -69,7 +69,7 @@ secondary fields cannot influence it.
 
 Regular grids retain integer-lattice direct location and deterministic triangle
 ordering. Irregular meshes retain Delaunay-backed robust location and dense
-crate-owned IDs. The stable umbrella intentionally does not rewrite either
+crate-owned IDs. The stable sampling-grid intentionally does not rewrite either
 around a superficial shared public enum or expose backend handles.
 
 A future generic simplex-field extraction may share local value/gradient and

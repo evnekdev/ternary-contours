@@ -25,6 +25,9 @@ pub enum ContourError {
         index: usize,
         vertex_count: usize,
     },
+    RegularGridTopology {
+        message: String,
+    },
     NonFiniteLevel {
         index: usize,
         value: f64,
@@ -124,6 +127,9 @@ impl fmt::Display for ContourError {
                 index,
                 vertex_count,
             } => write!(f, "grid vertex index {index} is outside 0..{vertex_count}"),
+            Self::RegularGridTopology { message } => {
+                write!(f, "regular-grid topology error: {message}")
+            }
             Self::NonFiniteLevel { index, value } => {
                 write!(f, "contour level {index} is not finite: {value:?}")
             }
@@ -264,6 +270,11 @@ impl From<FieldError> for ContourError {
             } => Self::InvalidVertexIndex {
                 index,
                 vertex_count,
+            },
+            error @ (FieldError::InvalidGridEdgeIndex { .. }
+            | FieldError::InvalidGridTriangleIndex { .. }
+            | FieldError::InvalidRegularGridTopology { .. }) => Self::RegularGridTopology {
+                message: error.to_string(),
             },
             FieldError::InsufficientStencil { samples } => Self::InsufficientStencil { samples },
             FieldError::CubicFeatureUnavailable => Self::CubicFeatureUnavailable,

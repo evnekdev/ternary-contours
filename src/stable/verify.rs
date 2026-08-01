@@ -3,18 +3,18 @@ use std::collections::BTreeSet;
 use crate::GridTriangle;
 
 use super::{
-    StableContourDiagnostics, StableContourError, StableContourQuantity,
-    StableUmbrellaVerification, StableVerificationPassDiagnostics,
+    StableContourDiagnostics, StableContourError, StableContourQuantity, StableGridVerification,
+    StableVerificationPassDiagnostics,
     sample::{
-        PreparedSourceLayer, SourceGeometryGroup, SourceLocationHint, UmbrellaSamples,
+        PreparedSourceLayer, RegularSamplingGrid, SourceGeometryGroup, SourceLocationHint,
         evaluate_sources_at_point,
     },
 };
 
-pub(crate) fn verify_umbrella(
-    samples: &UmbrellaSamples,
+pub(crate) fn verify_sampling_grid(
+    samples: &RegularSamplingGrid,
     quantity: StableContourQuantity,
-    verification: StableUmbrellaVerification,
+    verification: StableGridVerification,
     stability_tolerance: f64,
     layers: &[PreparedSourceLayer<'_>],
     groups: &[SourceGeometryGroup<'_>],
@@ -98,7 +98,7 @@ pub(crate) fn verify_umbrella(
             triangle_unresolved |= point_unresolved;
         }
         if triangle_unresolved {
-            pass.unresolved_umbrella_triangles += 1;
+            pass.unresolved_sampling_triangles += 1;
             if triangle_score > worst_triangle_score {
                 worst_triangle_score = triangle_score;
                 pass.worst_unresolved_triangle = Some(triangle.id);
@@ -112,7 +112,7 @@ pub(crate) fn verify_umbrella(
     Ok(pass)
 }
 
-fn verification_points(options: StableUmbrellaVerification) -> Vec<[f64; 3]> {
+fn verification_points(options: StableGridVerification) -> Vec<[f64; 3]> {
     let mut points = Vec::with_capacity(4);
     if options.verify_centroids {
         points.push([1.0 / 3.0; 3]);
@@ -124,7 +124,7 @@ fn verification_points(options: StableUmbrellaVerification) -> Vec<[f64; 3]> {
 }
 
 fn triangle_compositions(
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     triangle: GridTriangle,
 ) -> Result<[[f64; 3]; 3], StableContourError> {
     triangle
@@ -151,7 +151,7 @@ fn weighted_composition(vertices: [[f64; 3]; 3], barycentric: [f64; 3]) -> [f64;
 }
 
 fn affine_candidate_set(
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     triangle: GridTriangle,
     tolerance: f64,
 ) -> BTreeSet<usize> {

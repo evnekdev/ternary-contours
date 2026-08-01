@@ -1,4 +1,4 @@
-//! Stable phase contours on a common virtual regular umbrella grid.
+//! Stable phase contours on a common virtual regular sampling grid.
 
 mod clip;
 mod diagnostics;
@@ -17,7 +17,7 @@ mod tests;
 
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
 pub use error::{StableContourError, StableSourceEvaluationError};
-pub use options::{StableUmbrellaOptions, StableUmbrellaVerification};
+pub use options::{StableGridOptions, StableGridVerification};
 pub use prepare::PreparedStablePhaseEnsemble;
 pub use source::{StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource};
 

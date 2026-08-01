@@ -58,7 +58,7 @@ pub enum StableContourError {
     },
     IncompleteSourceCoverage {
         phase: StablePhaseId,
-        umbrella_vertex: GridVertexId,
+        sampling_vertex: GridVertexId,
         composition: [f64; 3],
     },
     SourcePreparation {
@@ -77,11 +77,11 @@ pub enum StableContourError {
         quantity: StableContourQuantity,
         composition: [f64; 3],
     },
-    InvalidUmbrellaOptions {
+    InvalidStableGridOptions {
         message: String,
     },
-    UmbrellaSubdivisionOverflow,
-    UmbrellaResolutionInsufficient {
+    SamplingSubdivisionOverflow,
+    SamplingResolutionInsufficient {
         subdivisions: usize,
         unresolved_triangles: usize,
         worst_triangle: Option<usize>,
@@ -140,7 +140,7 @@ pub enum StableContourError {
 
 impl StableContourError {
     pub(crate) fn invalid_option(message: impl Into<String>) -> Self {
-        Self::InvalidUmbrellaOptions {
+        Self::InvalidStableGridOptions {
             message: message.into(),
         }
     }
@@ -171,11 +171,11 @@ impl fmt::Display for StableContourError {
             ),
             Self::IncompleteSourceCoverage {
                 phase,
-                umbrella_vertex,
+                sampling_vertex,
                 composition,
             } => write!(
                 formatter,
-                "phase {phase:?} does not cover umbrella vertex {umbrella_vertex:?} at {composition:?}"
+                "phase {phase:?} does not cover sampling-grid vertex {sampling_vertex:?} at {composition:?}"
             ),
             Self::SourcePreparation {
                 phase,
@@ -202,13 +202,13 @@ impl fmt::Display for StableContourError {
                 formatter,
                 "phase {phase:?} {quantity:?} source produced a non-finite value at {composition:?}"
             ),
-            Self::InvalidUmbrellaOptions { message } => {
-                write!(formatter, "invalid stable umbrella options: {message}")
+            Self::InvalidStableGridOptions { message } => {
+                write!(formatter, "invalid stable sampling-grid options: {message}")
             }
-            Self::UmbrellaSubdivisionOverflow => {
-                formatter.write_str("umbrella subdivision refinement overflowed")
+            Self::SamplingSubdivisionOverflow => {
+                formatter.write_str("sampling-grid subdivision refinement overflowed")
             }
-            Self::UmbrellaResolutionInsufficient {
+            Self::SamplingResolutionInsufficient {
                 subdivisions,
                 unresolved_triangles,
                 worst_triangle,
@@ -216,11 +216,11 @@ impl fmt::Display for StableContourError {
                 maximum_secondary_error,
             } => write!(
                 formatter,
-                "umbrella resolution {subdivisions} left {unresolved_triangles} unresolved triangles (worst {worst_triangle:?}, height error {maximum_height_error}, secondary error {maximum_secondary_error})"
+                "sampling-grid resolution {subdivisions} left {unresolved_triangles} unresolved triangles (worst {worst_triangle:?}, height error {maximum_height_error}, secondary error {maximum_secondary_error})"
             ),
             Self::StablePolygonFailure { triangle, phase } => write!(
                 formatter,
-                "stable polygon clipping failed in umbrella triangle {triangle} for phase {phase:?}"
+                "stable polygon clipping failed in sampling-grid triangle {triangle} for phase {phase:?}"
             ),
             Self::AmbiguousPathAssembly {
                 level,
@@ -275,7 +275,7 @@ impl fmt::Display for StableContourError {
             ),
             Self::NonFiniteStableGeometry { triangle } => write!(
                 formatter,
-                "stable geometry became non-finite in umbrella triangle {triangle}"
+                "stable geometry became non-finite in sampling-grid triangle {triangle}"
             ),
             Self::NonFiniteLevel { index, value } => {
                 write!(
@@ -288,7 +288,7 @@ impl fmt::Display for StableContourError {
                 "stable contour levels {first} and {second} coincide within value tolerance"
             ),
             Self::GridConstruction(error) => {
-                write!(formatter, "umbrella grid construction failed: {error}")
+                write!(formatter, "sampling grid construction failed: {error}")
             }
         }
     }

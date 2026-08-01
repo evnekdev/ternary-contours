@@ -1,20 +1,20 @@
 use super::StableContourError;
 
-/// Practical source-to-umbrella verification and global refinement controls.
+/// Practical source-to-sampling-grid verification and global refinement controls.
 ///
 /// Verification samples are a resolution check, not a proof that no smaller
 /// feature exists between the configured points.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StableUmbrellaVerification {
+pub struct StableGridVerification {
     /// Enable midpoint/centroid comparison against original source evaluators.
     pub enabled: bool,
     /// Maximum number of deterministic global refinement passes.
     pub maximum_refinement_passes: usize,
-    /// Hard upper bound on regular umbrella subdivisions.
+    /// Hard upper bound on regular sampling-grid subdivisions.
     pub maximum_subdivisions: usize,
-    /// Verify all three edge midpoints in every umbrella triangle.
+    /// Verify all three edge midpoints in every sampling-grid triangle.
     pub verify_edge_midpoints: bool,
-    /// Verify every umbrella triangle centroid.
+    /// Verify every sampling-grid triangle centroid.
     pub verify_centroids: bool,
     /// Maximum accepted absolute source-height approximation error.
     pub height_error_tolerance: f64,
@@ -26,7 +26,7 @@ pub struct StableUmbrellaVerification {
     pub allow_unresolved: bool,
 }
 
-impl Default for StableUmbrellaVerification {
+impl Default for StableGridVerification {
     fn default() -> Self {
         Self {
             enabled: false,
@@ -42,10 +42,10 @@ impl Default for StableUmbrellaVerification {
     }
 }
 
-/// Numerical controls for the common virtual regular umbrella representation.
+/// Numerical controls for the common virtual regular sampling-grid representation.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StableUmbrellaOptions {
-    /// Initial subdivision count of the regular umbrella grid.
+pub struct StableGridOptions {
+    /// Initial subdivision count of the regular sampling grid.
     pub subdivisions: usize,
     /// Scalar equality and requested-level tolerance.
     pub value_tolerance: f64,
@@ -56,10 +56,10 @@ pub struct StableUmbrellaOptions {
     /// Strict local event and directed traversal progress tolerance.
     pub parameter_tolerance: f64,
     /// Optional source approximation verification and global refinement.
-    pub verification: StableUmbrellaVerification,
+    pub verification: StableGridVerification,
 }
 
-impl Default for StableUmbrellaOptions {
+impl Default for StableGridOptions {
     fn default() -> Self {
         Self {
             subdivisions: 24,
@@ -67,12 +67,12 @@ impl Default for StableUmbrellaOptions {
             stability_tolerance: 1.0e-10,
             geometry_tolerance: 1.0e-10,
             parameter_tolerance: 1.0e-12,
-            verification: StableUmbrellaVerification::default(),
+            verification: StableGridVerification::default(),
         }
     }
 }
 
-impl StableUmbrellaOptions {
+impl StableGridOptions {
     pub(crate) fn validate(self) -> Result<(), StableContourError> {
         if self.subdivisions == 0 {
             return Err(StableContourError::invalid_option(

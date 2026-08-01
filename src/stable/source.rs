@@ -16,10 +16,10 @@ pub enum StableContourQuantity {
     Secondary,
 }
 
-/// One scalar source used only to sample the virtual umbrella grid.
+/// One scalar source used only to sample the virtual regular sampling grid.
 ///
 /// The selected source interpolation is prepared once. Regardless of this
-/// choice, the resulting umbrella representation is affine per umbrella
+/// choice, the resulting sampling-grid representation is affine per sampling-grid
 /// triangle.
 #[derive(Clone, Copy, Debug)]
 #[non_exhaustive]

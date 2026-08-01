@@ -39,14 +39,14 @@ pub(crate) struct SourceLocationHint {
     irregular: Option<IrregularTriangleId>,
 }
 
-pub(crate) struct UmbrellaSamples {
+pub(crate) struct RegularSamplingGrid {
     pub grid: RegularTernaryGrid,
     pub phase_count: usize,
     heights: Vec<f64>,
     secondary: Option<Vec<f64>>,
 }
 
-impl UmbrellaSamples {
+impl RegularSamplingGrid {
     pub fn vertex_count(&self) -> usize {
         self.grid.vertex_count()
     }
@@ -221,17 +221,17 @@ fn preparation_error(
     }
 }
 
-pub(crate) fn sample_umbrella(
+pub(crate) fn sample_regular_grid(
     grid: RegularTernaryGrid,
     phase_count: usize,
     quantity: StableContourQuantity,
     layers: &[PreparedSourceLayer<'_>],
     groups: &[SourceGeometryGroup<'_>],
     diagnostics: &mut StableContourDiagnostics,
-) -> Result<UmbrellaSamples, StableContourError> {
+) -> Result<RegularSamplingGrid, StableContourError> {
     let sample_count = phase_count
         .checked_mul(grid.vertex_count())
-        .ok_or(StableContourError::UmbrellaSubdivisionOverflow)?;
+        .ok_or(StableContourError::SamplingSubdivisionOverflow)?;
     let mut heights = vec![0.0; sample_count];
     let mut secondary =
         (quantity == StableContourQuantity::Secondary).then(|| vec![0.0; sample_count]);
@@ -259,8 +259,8 @@ pub(crate) fn sample_umbrella(
     }
     diagnostics.sampled_scalar_values = sample_count
         .checked_mul(if secondary.is_some() { 2 } else { 1 })
-        .ok_or(StableContourError::UmbrellaSubdivisionOverflow)?;
-    Ok(UmbrellaSamples {
+        .ok_or(StableContourError::SamplingSubdivisionOverflow)?;
+    Ok(RegularSamplingGrid {
         grid,
         phase_count,
         heights,
@@ -321,10 +321,10 @@ pub(crate) fn evaluate_sources_at_point(
                     Ok(location) => location,
                     Err(error) => {
                         let first = &layers[group.layers[0]];
-                        if let Some(umbrella_vertex) = coverage_vertex {
+                        if let Some(sampling_vertex) = coverage_vertex {
                             return Err(StableContourError::IncompleteSourceCoverage {
                                 phase: first.phase,
-                                umbrella_vertex,
+                                sampling_vertex,
                                 composition,
                             });
                         }

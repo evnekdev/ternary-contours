@@ -1,7 +1,7 @@
-/// One source-to-umbrella verification pass.
+/// One source-to-sampling-grid verification pass.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct StableVerificationPassDiagnostics {
-    /// Umbrella subdivisions used in this pass.
+    /// Sampling-grid subdivisions used in this pass.
     pub subdivisions: usize,
     /// Number of direct source verification points.
     pub verification_points: usize,
@@ -11,12 +11,12 @@ pub struct StableVerificationPassDiagnostics {
     pub rms_height_approximation_error: f64,
     /// Largest absolute secondary residual, or zero in height mode.
     pub maximum_secondary_approximation_error: f64,
-    /// Points whose direct and umbrella stable phase sets differ.
+    /// Points whose direct and sampling-grid stable phase sets differ.
     pub ownership_mismatches: usize,
-    /// Directly stable phases absent from the umbrella-predicted stable set.
+    /// Directly stable phases absent from the sampling-grid-predicted stable set.
     pub hidden_candidate_discoveries: usize,
-    /// Umbrella triangles failing at least one configured check.
-    pub unresolved_umbrella_triangles: usize,
+    /// Sampling-grid triangles failing at least one configured check.
+    pub unresolved_sampling_triangles: usize,
     /// Triangle with the largest configured residual, when unresolved.
     pub worst_unresolved_triangle: Option<usize>,
 }
@@ -30,9 +30,9 @@ pub struct StableContourDiagnostics {
     pub geometry_group_count: usize,
     pub regular_geometry_group_count: usize,
     pub irregular_geometry_group_count: usize,
-    pub umbrella_subdivisions: usize,
-    pub umbrella_vertex_count: usize,
-    pub umbrella_triangle_count: usize,
+    pub sampling_subdivisions: usize,
+    pub sampling_vertex_count: usize,
+    pub sampling_triangle_count: usize,
     pub source_point_location_count: usize,
     pub reused_source_locations: usize,
     pub source_scalar_evaluation_count: usize,
@@ -47,7 +47,7 @@ pub struct StableContourDiagnostics {
     pub maximum_secondary_approximation_error: f64,
     pub ownership_mismatches: usize,
     pub hidden_candidate_discoveries: usize,
-    pub unresolved_umbrella_triangles: usize,
+    pub unresolved_sampling_triangles: usize,
     pub worst_unresolved_triangle: Option<usize>,
     pub verification_passes: Vec<StableVerificationPassDiagnostics>,
 

@@ -5,7 +5,7 @@ use crate::{GridTriangle, TernaryCoordinate};
 use super::{
     StableContourDiagnostics, StableContourError, StablePhaseId,
     clip::{clip_half_plane, composition, polygon_area},
-    sample::{UmbrellaSamples, dot},
+    sample::{RegularSamplingGrid, dot},
 };
 
 #[derive(Clone, Debug)]
@@ -16,7 +16,7 @@ pub(crate) struct StablePhasePolygon {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct UmbrellaStableCell {
+pub(crate) struct StableSamplingCell {
     pub triangle: GridTriangle,
     pub vertices: [[f64; 3]; 3],
     pub polygons: Vec<StablePhasePolygon>,
@@ -32,12 +32,12 @@ struct PhaseBounds {
 }
 
 pub(crate) fn build_stable_partition(
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     phase_ids: &[StablePhaseId],
     stability_tolerance: f64,
     geometry_tolerance: f64,
     diagnostics: &mut StableContourDiagnostics,
-) -> Result<Vec<UmbrellaStableCell>, StableContourError> {
+) -> Result<Vec<StableSamplingCell>, StableContourError> {
     let triangles = samples.grid.elementary_triangles()?;
     let mut cells = Vec::with_capacity(triangles.len());
     for triangle in triangles {
@@ -160,7 +160,7 @@ pub(crate) fn build_stable_partition(
             geometry_tolerance,
             diagnostics,
         );
-        cells.push(UmbrellaStableCell {
+        cells.push(StableSamplingCell {
             triangle,
             vertices,
             polygons,
@@ -170,7 +170,7 @@ pub(crate) fn build_stable_partition(
 }
 
 fn triangle_vertices(
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     triangle: GridTriangle,
 ) -> Result<[[f64; 3]; 3], StableContourError> {
     Ok([
@@ -300,7 +300,7 @@ fn bucket(point: [f64; 3], tolerance: f64) -> [i64; 3] {
 }
 
 pub(crate) fn point_from_barycentric(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     barycentric: [f64; 3],
 ) -> TernaryCoordinate {
     composition(cell.vertices, barycentric)

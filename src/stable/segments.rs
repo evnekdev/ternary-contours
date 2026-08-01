@@ -6,8 +6,8 @@ use super::{
     StableContourDiagnostics, StableContourError, StableContourJunctionKind, StableContourQuantity,
     StablePhaseId,
     clip::{close, interpolate},
-    partition::{UmbrellaStableCell, point_from_barycentric},
-    sample::{UmbrellaSamples, dot},
+    partition::{StableSamplingCell, point_from_barycentric},
+    sample::{RegularSamplingGrid, dot},
 };
 
 #[derive(Clone, Debug)]
@@ -20,7 +20,7 @@ pub(crate) struct LocalEndpoint {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum EndpointSource {
-    UmbrellaEdge { edge: (GridVertexId, GridVertexId) },
+    SamplingEdge { edge: (GridVertexId, GridVertexId) },
     StableBoundary,
     Invariant,
     Interior,
@@ -42,8 +42,8 @@ pub(crate) struct LocalParameterEvent {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn extract_level_segments(
-    cells: &[UmbrellaStableCell],
-    samples: &UmbrellaSamples,
+    cells: &[StableSamplingCell],
+    samples: &RegularSamplingGrid,
     phase_ids: &[StablePhaseId],
     quantity: StableContourQuantity,
     level: f64,
@@ -133,7 +133,7 @@ pub(crate) fn extract_level_segments(
 
 #[allow(clippy::too_many_arguments)]
 fn intersect_polygon(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     polygon: &[[f64; 3]],
     target_values: [f64; 3],
     level: f64,
@@ -143,7 +143,7 @@ fn intersect_polygon(
     edge_owners: &BTreeMap<(GridVertexId, GridVertexId), usize>,
     owner_phase: StablePhaseId,
     phase_ids: &[StablePhaseId],
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     stability_tolerance: f64,
     diagnostics: &mut StableContourDiagnostics,
 ) -> Result<Option<[[f64; 3]; 2]>, StableContourError> {
@@ -182,7 +182,7 @@ fn intersect_polygon(
         if left_on && right_on {
             let midpoint = interpolate(left, right, 0.5);
             if tied_phases(cell, midpoint, phase_ids, samples, stability_tolerance).len() < 2
-                && let Some(edge) = umbrella_edge(cell, midpoint, geometry_tolerance)
+                && let Some(edge) = sampling_edge(cell, midpoint, geometry_tolerance)
             {
                 if edge_owners.get(&edge).copied() == Some(cell.triangle.id) {
                     return ordered_pair(
@@ -283,7 +283,7 @@ pub(crate) fn bounded_edge_root(
 }
 
 fn ordered_pair(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     left: [f64; 3],
     right: [f64; 3],
     tangent: [f64; 2],
@@ -354,7 +354,7 @@ pub(crate) fn forward_events(
 }
 
 fn line_tangent(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     target_values: [f64; 3],
 ) -> Result<[f64; 2], StableContourError> {
     let gradient = global_gradient_ab(
@@ -380,20 +380,20 @@ fn line_tangent(
     Ok(tangent)
 }
 
-fn line_parameter(cell: &UmbrellaStableCell, barycentric: [f64; 3], tangent: [f64; 2]) -> f64 {
+fn line_parameter(cell: &StableSamplingCell, barycentric: [f64; 3], tangent: [f64; 2]) -> f64 {
     let [a, b, _] = point_from_barycentric(cell, barycentric).as_array();
     tangent[0] * a + tangent[1] * b
 }
 
 #[allow(clippy::too_many_arguments)]
 fn coincident_error(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     start: [f64; 3],
     end: [f64; 3],
     level: f64,
     owner_phase: StablePhaseId,
     phase_ids: &[StablePhaseId],
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     stability_tolerance: f64,
     diagnostics: &mut StableContourDiagnostics,
 ) -> Result<Option<[[f64; 3]; 2]>, StableContourError> {
@@ -414,11 +414,11 @@ fn coincident_error(
 
 #[allow(clippy::too_many_arguments)]
 fn endpoint(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     barycentric: [f64; 3],
     owner_phase: StablePhaseId,
     phase_ids: &[StablePhaseId],
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     quantity: StableContourQuantity,
     stability_tolerance: f64,
     geometry_tolerance: f64,
@@ -442,8 +442,8 @@ fn endpoint(
         EndpointSource::Invariant
     } else if tied_phases.len() == 2 {
         EndpointSource::StableBoundary
-    } else if let Some(edge) = umbrella_edge(cell, barycentric, geometry_tolerance) {
-        EndpointSource::UmbrellaEdge { edge }
+    } else if let Some(edge) = sampling_edge(cell, barycentric, geometry_tolerance) {
+        EndpointSource::SamplingEdge { edge }
     } else {
         EndpointSource::Interior
     };
@@ -456,10 +456,10 @@ fn endpoint(
 }
 
 fn tied_phases(
-    cell: &UmbrellaStableCell,
+    cell: &StableSamplingCell,
     barycentric: [f64; 3],
     phase_ids: &[StablePhaseId],
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
     tolerance: f64,
 ) -> Vec<StablePhaseId> {
     let values: Vec<_> = (0..samples.phase_count)
@@ -480,8 +480,8 @@ fn tied_phases(
         .collect()
 }
 
-fn umbrella_edge(
-    cell: &UmbrellaStableCell,
+fn sampling_edge(
+    cell: &StableSamplingCell,
     barycentric: [f64; 3],
     tolerance: f64,
 ) -> Option<(GridVertexId, GridVertexId)> {
@@ -498,7 +498,7 @@ fn umbrella_edge(
 }
 
 fn edge_owners(
-    samples: &UmbrellaSamples,
+    samples: &RegularSamplingGrid,
 ) -> Result<BTreeMap<(GridVertexId, GridVertexId), usize>, StableContourError> {
     let mut owners = BTreeMap::new();
     for triangle in samples.grid.elementary_triangles()? {

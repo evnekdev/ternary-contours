@@ -2,29 +2,30 @@ use crate::RegularTernaryGrid;
 
 use super::{
     StableContourDiagnostics, StableContourError, StableContourLevel, StableContourQuantity,
-    StableContourSet, StablePhaseId, StablePhaseSource, StableUmbrellaOptions,
-    partition::{UmbrellaStableCell, build_stable_partition},
+    StableContourSet, StableGridOptions, StablePhaseId, StablePhaseSource,
+    partition::{StableSamplingCell, build_stable_partition},
     paths::assemble_level,
     sample::{
-        PreparedSourceLayer, SourceGeometryGroup, UmbrellaSamples, prepare_sources, sample_umbrella,
+        PreparedSourceLayer, RegularSamplingGrid, SourceGeometryGroup, prepare_sources,
+        sample_regular_grid,
     },
     segments::extract_level_segments,
-    verify::verify_umbrella,
+    verify::verify_sampling_grid,
 };
 
-/// Stable-phase ensemble prepared once on a common virtual regular umbrella grid.
+/// Stable-phase ensemble prepared once on a common virtual regular sampling grid.
 ///
 /// Source interpolators, including optional cubic-alpha models, are constructed
-/// once. Preparation samples and verifies the final umbrella representation and
+/// once. Preparation samples and verifies the final sampling-grid representation and
 /// caches its exact affine stable polygons. Repeated [`Self::contours`] calls do
 /// not locate source points, resample fields, or repeat stable half-plane
 /// clipping.
 pub struct PreparedStablePhaseEnsemble<'a> {
     quantity: StableContourQuantity,
-    options: StableUmbrellaOptions,
+    options: StableGridOptions,
     phase_ids: Vec<StablePhaseId>,
-    samples: UmbrellaSamples,
-    cells: Vec<UmbrellaStableCell>,
+    samples: RegularSamplingGrid,
+    cells: Vec<StableSamplingCell>,
     diagnostics: StableContourDiagnostics,
     _layers: Vec<PreparedSourceLayer<'a>>,
     _groups: Vec<SourceGeometryGroup<'a>>,
@@ -35,7 +36,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
     pub fn new(
         phases: impl IntoIterator<Item = StablePhaseSource<'a>>,
         quantity: StableContourQuantity,
-        options: StableUmbrellaOptions,
+        options: StableGridOptions,
     ) -> Result<Self, StableContourError> {
         options.validate()?;
         let mut phases: Vec<_> = phases.into_iter().collect();
@@ -78,8 +79,8 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
         let mut subdivisions = options.subdivisions;
         let samples = loop {
             let grid = RegularTernaryGrid::new(subdivisions)
-                .map_err(|_| StableContourError::UmbrellaSubdivisionOverflow)?;
-            let samples = sample_umbrella(
+                .map_err(|_| StableContourError::SamplingSubdivisionOverflow)?;
+            let samples = sample_regular_grid(
                 grid,
                 phases.len(),
                 quantity,
@@ -87,7 +88,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                 &groups,
                 &mut diagnostics,
             )?;
-            let verification = verify_umbrella(
+            let verification = verify_sampling_grid(
                 &samples,
                 quantity,
                 options.verification,
@@ -105,9 +106,9 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                 verification.maximum_secondary_approximation_error;
             diagnostics.ownership_mismatches = verification.ownership_mismatches;
             diagnostics.hidden_candidate_discoveries = verification.hidden_candidate_discoveries;
-            diagnostics.unresolved_umbrella_triangles = verification.unresolved_umbrella_triangles;
+            diagnostics.unresolved_sampling_triangles = verification.unresolved_sampling_triangles;
             diagnostics.worst_unresolved_triangle = verification.worst_unresolved_triangle;
-            let unresolved = verification.unresolved_umbrella_triangles;
+            let unresolved = verification.unresolved_sampling_triangles;
             diagnostics.verification_passes.push(verification);
             if !options.verification.enabled || unresolved == 0 {
                 break samples;
@@ -118,7 +119,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             if can_refine {
                 let doubled = subdivisions
                     .checked_mul(2)
-                    .ok_or(StableContourError::UmbrellaSubdivisionOverflow)?;
+                    .ok_or(StableContourError::SamplingSubdivisionOverflow)?;
                 let next = doubled.min(options.verification.maximum_subdivisions);
                 if next > subdivisions {
                     subdivisions = next;
@@ -127,7 +128,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                 }
             }
             if !options.verification.allow_unresolved {
-                return Err(StableContourError::UmbrellaResolutionInsufficient {
+                return Err(StableContourError::SamplingResolutionInsufficient {
                     subdivisions,
                     unresolved_triangles: unresolved,
                     worst_triangle: diagnostics.worst_unresolved_triangle,
@@ -138,10 +139,10 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             break samples;
         };
 
-        diagnostics.umbrella_subdivisions = samples.grid.subdivisions();
+        diagnostics.sampling_subdivisions = samples.grid.subdivisions();
         diagnostics.final_subdivisions = samples.grid.subdivisions();
-        diagnostics.umbrella_vertex_count = samples.grid.vertex_count();
-        diagnostics.umbrella_triangle_count = samples.grid.triangle_count()?;
+        diagnostics.sampling_vertex_count = samples.grid.vertex_count();
+        diagnostics.sampling_triangle_count = samples.grid.triangle_count()?;
         let cells = build_stable_partition(
             &samples,
             &phase_ids,
@@ -209,8 +210,8 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
         &self.diagnostics
     }
 
-    /// Return the final virtual regular umbrella grid.
-    pub const fn umbrella_grid(&self) -> RegularTernaryGrid {
+    /// Return the final virtual regular sampling grid.
+    pub const fn sampling_grid(&self) -> RegularTernaryGrid {
         self.samples.grid
     }
 
@@ -224,8 +225,8 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
         &self.phase_ids
     }
 
-    /// Return the validated umbrella and verification options.
-    pub const fn options(&self) -> StableUmbrellaOptions {
+    /// Return the validated sampling-grid and verification options.
+    pub const fn options(&self) -> StableGridOptions {
         self.options
     }
 }

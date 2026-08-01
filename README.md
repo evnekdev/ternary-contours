@@ -237,14 +237,14 @@ Sources may be regular linear fields, optional regular cubic-alpha fields,
 irregular linear fields, or optional irregular cubic-alpha fields. Preparation
 groups sources sharing geometry, locates once per group and point, and samples
 every layer onto one virtual `RegularTernaryGrid`. Cubic source interpolation
-changes sampled vertex values; all final umbrella fields and stable contours
-remain affine inside each umbrella triangle.
+changes sampled vertex values; all final sampling-grid fields and stable contours
+remain affine inside each sampling-grid triangle.
 
 ~~~rust
 use ternary_contours::{
     FieldInterpolation, PreparedStablePhaseEnsemble, RegularTernaryScalarField,
     StableContourQuantity, StablePhaseId, StablePhaseSource, StableScalarSource,
-    StableUmbrellaOptions,
+    StableGridOptions,
 };
 
 let alpha = RegularTernaryScalarField::from_fn(12, |[a, _, _]| a)?;
@@ -261,14 +261,14 @@ let prepared = PreparedStablePhaseEnsemble::new(
         ),
     ],
     StableContourQuantity::Height,
-    StableUmbrellaOptions::default(),
+    StableGridOptions::default(),
 )?;
 let result = prepared.contours(&[0.3, 0.4])?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ~~~
 
 Stable regions are exact convex half-plane intersections for the final affine
-umbrella model. They are not inferred from phase labels at triangle vertices,
+sampling-grid model. They are not inferred from phase labels at triangle vertices,
 so an interior stable polygon can be recovered even when its phase wins no
 triangle vertex. Exact affine min/max bounds safely prune phases and competitor
 comparisons before clipping.
@@ -281,10 +281,10 @@ progress and return typed errors for retracing, branching, directed cycles,
 positive-area height ties, or target lines coincident with stable boundaries.
 
 Optional centroid/edge-midpoint verification compares original prepared source
-fields with umbrella-affine predictions and can double the global subdivisions
+fields with sampling-grid-affine predictions and can double the global subdivisions
 until configured tolerances pass. This is a practical resolution check, not a
 proof that no smaller feature exists. Stable results are exact for the final
-piecewise-linear umbrella representation, not necessarily for the original
+piecewise-linear sampling-grid representation, not necessarily for the original
 source interpolants.
 
 Synthetic `LiquidusFieldSpec` constructors provide deterministic corner, edge, and interior liquidus-like fields for reproducible gallery cases. See [stable-phase-contours.md](docs/stable-phase-contours.md) for the full model,
@@ -413,8 +413,8 @@ maintained `delaunay` 0.8 support.
 - No constrained Delaunay meshing, holes, or non-convex domains.
 - No cubic-alpha filled bands.
 - Stable ensembles currently require every source to cover the complete simplex;
-  partial domains and local adaptive umbrella refinement are deferred.
-- Stable contours are piecewise linear on the final umbrella grid; direct nonlinear
+  partial domains and local adaptive sampling-grid refinement are deferred.
+- Stable contours are piecewise linear on the final sampling grid; direct nonlinear
   upper-envelope topology and stable filled regions are deferred.
 - No rendering, pixels, chart clipping, or labels.
 - No C1 global surface guarantee for cubic-alpha fields.
