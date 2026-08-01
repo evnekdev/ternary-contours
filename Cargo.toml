@@ -3,7 +3,7 @@ name = "ternary-contours"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.97.1"
-description = "Backend-independent contours, fields, and linear filled bands for ternary scalar meshes"
+description = "Backend-independent fields, contours, stable phases, and filled bands for ternary meshes"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/evnekdev/ternary-contours"
 homepage = "https://github.com/evnekdev/ternary-contours"
@@ -39,6 +39,7 @@ required-features = ["irregular-delaunay"]
 [[example]]
 name = "irregular_metrics"
 required-features = ["irregular-delaunay"]
+
 [[example]]
 name = "interpolate_irregular_cubic_field"
 required-features = ["irregular-cubic-alpha"]
@@ -46,3 +47,7 @@ required-features = ["irregular-cubic-alpha"]
 [[example]]
 name = "irregular_contours"
 required-features = ["irregular-cubic-alpha"]
+
+[[example]]
+name = "stable_phase_contours"
+required-features = ["irregular-delaunay"]

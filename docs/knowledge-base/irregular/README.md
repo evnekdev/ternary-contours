@@ -39,6 +39,12 @@ incident-edge adjacency and compact per-edge cubic stencil-completion flags.
 This changes implementation status only; it does not alter the authoritative
 edge-alpha algorithm note below.
 
+Milestone 17 can now consume irregular linear or cubic-alpha fields as sources
+for stable-phase ensembles. Sources sharing one immutable mesh reuse locations
+while being sampled onto a common regular umbrella. Irregular convex hulls must
+cover the complete simplex; source triangulation edges are never inserted into
+final stable contour geometry. Partial-domain phases and seeded random
+irregular-mesh ensemble generation remain deferred.
 Not implemented: irregular bands (including cubic-alpha filled bands), virtual-
 stencil persistence APIs, or parallel/local solver execution.
 

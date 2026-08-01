@@ -1,133 +1,98 @@
-# Modular Architecture
+# Modular architecture
 
-## Immediate module boundaries
+## Implemented ownership boundary
 
-Suggested structure inside the current crate:
-
-```text
-src/contour/
-    mod.rs
-    regular_grid.rs
-    linear.rs
-    topology.rs
-    paths.rs
-    regularize.rs
-    project.rs
-    render.rs
-
-src/interpolation/
-    mod.rs
-    alpha_interval.rs
-    line_family.rs
-    cubic_triangle.rs
-    extrapolation.rs
-```
-
-Exact filenames may differ, but preserve these conceptual boundaries.
-
-## Dependency direction
+The numerical/rendering extraction is complete and remains the governing
+dependency direction:
 
 ```text
-regular grid/indexing
-        ↓
-1-D interval preparation
-        ↓
-local interpolation field
-        ↓
-contour topology extraction
-        ↓
-path regularization/projection
-        ↓
-Plotters rendering adapter
+ternary-contours
+    semantic ternary coordinates and equilateral logical geometry
+    regular grids and irregular Delaunay meshes
+    prepared interpolation and gradients
+    ordinary contours and regular linear bands
+    stable upper-envelope preparation and contour geometry
+    numerical diagnostics and metrics
+
+plotters-ternary
+    chart projection and viewport clipping
+    styling, labels, legends, and colour bars
+    PNG/SVG/backend rendering
 ```
 
-The numerical layers must not depend on:
+The numerical crate has no Plotters dependency. Rendering adapters consume
+final semantic A/B/C coordinates and must not rebuild interpolation, alter
+stable ownership, or change numerical topology.
 
-- Plotters backends;
-- drawing areas;
-- chart orientation;
-- screen coordinates;
-- legends;
-- SVG or PNG details.
+## Current module flow
 
-## Suggested core traits
+```text
+regular/irregular topology and point location
+        -> prepared scalar evaluators
+        -> optional cubic-alpha field construction
+        -> ordinary contour or metric consumers
 
-A future extraction can center around a small field interface:
-
-```rust
-pub trait LocalSimplexField<const D: usize> {
-    fn value(&self, barycentric: &[f64; D + 1]) -> f64;
-    fn gradient_reduced(&self, reduced: &[f64; D]) -> [f64; D];
-}
+heterogeneous prepared source evaluators
+        -> geometry-grouped umbrella sampling
+        -> optional verification and global refinement
+        -> exact affine upper-envelope polygon clipping
+        -> phase-labelled target segments
+        -> canonical junction and path assembly
 ```
 
-Rust stable const-generics may require a different representation for `D+1`; do not force this exact syntax prematurely. The conceptual interface matters more than the initial type signature.
+`src/simplex.rs` owns the canonical equilateral logical plane used by Delaunay
+construction, lengths, metrics, and scale-aware geometry. Public coordinates
+remain semantic `(a,b,c)`.
 
-For the current 2-D implementation, concrete optimized types are acceptable.
+## Stable-phase module boundaries
 
-## Top-level interpolation API
+`src/stable/` separates durable public inputs/results from private numerical
+machinery:
 
-```rust
-pub enum ContourInterpolation {
-    Linear,
-    CubicAlpha(CubicAlphaOptions),
-}
-
-pub enum CubicAlphaMethod {
-    Akima,
-    Makima,
-    Pchip,
-    Steffen,
-}
-
-pub enum BinaryExtrapolation {
-    Muggianu,
-    Kohler,
-}
+```text
+source/options/error/diagnostics
+    public phase, source, mode, control, result, and failure concepts
+sample/verify
+    prepared evaluator grouping, dense sampling, and refinement checks
+clip/partition
+    exact affine pruning and cached stable polygons
+segments/paths
+    target intersection, forward progress, junctions, and assembly
 ```
 
-Keep interpolation order separate from extrapolation geometry.
+The source interpolation family is independent from the umbrella model.
+Muggianu, Kohler, and RawBarycentric remain policies inside cubic-alpha source
+interpolation. Stable ownership is always the sampled height upper envelope;
+secondary fields cannot influence it.
 
-## Future crate split
+## Concrete 2-D APIs before generic abstraction
 
-Likely eventual arrangement:
+Regular grids retain integer-lattice direct location and deterministic triangle
+ordering. Irregular meshes retain Delaunay-backed robust location and dense
+crate-owned IDs. The stable umbrella intentionally does not rewrite either
+around a superficial shared public enum or expose backend handles.
+
+A future generic simplex-field extraction may share local value/gradient and
+contour helpers, but Rust const-generic layout and ABI decisions should not be
+frozen prematurely. Current optimized 2-D types remain appropriate.
+
+## Future crate and ABI direction
+
+Possible future separation remains:
 
 ```text
 simplex-field-core
-    alpha intervals
-    local simplex fields
-    contour topology
-    regularization/projection
-
+    local simplex fields and generic topology helpers
 ternary-contours
-    regular ternary grid
-    2-D triangular specialization
-
+    semantic ternary specialization and stable ensembles
 plotters-ternary
-    plotting adapter and chart integration
-
+    rendering adapter
 simplex-contours-nd
-    N-component/Kuhn-simplex grids
+    future N-component/Kuhn-simplex work
 ```
 
-## Cross-language architecture
-
-After the core API stabilizes:
-
-```text
-Rust numerical core
-    ↓ stable C ABI
-Python / MATLAB MEX / Fortran ISO_C_BINDING
-```
-
-Use flat result arrays across the ABI:
-
-```text
-levels
-path_level_indices
-path_offsets
-path_closed
-points_barycentric
-```
-
-Do not expose Rust `Vec`, Rust enums without explicit representation, or Rust-owned strings through the ABI.
+A future C ABI should flatten levels, paths, phase IDs, junctions, offsets, and
+A/B/C point arrays. It must not expose Rust `Vec`, borrowed evaluator lifetimes,
+backend Delaunay handles, or Rust enum layout directly. Partial-domain and
+stable-atlas designs should be settled before an ABI promises their result
+shape.
