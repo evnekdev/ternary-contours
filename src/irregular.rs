@@ -23,13 +23,15 @@ pub use cubic::*;
 
 use crate::{
     POINT_LOCATION_TOLERANCE,
-    simplex::{barycentric_ab, canonical_barycentric, global_gradient_ab, valid_barycentric},
+    simplex::{
+        barycentric_ab, canonical_barycentric, global_gradient_ab, logical_from_composition,
+        valid_barycentric,
+    },
 };
 
 /// Tolerance for duplicate irregular samples in the logical equilateral plane.
 pub const IRREGULAR_VERTEX_TOLERANCE: f64 = POINT_LOCATION_TOLERANCE;
 
-const EQUILATERAL_HEIGHT: f64 = 0.866_025_403_784_438_6;
 static NEXT_MESH_ID: AtomicU64 = AtomicU64::new(1);
 type BackendTriangulation = DelaunayTriangulation<AdaptiveKernel<f64>, usize, (), 2>;
 
@@ -1131,15 +1133,12 @@ fn normalize_composition(mut composition: [f64; 3]) -> Result<[f64; 3], Composit
     Ok(composition)
 }
 
-fn logical_from_composition([_a, b, c]: [f64; 3]) -> [f64; 2] {
-    [b + 0.5 * c, EQUILATERAL_HEIGHT * c]
-}
 fn composition_key(composition: [f64; 3]) -> [u64; 3] {
     composition.map(f64::to_bits)
 }
 #[cfg(test)]
 fn composition_from_logical([x, y]: [f64; 2]) -> [f64; 3] {
-    let c = y / EQUILATERAL_HEIGHT;
+    let c = y / crate::simplex::EQUILATERAL_HEIGHT;
     let b = x - 0.5 * c;
     [1.0 - b - c, b, c]
 }

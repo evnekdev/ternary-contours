@@ -1,5 +1,24 @@
 //! Shared two-dimensional simplex barycentric and gradient helpers.
 
+/// Height of the unit-side canonical equilateral ternary triangle.
+pub(crate) const EQUILATERAL_HEIGHT: f64 = 0.866_025_403_784_438_6;
+
+/// Convert semantic `(a, b, c)` components to the canonical logical plane.
+///
+/// The pure-component corners are `A=(0,0)`, `B=(1,0)`, and
+/// `C=(1/2, sqrt(3)/2)`. This embedding is used for Delaunay construction,
+/// contour lengths, and scale-aware numerical geometry; rendering crates are
+/// free to apply their own display projection afterwards.
+pub(crate) fn logical_from_composition([_a, b, c]: [f64; 3]) -> [f64; 2] {
+    [b + 0.5 * c, EQUILATERAL_HEIGHT * c]
+}
+
+/// Euclidean distance in the canonical logical ternary plane.
+pub(crate) fn logical_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let left = logical_from_composition(left);
+    let right = logical_from_composition(right);
+    (left[0] - right[0]).hypot(left[1] - right[1])
+}
 #[cfg(feature = "irregular-delaunay")]
 pub(crate) fn barycentric_ab(vertices: [[f64; 3]; 3], composition: [f64; 3]) -> Option<[f64; 3]> {
     let da0 = vertices[0][0] - vertices[2][0];
