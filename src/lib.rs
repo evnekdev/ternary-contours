@@ -18,11 +18,12 @@
 //! one canonical owner, so gradients are deterministic without averaging.
 //!
 //! Regular grids provide linear and optional cubic-alpha pointwise evaluation,
-//! isolines, and linear filled bands. With the optional
-//! [`irregular-delaunay`](#cargo-features) feature, immutable irregular 2-D
-//! ternary meshes provide point location and prepared piecewise-linear field
-//! evaluation inside their convex hull. Irregular contour extraction and
-//! cubic-alpha reconstruction remain intentionally excluded.
+//! isolines, and linear filled bands. With `irregular-delaunay`, immutable
+//! irregular 2-D ternary meshes provide point location and prepared linear
+//! fields inside their convex hull. `irregular-cubic-alpha` additionally builds
+//! a cached self-consistent edge-alpha field with synchronous Jacobi sweeps;
+//! its virtual locations and one interval per canonical mesh edge are prepared
+//! once. Irregular contour extraction and bands remain intentionally excluded.
 
 pub mod contour;
 mod error;
@@ -90,9 +91,12 @@ pub use interpolation::{
 
 #[cfg(feature = "irregular-delaunay")]
 pub use irregular::{
-    IRREGULAR_VERTEX_TOLERANCE, IrregularEdgeId, IrregularFieldError,
-    IrregularFieldEvaluationError, IrregularFieldSample, IrregularMeshEdge, IrregularMeshError,
-    IrregularMeshTriangle, IrregularPointBoundaryLocation, IrregularPointLocationError,
-    IrregularTernaryMesh, IrregularTernaryScalarField, IrregularTriangleId, IrregularVertexId,
-    LocatedIrregularTriangle, PreparedIrregularTernaryField,
+    IRREGULAR_VERTEX_TOLERANCE, InterpolatedIrregularTernaryField, IrregularAlphaConvergence,
+    IrregularAlphaSweepOptions, IrregularCubicAlphaBuildError, IrregularCubicAlphaDiagnostics,
+    IrregularCubicAlphaOptions, IrregularEdgeId, IrregularFieldError,
+    IrregularFieldEvaluationError, IrregularFieldInterpolation, IrregularFieldSample,
+    IrregularMeshEdge, IrregularMeshError, IrregularMeshTriangle, IrregularPointBoundaryLocation,
+    IrregularPointLocationError, IrregularTernaryMesh, IrregularTernaryScalarField,
+    IrregularTriangleId, IrregularVertexId, IrregularVirtualStencilFailure,
+    IrregularVirtualStencilSide, LocatedIrregularTriangle, PreparedIrregularTernaryField,
 };
