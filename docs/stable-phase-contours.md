@@ -67,6 +67,7 @@ A `StableScalarSource` selects the evaluator used while sampling:
 | --- | --- | --- |
 | Regular | Default build | `cubic-alpha` |
 | Irregular Delaunay | `irregular-delaunay` | `irregular-cubic-alpha` |
+| Explicit evaluator with defined/undefined results | Default build | Evaluator-defined |
 
 Regular cubic-alpha sources use `CubicAlphaBuildOptions`. Irregular cubic-alpha
 sources use `IrregularCubicAlphaOptions` and the already prepared synchronous
@@ -95,10 +96,13 @@ its scalar layers at that cached location. Irregular groups carry a deterministi
 previous-triangle hint while points are visited in regular-grid row order.
 Diagnostics expose group, location, reuse, and scalar-evaluation counts.
 
-All sources must cover the complete semantic simplex. Regular sources do so by
-construction. An irregular source whose convex hull misses any sampling-grid vertex
-returns `IncompleteSourceCoverage`; it is never extrapolated or silently
-omitted.
+Regular sources cover the complete semantic simplex by construction. Explicit
+evaluator sources may instead return `StablePhaseEvaluation::Undefined` with a
+typed reason. Undefined phases are omitted from the local upper envelope; they
+are never extrapolated. At least one phase must remain defined at every sampled
+or queried point. A partially covered irregular convex hull still returns
+`IncompleteSourceCoverage` during common-grid sampling because that source type
+does not expose an explicit phase-domain policy.
 
 ## Exact affine stable regions
 
@@ -195,6 +199,53 @@ boundary at different compositions. Those paths terminate independently and
 retain the same tied height-phase set as metadata. They share a junction only
 when their coordinates genuinely coincide within geometry tolerance.
 
+## Level-free stable-boundary network
+
+`PreparedStablePhaseEnsemble::stable_boundaries` is separate from level-specific
+isotherm extraction. It first discovers stable transitions on the canonically
+oriented AB, BC, and CA boundaries from the original prepared height evaluators.
+Full phase sweeps are cached by boundary parameter; pair-only evaluations refine
+a bracket only after the stable sequence identifies its two phases. A candidate
+root is accepted only when the full upper-envelope evaluation confirms that both
+phases are stable. Higher-order ties become one node with all sorted phase IDs.
+
+The cached affine stable polygons then provide local phase-pair fragments. Dense
+`RegularSamplingTopology` edge, triangle, and vertex identifiers canonicalize
+shared events. Traversal starts from binary or interior invariant pending ends,
+tracks directed states with dense epoch arrays, and constructs only complete
+node-to-node paths. The resulting `StableBoundaryNetwork` exposes dense invariant
+IDs, stable phase pairs, canonical node coordinates, path temperatures, incidence,
+binary traces, and deterministic diagnostics. Unseeded isolated closed loops are
+not silently emitted: their discovery is the explicitly deferred part of this
+milestone.
+
+Raw topology is constructed and validated before any cleanup. Set
+`StableBoundaryOptions::regularization` to `Some(PathRegularizationOptions)` to
+request the shared numerical path post-process. Ordinary isotherms and stable
+univariants use the same finite-coordinate cleanup, canonical logical arclength,
+chord redistribution, normalization, damped Newton correction, and backtracking.
+The projection equations remain distinct:
+
+```text
+isotherm:      T_p(x) - L = 0
+univariant:    T_p(x) - T_q(x) = 0
+```
+
+Univariant projection also requires both pair phases to be defined and no other
+defined phase to exceed them beyond `stability_tolerance`. Each candidate is
+relocated in the sampling grid and constrained to its raw segment neighbourhood.
+Binary and interior invariant endpoints are graph-owned and never moved per
+path. Connectivity, phase-pair ownership, direction, duplicate removal, and
+self-intersection state are revalidated afterward. Per-path
+`StableUnivariantRegularizationDiagnostics` reports raw/final size and length,
+spacing variation, accepted/backtracked projections, undefined/unstable
+rejections, triangle relocations, and maximum pair residual.
+
+See [stable-boundary-network.md](stable-boundary-network.md) and run:
+
+```text
+cargo run --release --example stable_boundary_network
+```
 ## Verification and global refinement
 
 `StableGridVerification` optionally samples every sampling-grid triangle at its
@@ -273,7 +324,7 @@ The secondary panel traces phase-specific secondary fields only inside regions
 owned by the height envelope; it does not change phase ownership.
 ## Limitations and roadmap
 
-This milestone intentionally excludes partial-domain sources, holes,
+This milestone supports explicit partial-domain evaluators, but still excludes holes,
 constrained Delaunay edges, direct mixed-mesh continuation, nonlinear source
 envelope topology, local adaptive sampling-grid refinement, certified interval or
 Bezier source bounds, stable filled regions, rendering, parallel/GPU execution,

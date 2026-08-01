@@ -267,6 +267,32 @@ let result = prepared.contours(&[0.3, 0.4])?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ~~~
 
+`StableScalarSource::evaluator` may return `StablePhaseEvaluation::Undefined`
+for a phase outside its physical domain. Undefined competitors are omitted from
+the local upper envelope, but every sampled or queried composition must still
+have at least one defined phase. No phase is extrapolated through an undefined
+region.
+
+`PreparedStablePhaseEnsemble::stable_boundaries` constructs a level-free graph
+whose dense nodes are stable binary or interior invariants and whose edges are
+phase-pair `StableUnivariantPath` values. Binary discovery evaluates the original
+prepared sources on canonical AB, BC, and CA parameterizations. Raw interior
+tracing then follows the cached affine stable polygons and dense regular
+sampling-grid adjacency. Canonical invariant coordinates are shared by every
+incident path. Isolated closed univariant loops without an invariant seed are
+explicitly deferred.
+
+Optional `PathRegularizationOptions` is a post-topology operation. It shares
+cleanup, equilateral-plane arclength redistribution, normalization, safeguarded
+projection, and backtracking with ordinary regular and irregular contours, while
+using the univariant equation `T_p-T_q=0`. Binary and interior invariant endpoints
+remain fixed, every accepted point is rechecked against all defined competitors,
+and graph connectivity cannot change. `ContourRegularization` remains a
+backward-compatible name for the same shared option type. Run:
+
+~~~text
+cargo run --release --example stable_boundary_network
+~~~
 Stable regions are exact convex half-plane intersections for the final affine
 sampling-grid model. They are not inferred from phase labels at triangle vertices,
 so an interior stable polygon can be recovered even when its phase wins no
@@ -412,8 +438,8 @@ maintained `delaunay` 0.8 support.
 - No irregular filled bands.
 - No constrained Delaunay meshing, holes, or non-convex domains.
 - No cubic-alpha filled bands.
-- Stable ensembles currently require every source to cover the complete simplex;
-  partial domains and local adaptive sampling-grid refinement are deferred.
+- Stable evaluator sources may have partial domains, but their union must cover every
+  sampled/query point; local adaptive sampling-grid refinement remains deferred.
 - Stable contours are piecewise linear on the final sampling grid; direct nonlinear
   upper-envelope topology and stable filled regions are deferred.
 - No rendering, pixels, chart clipping, or labels.
