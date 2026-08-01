@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::TernaryCoordinate;
 
 use super::ContourError;
@@ -21,18 +23,21 @@ pub(crate) fn join_segments(
     tolerance: f64,
 ) -> Result<Vec<ContourPath>, ContourError> {
     let mut nodes: Vec<TernaryCoordinate> = Vec::new();
+    let mut buckets = BTreeMap::<[i64; 3], Vec<usize>>::new();
     let mut edges: Vec<(usize, usize)> = Vec::new();
+    let mut unique_edges = BTreeSet::new();
     for segment in segments {
         if close(segment.start, segment.end, tolerance) {
             continue;
         }
-        let start = node_for(&mut nodes, segment.start, tolerance);
-        let end = node_for(&mut nodes, segment.end, tolerance);
-        if start != end
-            && !edges
-                .iter()
-                .any(|&(a, b)| (a == start && b == end) || (a == end && b == start))
-        {
+        let start = node_for(&mut nodes, &mut buckets, segment.start, tolerance);
+        let end = node_for(&mut nodes, &mut buckets, segment.end, tolerance);
+        let key = if start < end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        if start != end && unique_edges.insert(key) {
             edges.push((start, end));
         }
     }
@@ -130,16 +135,53 @@ fn walk(
     }
     Ok(ContourPath { points, closed })
 }
-fn node_for(nodes: &mut Vec<TernaryCoordinate>, point: TernaryCoordinate, tolerance: f64) -> usize {
-    if let Some(index) = nodes
-        .iter()
-        .position(|candidate| close(*candidate, point, tolerance))
-    {
-        index
-    } else {
-        nodes.push(point);
-        nodes.len() - 1
+fn node_for(
+    nodes: &mut Vec<TernaryCoordinate>,
+    buckets: &mut BTreeMap<[i64; 3], Vec<usize>>,
+    point: TernaryCoordinate,
+    tolerance: f64,
+) -> usize {
+    let key = bucket_key(point, tolerance);
+    let mut matched = None;
+    for da in -1_i64..=1 {
+        for db in -1_i64..=1 {
+            for dc in -1_i64..=1 {
+                let neighbour = [
+                    key[0].saturating_add(da),
+                    key[1].saturating_add(db),
+                    key[2].saturating_add(dc),
+                ];
+                if let Some(indices) = buckets.get(&neighbour) {
+                    for &index in indices {
+                        if close(nodes[index], point, tolerance) {
+                            matched =
+                                Some(matched.map_or(index, |current: usize| current.min(index)));
+                        }
+                    }
+                }
+            }
+        }
     }
+    if let Some(index) = matched {
+        return index;
+    }
+    let index = nodes.len();
+    nodes.push(point);
+    buckets.entry(key).or_default().push(index);
+    index
+}
+
+fn bucket_key(point: TernaryCoordinate, tolerance: f64) -> [i64; 3] {
+    point.as_array().map(|component| {
+        let scaled = (component / tolerance).floor();
+        if scaled <= i64::MIN as f64 {
+            i64::MIN
+        } else if scaled >= i64::MAX as f64 {
+            i64::MAX
+        } else {
+            scaled as i64
+        }
+    })
 }
 fn close(left: TernaryCoordinate, right: TernaryCoordinate, tolerance: f64) -> bool {
     left.as_array()
