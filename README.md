@@ -297,7 +297,8 @@ maintained `delaunay` 0.8 support.
 - No C1 global surface guarantee for cubic-alpha fields.
 
 Detailed formulas and validation material live in the
-[knowledge base](docs/knowledge-base/README.md) and the
+[knowledge base](docs/knowledge-base/README.md), the
+[permanent numerical-validation report](docs/numerical-validation.md), and the
 [filled-band note](docs/filled-contours.md).
 
 Contributions are welcome through the

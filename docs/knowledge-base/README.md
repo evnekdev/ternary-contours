@@ -8,8 +8,10 @@ ternary contour design and the separate irregular-triangulation research note.
   projection pipeline.
 - [`irregular/README.md`](irregular/README.md) records the irregular roadmap. The
   Delaunay-backed linear fields are implemented behind `irregular-delaunay`;
-  self-consistent irregular cubic-alpha point evaluation is implemented behind
-  `irregular-cubic-alpha`. Irregular contours and bands remain deferred.
+  self-consistent irregular cubic-alpha point evaluation and irregular isolines
+  are implemented behind `irregular-cubic-alpha`. Irregular bands remain deferred.
+- [`../numerical-validation.md`](../numerical-validation.md) records the
+  maintained deterministic numerical audit, acceptance envelopes, and limits.
 
 The repository-level ZIP bundles are retained as archival convenience copies.
 They are excluded from Cargo packages; these Markdown files are the maintained,
