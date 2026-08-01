@@ -305,6 +305,7 @@ impl<'a> InterpolatedIrregularTernaryField<'a> {
     /// This crate-private hook is used by adaptive contour extraction. Public
     /// callers should use [`Self::evaluate_at_location`] so mesh identity and
     /// semantic composition validation remain explicit.
+    #[cfg_attr(not(feature = "irregular-cubic-alpha"), allow(dead_code))]
     pub(crate) fn evaluate_in_triangle(
         &self,
         triangle: IrregularMeshTriangle,
