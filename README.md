@@ -88,48 +88,69 @@ Samples are embedded symmetrically in the logical equilateral plane
 `A=(0,0)`, `B=(1,0)`, `C=(1/2,sqrt(3)/2)`, while all public coordinates remain
 semantic `(a,b,c)` values.
 
-The mesh has dense, stable vertex/edge/triangle IDs. Edges have canonical
-low-to-high vertex orientation and expose their one or two incident triangles;
-triangles expose their three canonical edges. This is the topology intended
-for the later irregular edge-alpha reconstruction. Today, only prepared
-piecewise-linear evaluation is supported:
+The mesh has dense, stable vertex/edge/triangle IDs. Canonical edge orientation,
+incident triangles, hull edges, and triangle edge IDs provide the topology for
+both interpolation models. `PreparedIrregularTernaryField` remains the compact
+linear-only evaluator. The broader `InterpolatedIrregularTernaryField` chooses
+one of:
+
+~~~text
+Irregular field interpolation:
+    Linear
+    CubicAlpha (`irregular-cubic-alpha`)
+        Akima | MAKIMA | PCHIP | Steffen
+        boundary: LinearFallback | Error
+        interior continuation: Muggianu | Kohler | RawBarycentric
+~~~
+
+The cubic-alpha option stores one directed interval per canonical mesh edge.
+For edge endpoints `x0, x1`, it locates the collinear virtual points
+`2*x0-x1` and `2*x1-x0` once, starts from their linear field values, then
+performs damped synchronous Jacobi alpha updates. `LinearFallback` pins an edge
+whose virtual point leaves the simplex or convex hull to zero alpha; `Error`
+returns the canonical edge, endpoint side, and failure class. Muggianu and
+Kohler are interior continuation policies within this one cubic-alpha model,
+not alternative interpolation families.
 
 ~~~rust
-# #[cfg(feature = "irregular-delaunay")]
+# #[cfg(feature = "irregular-cubic-alpha")]
 # fn main() -> Result<(), Box<dyn std::error::Error>> {
 use ternary_contours::{
-    IrregularTernaryMesh, IrregularTernaryScalarField, PreparedIrregularTernaryField,
+    BinaryExtrapolation, CubicAlphaMethod, InterpolatedIrregularTernaryField,
+    IrregularCubicAlphaOptions, IrregularFieldInterpolation, IrregularTernaryMesh,
+    IrregularTernaryScalarField,
 };
-
 let mesh = IrregularTernaryMesh::new([
     [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0],
     [0.57, 0.28, 0.15], [0.18, 0.61, 0.21], [0.23, 0.16, 0.61],
+    [0.31, 0.42, 0.27],
 ])?;
-let field = IrregularTernaryScalarField::from_fn(mesh, |[a, b, c]| {
-    2.0 * a - 3.0 * b + 5.0 * c
-})?;
-let evaluator = PreparedIrregularTernaryField::new(&field);
+let field = IrregularTernaryScalarField::from_fn(mesh, |[a, b, c]| a*a + b*b - c*c)?;
+let evaluator = InterpolatedIrregularTernaryField::new(
+    &field,
+    IrregularFieldInterpolation::CubicAlpha(IrregularCubicAlphaOptions {
+        method: CubicAlphaMethod::Pchip,
+        extrapolation: BinaryExtrapolation::Kohler,
+        ..IrregularCubicAlphaOptions::default()
+    }),
+)?;
 let sample = evaluator.evaluate([0.23, 0.31, 0.46])?;
 println!("triangle={:?}, bary={:?}", sample.location.triangle, sample.location.barycentric);
 println!("df/da, df/db = {:?}", sample.gradient_ab);
 # Ok(()) }
-# #[cfg(not(feature = "irregular-delaunay"))]
+# #[cfg(not(feature = "irregular-cubic-alpha"))]
 # fn main() {}
 ~~~
 
-A query outside the samples' convex hull returns a typed error. There are no
-holes, constrained edges, or non-convex domains. Point location uses the
-backend's robust facet walk. Exact sampled vertices have O(1) ownership lookup;
-only a backend-reported point on a tolerance-close hull boundary receives a
-boundary-edge recovery pass. Shared edges and vertices are owned by the lowest
-stable incident triangle ID, so a linear gradient is deterministic and never
-averaged. Linear gradients are constant in one triangle; the field is C0 but
-not generally C1 across an edge.
-
-Use `PreparedIrregularTernaryField::values` or `values_into` for batched work.
-Run `cargo run --example interpolate_irregular_field --features irregular-delaunay`
-for a complete mesh, topology, location, gradient, and batch-evaluation example.
-
+Both irregular evaluators have lazy `values` and allocation-reusing
+`values_into` batch methods. Linear gradients are constant in a triangle;
+cubic gradients vary locally. Both fields are C0 but not generally C1 across a
+triangle edge, and edge/vertex gradients are those of the mesh's deterministic
+owning triangle rather than an average. A query outside the samples' convex
+hull returns a typed error. There are no holes, constrained edges, or
+non-convex domains. Run `cargo run --example interpolate_irregular_field --features irregular-delaunay`
+for linear evaluation, or `cargo run --example interpolate_irregular_cubic_field --features irregular-cubic-alpha`
+for cubic preparation, diagnostics, and alpha inspection.
 ## Extracting isolines
 
 An isoline is the set of compositions satisfying f(a, b, c) = level. The crate
@@ -232,18 +253,22 @@ paths and regions should become PNG or SVG ternary diagrams.
 - irregular-delaunay: irregular 2-D Delaunay meshes, backend-assisted point
   location, and prepared piecewise-linear scalar evaluation. It enables the
   optional `delaunay` dependency.
+- irregular-cubic-alpha: self-consistent cubic-alpha point evaluation on an
+  irregular mesh. It enables both `irregular-delaunay` and `cubic-alpha`.
 
 The current minimum supported Rust version is 1.97.1, selected explicitly for
 maintained `delaunay` 0.8 support.
+
 ## Limits
 
-- Irregular meshes support piecewise-linear values and gradients only; their
-  domain is the samples' convex hull.
-- No irregular cubic-alpha reconstruction, irregular isolines, or irregular bands.
+- Irregular meshes support prepared linear and optional pointwise cubic-alpha
+  values and gradients only; their domain is the samples' convex hull.
+- No irregular isolines or irregular bands.
 - No constrained Delaunay meshing, holes, or non-convex domains.
 - No cubic-alpha filled bands.
 - No rendering, pixels, chart clipping, or labels.
 - No C1 global surface guarantee for cubic-alpha fields.
+
 Detailed formulas and validation material live in the
 [knowledge base](docs/knowledge-base/README.md) and the
 [filled-band note](docs/filled-contours.md).

@@ -7,8 +7,9 @@ ternary contour design and the separate irregular-triangulation research note.
   scalar field, cubic-alpha interpolation, contour topology, regularization, and
   projection pipeline.
 - [`irregular/README.md`](irregular/README.md) records the irregular roadmap. The
-  Delaunay-backed mesh and linear field foundation are implemented behind
-  `irregular-delaunay`; the iterative irregular-edge alpha proposal is not.
+  Delaunay-backed linear fields are implemented behind `irregular-delaunay`;
+  self-consistent irregular cubic-alpha point evaluation is implemented behind
+  `irregular-cubic-alpha`. Irregular contours and bands remain deferred.
 
 The repository-level ZIP bundles are retained as archival convenience copies.
 They are excluded from Cargo packages; these Markdown files are the maintained,

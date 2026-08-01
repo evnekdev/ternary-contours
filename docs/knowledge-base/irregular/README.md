@@ -1,16 +1,31 @@
 # Irregular implementation status
 
-`ternary-contours` now implements the first irregular numerical foundation behind
-its `irregular-delaunay` feature: a private `delaunay` backend, crate-owned
-dense mesh IDs and topology, robust backend-assisted location in the convex
-hull, semantic barycentric coordinates, prepared piecewise-linear values and
-analytic global `(a,b)` gradients. Canonical edges, incident triangles, hull
-edges, and dense triangle/edge arrays are available for the planned edge-alpha
-work.
+`ternary-contours` implements the irregular two-dimensional numerical foundation
+behind `irregular-delaunay`: a private `delaunay` backend, crate-owned dense mesh
+IDs and topology, robust backend-assisted location in the convex hull, semantic
+barycentric coordinates, and prepared piecewise-linear values with analytic
+global `(a,b)` gradients.
 
-The alpha estimation note below remains authoritative for the next milestone.
-Virtual stencils, synchronous fixed-point alpha sweeps, irregular cubic-alpha,
-and irregular contour/band construction are not implemented yet.
+The documented edge-alpha construction is now implemented for pointwise scalar
+fields behind `irregular-cubic-alpha`. It stores one alpha interval per
+canonical undirected mesh edge; maps the two canonical collinear virtual points
+into cached containing-triangle/barycentric locations once; uses a linear
+bootstrap; and performs damped synchronous Jacobi sweeps to convergence. Hull
+or simplex-exiting virtual stencils obey `LinearFallback` (zero alpha) or return
+a typed `Error`. Diagnostics retain the full options, stencil/fallback counts,
+residual history, worst edge, and convergence state. The public evaluator
+returns values, analytic global gradients, locations, and allocation-friendly
+batch results.
+
+The alpha-estimation note below remains authoritative for the model. It is not
+a proposal for a different smooth interpolation family. Its dependency-graph
+and optional local-propagation optimizations are deferred; this implementation
+uses only deterministic global Jacobi sweeps.
+
+Not implemented: irregular isolines, irregular bands (including cubic-alpha
+filled bands), virtual-stencil persistence APIs, or parallel/local solver
+execution.
+
 # Supplement to the ternary cubic contour knowledge base
 
 This archive adds one technical note:
