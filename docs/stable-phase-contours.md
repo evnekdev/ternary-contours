@@ -233,6 +233,44 @@ umbrella triangles:
 Diagnostics quantify actual pruning and reuse. No public wall-clock claim is
 made.
 
+
+## Simulated liquidus gallery
+
+The companion `plotters-ternary` repository contains a reproducible SVG gallery
+of synthetic stable-phase isotherms. It uses the public stable-contour API and
+`LiquidusFieldSpec` analytical constructors; no image is hand-drawn and no
+random source is used. These are numerical validation examples, not assessed
+thermodynamic systems.
+
+The executable is deterministic and writes one combined gallery plus individual
+panels under `plotters-ternary/docs/images/`:
+
+```text
+cargo run --release --example stable_isotherm_gallery
+```
+
+The panels use these fixed specifications (all fields are sampled onto the
+listed regular source grid before stable extraction):
+
+| Panel | Phase maxima | Grid / levels | Feature |
+| --- | --- | --- | --- |
+| corner-symmetric | A, B, C: `100`, isotropic `80` | `n=24`, 25–90 | symmetric ownership breaks and junctions |
+| corner-steepness | A/B/C: `100`, steepness 42/82/170 | `n=24`, 25–92 | unequal field widths |
+| corner-maxima | A/B/C: 112/102/94 | `n=24`, 25–108 | unequal maximum temperatures |
+| edge-maxima | AB(.35), AC(.55), BC(.45) | `n=28`, 35–96 | binary-edge congruent maxima |
+| corner-edge | A, AB(.38), BC(.58) | `n=28`, 30–96 | mixed corner/edge topology |
+| interior-maximum | interior `(0.34,0.36,0.30)` plus A/B | `n=30`, 55–105 | central stable region |
+| interior-maxima | three interior centres | `n=30`, 30–96 | overlapping interior pockets |
+| mixed-topology | A, BC(.44), two interiors | `n=30`, 35–98 | repeated ownership transitions |
+| narrow coarse/refined | same narrow centre, steepness 900 | `n=8` / `n=32` | resolution-dependent detection |
+| metastable-pair | A/B 100, central C 108 | `n=24`, 70–99 | raw A=B equality suppressed by C |
+| asymmetric-fields | three explicit directional matrices | `n=30`, 40–100 | elongated and rotated paths |
+| secondary-scalar | A/B/interior heights plus phase-specific `q` | `n=28`, 0.20–0.80 | height-gated independent contacts |
+
+The coarse/refined pair is also covered by a numerical regression test: phase 2
+has no stable path at `n=8` for level `100.2`, then becomes present at `n=32`.
+The secondary panel traces phase-specific secondary fields only inside regions
+owned by the height envelope; it does not change phase ownership.
 ## Limitations and roadmap
 
 This milestone intentionally excludes partial-domain sources, holes,

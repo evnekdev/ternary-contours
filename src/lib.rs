@@ -53,6 +53,8 @@ pub mod irregular;
 pub mod metrics;
 mod simplex;
 pub mod stable;
+/// Deterministic analytical fields used by examples and regression tests.
+pub mod synthetic;
 
 /// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
 ///
@@ -154,3 +156,5 @@ pub use irregular::{
     IrregularTriangleId, IrregularVertexId, IrregularVirtualStencilFailure,
     IrregularVirtualStencilSide, LocatedIrregularTriangle, PreparedIrregularTernaryField,
 };
+
+pub use synthetic::LiquidusFieldSpec;

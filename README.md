@@ -287,7 +287,7 @@ proof that no smaller feature exists. Stable results are exact for the final
 piecewise-linear umbrella representation, not necessarily for the original
 source interpolants.
 
-See [stable-phase-contours.md](docs/stable-phase-contours.md) for the full model,
+Synthetic `LiquidusFieldSpec` constructors provide deterministic corner, edge, and interior liquidus-like fields for reproducible gallery cases. See [stable-phase-contours.md](docs/stable-phase-contours.md) for the full model,
 secondary semantics, diagnostics, complexity, feature gates, degeneracies, and
 roadmap. Run the mixed numerical example with:
 
