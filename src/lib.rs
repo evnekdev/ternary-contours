@@ -32,7 +32,11 @@
 //! irregular height/secondary sources onto one virtual regular sampling grid.
 //! It caches exact affine upper-envelope phase polygons, then produces
 //! phase-labelled height or secondary contours with canonical univariant and
-//! invariant junctions. Optional verification and global refinement estimate
+//! invariant junctions. Partial evaluator domains use explicit defined/undefined
+//! results without extrapolation. The prepared ensemble also constructs a
+//! level-free graph of binary/interior invariant nodes and boundary-connected
+//! stable univariants, with optional shared path regularization using T_p-T_q=0.
+//! Optional verification and global refinement estimate
 //! source-to-sampling-grid error; results are exact for the final piecewise-linear
 //! sampling-grid representation, not certified for the original source interpolants.
 //!
