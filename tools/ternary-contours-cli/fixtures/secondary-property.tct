@@ -1,0 +1,27 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 10
+beta = 20
+[/phases]
+[properties]
+T required K
+activity optional 1
+[/properties]
+[grid shared]
+type = regular
+subdivisions = 1
+order = canonical
+composition_columns = none
+properties = T activity
+columns:
+alpha.T	beta.T	alpha.activity
+data:
+100	110	0.1
+110	100	0.4
+120	90	NA
+[/grid]

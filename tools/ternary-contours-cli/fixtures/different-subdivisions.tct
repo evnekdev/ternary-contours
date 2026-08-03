@@ -1,0 +1,44 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 10
+beta = 20
+[/phases]
+[properties]
+T required K
+[/properties]
+[grid alpha_coarse]
+phase = alpha
+type = regular
+subdivisions = 1
+order = canonical
+composition_columns = none
+properties = T
+columns:
+T
+data:
+100
+105
+120
+[/grid]
+[grid beta_fine]
+phase = beta
+type = regular
+subdivisions = 2
+order = canonical
+composition_columns = none
+properties = T
+columns:
+T
+data:
+120
+115
+110
+100
+110
+90
+[/grid]

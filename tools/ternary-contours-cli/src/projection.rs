@@ -2,25 +2,19 @@ use std::collections::BTreeMap;
 
 use ternary_contours::{
     IrregularTernaryMesh, PathRegularizationOptions, PreparedStablePhaseEnsemble,
-    RegularTernaryGrid, StableBoundaryNetwork, StableBoundaryOptions, StableContourSet,
-    StableContourQuantity, StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator,
+    RegularTernaryGrid, StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity,
+    StableContourSet, StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator,
     StablePhaseId, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
 };
 
 use crate::{TabulatedGrid, TabulatedTernaryDataset};
 
 /// Controls for a stable liquidus calculation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProjectionOptions {
     pub levels: Vec<f64>,
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
-}
-
-impl Default for ProjectionOptions {
-    fn default() -> Self {
-        Self { levels: Vec::new(), sampling_subdivisions: None, regularize: false }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -55,7 +49,10 @@ pub enum ProjectionError {
     #[error("phase `{phase}` has no temperature field")]
     MissingTemperature { phase: String },
     #[error("could not prepare irregular field for phase {phase:?}: {message}")]
-    IrregularMesh { phase: StablePhaseId, message: String },
+    IrregularMesh {
+        phase: StablePhaseId,
+        message: String,
+    },
     #[error("invalid projection levels: {0}")]
     Levels(String),
     #[error("stable liquidus preparation failed: {0}")]
@@ -65,8 +62,14 @@ pub enum ProjectionError {
 }
 
 enum RuntimeField {
-    Regular { grid: RegularTernaryGrid, values: Vec<Option<f64>> },
-    Irregular { mesh: IrregularTernaryMesh, values: Vec<Option<f64>> },
+    Regular {
+        grid: RegularTernaryGrid,
+        values: Vec<Option<f64>>,
+    },
+    Irregular {
+        mesh: Box<IrregularTernaryMesh>,
+        values: Vec<Option<f64>>,
+    },
 }
 
 struct RuntimePhase {
@@ -76,20 +79,44 @@ struct RuntimePhase {
 impl StablePhaseEvaluator for RuntimePhase {
     fn evaluate(&self, composition: [f64; 3]) -> StablePhaseEvaluation {
         let value = match &self.field {
-            RuntimeField::Regular { grid, values } => grid.locate(composition).ok().and_then(|location| {
-                location.triangle.vertices.into_iter().zip(location.barycentric).try_fold(0.0, |value, (vertex, weight)| {
-                    values.get(vertex.0).copied().flatten().map(|sample| value + weight * sample)
+            RuntimeField::Regular { grid, values } => {
+                grid.locate(composition).ok().and_then(|location| {
+                    location
+                        .triangle
+                        .vertices
+                        .into_iter()
+                        .zip(location.barycentric)
+                        .try_fold(0.0, |value, (vertex, weight)| {
+                            values
+                                .get(vertex.0)
+                                .copied()
+                                .flatten()
+                                .map(|sample| value + weight * sample)
+                        })
                 })
-            }),
-            RuntimeField::Irregular { mesh, values } => mesh.locate(composition).ok().and_then(|location| {
-                location.triangle.vertices.into_iter().zip(location.barycentric).try_fold(0.0, |value, (vertex, weight)| {
-                    values.get(vertex.0).copied().flatten().map(|sample| value + weight * sample)
+            }
+            RuntimeField::Irregular { mesh, values } => {
+                mesh.locate(composition).ok().and_then(|location| {
+                    location
+                        .triangle
+                        .vertices
+                        .into_iter()
+                        .zip(location.barycentric)
+                        .try_fold(0.0, |value, (vertex, weight)| {
+                            values
+                                .get(vertex.0)
+                                .copied()
+                                .flatten()
+                                .map(|sample| value + weight * sample)
+                        })
                 })
-            }),
+            }
         };
         match value {
             Some(value) if value.is_finite() => StablePhaseEvaluation::Defined { value },
-            _ => StablePhaseEvaluation::Undefined { reason: StablePhaseUndefinedReason::OutsidePhaseDomain },
+            _ => StablePhaseEvaluation::Undefined {
+                reason: StablePhaseUndefinedReason::OutsidePhaseDomain,
+            },
         }
     }
 }
@@ -110,50 +137,92 @@ pub fn calculate_projection(
             TabulatedGrid::Irregular(_) => irregular_grid_count += 1,
         }
         for field in grid.fields() {
-            if field.property != "T" { continue; }
+            if field.property != "T" {
+                continue;
+            }
             extrema.extend(field.values.iter().flatten().copied());
             let runtime = match grid {
                 TabulatedGrid::Regular(grid) => RuntimeField::Regular {
-                    grid: RegularTernaryGrid::new(grid.subdivisions).expect("parser validated positive subdivisions"),
+                    grid: RegularTernaryGrid::new(grid.subdivisions)
+                        .expect("parser validated positive subdivisions"),
                     values: field.values.clone(),
                 },
                 TabulatedGrid::Irregular(grid) => RuntimeField::Irregular {
-                    mesh: IrregularTernaryMesh::new(grid.compositions.iter().copied()).map_err(|error| ProjectionError::IrregularMesh {
-                        phase: field.phase_id,
-                        message: error.to_string(),
-                    })?,
+                    mesh: Box::new(
+                        IrregularTernaryMesh::new(grid.compositions.iter().copied()).map_err(
+                            |error| ProjectionError::IrregularMesh {
+                                phase: field.phase_id,
+                                message: error.to_string(),
+                            },
+                        )?,
+                    ),
                     values: field.values.clone(),
                 },
             };
             fields.insert(field.phase_id, runtime);
         }
     }
-    let minimum = extrema.iter().copied().reduce(f64::min).ok_or_else(|| ProjectionError::Levels("no finite temperature samples".into()))?;
-    let maximum = extrema.iter().copied().reduce(f64::max).expect("minimum is present");
+    let minimum = extrema
+        .iter()
+        .copied()
+        .reduce(f64::min)
+        .ok_or_else(|| ProjectionError::Levels("no finite temperature samples".into()))?;
+    let maximum = extrema
+        .iter()
+        .copied()
+        .reduce(f64::max)
+        .expect("minimum is present");
     let levels = if options.levels.is_empty() {
         default_levels(minimum, maximum)
     } else {
         validate_levels(&options.levels)?;
         options.levels.clone()
     };
-    let evaluators = dataset.phases.iter().map(|phase| {
-        let field = fields.remove(&phase.id).ok_or_else(|| ProjectionError::MissingTemperature { phase: phase.name.clone() })?;
-        Ok(RuntimePhase { field })
-    }).collect::<Result<Vec<_>, ProjectionError>>()?;
-    let sources = dataset.phases.iter().zip(&evaluators).map(|(phase, evaluator)| {
-        StablePhaseSource::new(phase.id, StableScalarSource::evaluator(evaluator))
-    }).collect::<Vec<_>>();
+    let evaluators = dataset
+        .phases
+        .iter()
+        .map(|phase| {
+            let field =
+                fields
+                    .remove(&phase.id)
+                    .ok_or_else(|| ProjectionError::MissingTemperature {
+                        phase: phase.name.clone(),
+                    })?;
+            Ok(RuntimePhase { field })
+        })
+        .collect::<Result<Vec<_>, ProjectionError>>()?;
+    let sources = dataset
+        .phases
+        .iter()
+        .zip(&evaluators)
+        .map(|(phase, evaluator)| {
+            StablePhaseSource::new(phase.id, StableScalarSource::evaluator(evaluator))
+        })
+        .collect::<Vec<_>>();
     let sampling_subdivisions = options.sampling_subdivisions.unwrap_or_else(|| {
-        dataset.grids.iter().filter_map(|grid| match grid {
-            TabulatedGrid::Regular(grid) => Some(grid.subdivisions),
-            TabulatedGrid::Irregular(_) => None,
-        }).max().unwrap_or(24).max(2)
+        dataset
+            .grids
+            .iter()
+            .filter_map(|grid| match grid {
+                TabulatedGrid::Regular(grid) => Some(grid.subdivisions),
+                TabulatedGrid::Irregular(_) => None,
+            })
+            .max()
+            .unwrap_or(24)
+            .max(2)
     });
-    if sampling_subdivisions == 0 { return Err(ProjectionError::Levels("sampling subdivisions must be positive".into())); }
+    if sampling_subdivisions == 0 {
+        return Err(ProjectionError::Levels(
+            "sampling subdivisions must be positive".into(),
+        ));
+    }
     let prepared = PreparedStablePhaseEnsemble::new(
         sources,
         StableContourQuantity::Height,
-        StableGridOptions { subdivisions: sampling_subdivisions, ..StableGridOptions::default() },
+        StableGridOptions {
+            subdivisions: sampling_subdivisions,
+            ..StableGridOptions::default()
+        },
     )?;
     let stable_contours = prepared.contours(&levels)?;
     let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
@@ -167,7 +236,11 @@ pub fn calculate_projection(
     let diagnostics = ProjectionDiagnostics {
         sampling_subdivisions,
         regularized: options.regularize,
-        contour_path_count: stable_contours.levels.iter().map(|level| level.paths.len()).sum(),
+        contour_path_count: stable_contours
+            .levels
+            .iter()
+            .map(|level| level.paths.len())
+            .sum(),
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
     };
@@ -175,22 +248,36 @@ pub fn calculate_projection(
         levels,
         stable_contours,
         stable_boundaries,
-        input_summary: InputSummary { phase_count: dataset.phases.len(), regular_grid_count, irregular_grid_count, temperature_range: [minimum, maximum] },
+        input_summary: InputSummary {
+            phase_count: dataset.phases.len(),
+            regular_grid_count,
+            irregular_grid_count,
+            temperature_range: [minimum, maximum],
+        },
         diagnostics,
     })
 }
 
 fn default_levels(minimum: f64, maximum: f64) -> Vec<f64> {
-    if (maximum - minimum).abs() <= f64::EPSILON { vec![minimum] }
-    else { (1..=5).map(|index| minimum + (maximum - minimum) * index as f64 / 6.0).collect() }
+    if (maximum - minimum).abs() <= f64::EPSILON {
+        vec![minimum]
+    } else {
+        (1..=5)
+            .map(|index| minimum + (maximum - minimum) * index as f64 / 6.0)
+            .collect()
+    }
 }
 
 fn validate_levels(levels: &[f64]) -> Result<(), ProjectionError> {
     if levels.is_empty() || levels.iter().any(|level| !level.is_finite()) {
-        return Err(ProjectionError::Levels("levels must be a non-empty finite list".into()));
+        return Err(ProjectionError::Levels(
+            "levels must be a non-empty finite list".into(),
+        ));
     }
     if levels.windows(2).any(|pair| pair[0] >= pair[1]) {
-        return Err(ProjectionError::Levels("levels must be strictly ascending without duplicates".into()));
+        return Err(ProjectionError::Levels(
+            "levels must be strictly ascending without duplicates".into(),
+        ));
     }
     Ok(())
 }
@@ -198,27 +285,45 @@ fn validate_levels(levels: &[f64]) -> Result<(), ProjectionError> {
 /// Parse `800,900,1000` or `800:1400:50` into strictly ascending values.
 pub fn parse_level_spec(value: &str) -> Result<Vec<f64>, ProjectionError> {
     if let Some((start, rest)) = value.split_once(':') {
-        let (end, step) = rest.split_once(':').ok_or_else(|| ProjectionError::Levels("range levels use `start:end:step`".into()))?;
+        let (end, step) = rest
+            .split_once(':')
+            .ok_or_else(|| ProjectionError::Levels("range levels use `start:end:step`".into()))?;
         let start = parse_level(start)?;
         let end = parse_level(end)?;
         let step = parse_level(step)?;
-        if step <= 0.0 || end < start { return Err(ProjectionError::Levels("range step must be positive and end must not precede start".into())); }
+        if step <= 0.0 || end < start {
+            return Err(ProjectionError::Levels(
+                "range step must be positive and end must not precede start".into(),
+            ));
+        }
         let mut values = Vec::new();
         let mut next = start;
         while next <= end + step * 1.0e-12 {
             values.push(next.min(end));
             next += step;
-            if values.len() > 100_000 { return Err(ProjectionError::Levels("level range has too many entries".into())); }
+            if values.len() > 100_000 {
+                return Err(ProjectionError::Levels(
+                    "level range has too many entries".into(),
+                ));
+            }
         }
         validate_levels(&values)?;
         Ok(values)
     } else {
-        let values = value.split(',').map(parse_level).collect::<Result<Vec<_>, _>>()?;
+        let values = value
+            .split(',')
+            .map(parse_level)
+            .collect::<Result<Vec<_>, _>>()?;
         validate_levels(&values)?;
         Ok(values)
     }
 }
 
 fn parse_level(value: &str) -> Result<f64, ProjectionError> {
-    value.trim().parse::<f64>().ok().filter(|value| value.is_finite()).ok_or_else(|| ProjectionError::Levels(format!("`{value}` is not a finite number")))
+    value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| ProjectionError::Levels(format!("`{value}` is not a finite number")))
 }

@@ -1,0 +1,37 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 10
+beta = 20
+[/phases]
+[properties]
+T required K
+[/properties]
+[grid alpha_points]
+phase = alpha
+type = irregular
+composition_columns = authoritative
+properties = T
+columns:
+A	B	C	T
+data:
+0	0	1	100
+0	1	0	110
+1	0	0	120
+[/grid]
+[grid beta_points]
+phase = beta
+type = irregular
+composition_columns = authoritative
+properties = T
+columns:
+A	B	C	T
+data:
+1	0	0	90
+0	0	1	115
+0	1	0	100
+[/grid]
