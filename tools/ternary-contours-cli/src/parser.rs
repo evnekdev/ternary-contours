@@ -8,6 +8,8 @@ use std::{
 
 use ternary_contours::StablePhaseId;
 
+use crate::parse_tsv_row;
+
 use crate::model::{
     ComponentDefinition, CompositionColumns, FormatVersion, GridType, IrregularTabulatedGrid,
     PhaseDefinition, PropertyDefinition, RegularTabulatedGrid, RowOrder, SourceRange,
@@ -196,9 +198,14 @@ pub fn parse_str(input: &str) -> Result<TabulatedTernaryDataset, TctError> {
                 continue;
             }
             if builder.in_data {
-                builder
-                    .rows
-                    .push((line, raw.split('\t').map(str::to_owned).collect()));
+                builder.rows.push((
+                    line,
+                    parse_tsv_row(line, raw)
+                        .cells
+                        .into_iter()
+                        .map(|cell| cell.text)
+                        .collect(),
+                ));
                 continue;
             }
             if builder.awaiting_headers {

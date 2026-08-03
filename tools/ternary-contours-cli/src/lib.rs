@@ -28,7 +28,9 @@ pub use render::{
 pub use serialize::{
     NumericFormat, SerializeError, TctSerializeOptions, save_tct_atomic, serialize_tct,
 };
-pub use table::{HeaderMode, ParsedCell, ParsedRow, ParsedTable, TableError, TableLocation};
+pub use table::{
+    HeaderMode, ParsedCell, ParsedRow, ParsedTable, TableError, TableLocation, parse_tsv_row,
+};
 pub use template::{
     IrregularTemplateStyle, irregular_template, parse_components, parse_field_specs,
     regular_template_tct,
