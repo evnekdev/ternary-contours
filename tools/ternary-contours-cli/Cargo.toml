@@ -10,8 +10,14 @@ description = "Repository CLI for validating and plotting tabulated ternary liqu
 name = "ternary-contours-cli"
 path = "src/main.rs"
 
+[features]
+default = []
+viewer = ["dep:eframe", "dep:egui"]
+
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }
+eframe = { version = "0.33", default-features = false, features = ["default_fonts", "glow"], optional = true }
+egui = { version = "0.33", optional = true }
 plotters = { version = "0.3.7", default-features = false, features = [
     "bitmap_backend",
     "bitmap_encoder",
