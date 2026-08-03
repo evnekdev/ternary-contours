@@ -106,11 +106,12 @@ impl LiquidusViewerApp {
             Ok(result) => {
                 self.worker = None;
                 let accepted = self.state.apply_worker_result(result);
-                if accepted && self.sync_editor_on_success {
-                    if let Some(dataset) = self.state.dataset.clone() {
-                        self.editor = Some(DatasetEditorState::new(dataset));
-                        self.editor_ui = DataEditorUi::default();
-                    }
+                if accepted
+                    && self.sync_editor_on_success
+                    && let Some(dataset) = self.state.dataset.clone()
+                {
+                    self.editor = Some(DatasetEditorState::new(dataset));
+                    self.editor_ui = DataEditorUi::default();
                 }
                 self.sync_editor_on_success = false;
                 if !accepted && matches!(self.state.status, ViewerStatus::Calculating) {
