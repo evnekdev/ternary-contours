@@ -69,6 +69,25 @@ impl fmt::Display for TableError {
 
 impl std::error::Error for TableError {}
 
+/// Split one TSV row while preserving literal blank cells and source columns.
+/// TCT data sections call this too, so clipboard and file data share the same
+/// low-level cell boundary behaviour.
+pub fn parse_tsv_row(source_row: usize, line: &str) -> ParsedRow {
+    ParsedRow {
+        source_row,
+        cells: line
+            .split('\t')
+            .enumerate()
+            .map(|(column, text)| ParsedCell {
+                text: text.trim().to_owned(),
+                location: TableLocation {
+                    row: source_row,
+                    column: column + 1,
+                },
+            })
+            .collect(),
+    }
+}
 impl ParsedTable {
     /// Parse a literal TSV range. Empty trailing cells are retained; completely
     /// blank lines are ignored so Excel ranges with a trailing newline work.
@@ -77,20 +96,7 @@ impl ParsedTable {
             .lines()
             .enumerate()
             .filter_map(|(index, line)| (!line.trim().is_empty()).then_some((index + 1, line)))
-            .map(|(source_row, line)| {
-                let cells = line
-                    .split('\t')
-                    .enumerate()
-                    .map(|(column, text)| ParsedCell {
-                        text: text.trim().to_owned(),
-                        location: TableLocation {
-                            row: source_row,
-                            column: column + 1,
-                        },
-                    })
-                    .collect::<Vec<_>>();
-                ParsedRow { source_row, cells }
-            })
+            .map(|(source_row, line)| parse_tsv_row(source_row, line))
             .collect::<Vec<_>>();
         Self::from_rows(raw_rows, header_mode)
     }
