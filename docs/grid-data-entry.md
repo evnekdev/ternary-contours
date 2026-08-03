@@ -127,3 +127,11 @@ and selection text. Headless tests validate pure TSV generation/parsing.
 6. Save, reopen, and confirm the plot remains valid.
 7. Attempt a malformed reload after a valid calculation; the previous plot
    must remain visible.
+
+Manual launch smoke result (Windows desktop, 2026-08-04): the feature-enabled
+viewer opened with the interior-invariant fixture and remained alive until the
+smoke process was closed. Automated tests cover canonical generation, regular
+paste mapping/reordering, irregular validation/normalization, dataset undo/redo,
+serialization, and the headless commands. Clipboard and pointer-driven Data-tab
+interactions remain in the desktop checklist above because the test suite does
+not require a display server or native clipboard.
