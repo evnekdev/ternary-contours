@@ -157,6 +157,11 @@ pub use stable::{
     StableUnivariantRegularizationDiagnostics, StableVerificationPassDiagnostics,
 };
 
+/// Compatibility alias retained for the stable Plotters adapter.
+pub type StableUmbrellaOptions = StableGridOptions;
+/// Compatibility alias retained for the stable Plotters adapter.
+pub type StableUmbrellaVerification = StableGridVerification;
+
 #[cfg(feature = "irregular-delaunay")]
 pub use irregular::{
     IRREGULAR_VERTEX_TOLERANCE, InterpolatedIrregularTernaryField, IrregularAlphaConvergence,
