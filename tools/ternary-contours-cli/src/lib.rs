@@ -11,6 +11,7 @@ pub mod projection;
 pub mod render;
 pub mod serialize;
 pub mod table;
+pub mod template;
 #[cfg(feature = "viewer")]
 pub mod viewer;
 
@@ -28,3 +29,7 @@ pub use serialize::{
     NumericFormat, SerializeError, TctSerializeOptions, save_tct_atomic, serialize_tct,
 };
 pub use table::{HeaderMode, ParsedCell, ParsedRow, ParsedTable, TableError, TableLocation};
+pub use template::{
+    IrregularTemplateStyle, irregular_template, parse_components, parse_field_specs,
+    regular_template_tct,
+};
