@@ -2,8 +2,9 @@ use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ternary_contours_cli::{
-    OutputFormat, ProjectionOptions, RenderOptions, TabulatedGrid, calculate_projection,
-    parse_level_spec, parse_path, render_to_path,
+    IrregularTemplateStyle, NumericFormat, OutputFormat, ProjectionOptions, RenderOptions,
+    TabulatedGrid, calculate_projection, compositions_tsv, irregular_template, parse_components,
+    parse_field_specs, parse_level_spec, parse_path, regular_template_tct, render_to_path,
 };
 
 #[derive(Parser)]
@@ -36,6 +37,13 @@ enum Command {
         #[command(flatten)]
         options: PlotOptions,
     },
+    /// Emit canonical regular-grid composition TSV for Excel or other tools.
+    Compositions(CompositionsArgs),
+    /// Generate a regular or irregular TCT data-entry template.
+    Template {
+        #[command(subcommand)]
+        kind: TemplateCommand,
+    },
     /// Open the optional native liquidus inspection viewer.
     View {
         input: PathBuf,
@@ -44,6 +52,68 @@ enum Command {
     },
 }
 
+#[derive(Args)]
+struct CompositionsArgs {
+    #[arg(long)]
+    subdivisions: usize,
+    #[arg(long)]
+    components: String,
+    #[arg(long)]
+    header: bool,
+    #[arg(long, default_value_t = 6)]
+    precision: usize,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum TemplateCommand {
+    Regular(RegularTemplateArgs),
+    Irregular(IrregularTemplateArgs),
+}
+
+#[derive(Args)]
+struct RegularTemplateArgs {
+    #[arg(long)]
+    subdivisions: usize,
+    #[arg(long)]
+    components: String,
+    #[arg(long)]
+    fields: String,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+    #[arg(long, default_value_t = 6)]
+    precision: usize,
+}
+
+#[derive(Args)]
+struct IrregularTemplateArgs {
+    #[arg(long)]
+    components: String,
+    #[arg(long)]
+    fields: String,
+    #[arg(long, value_enum, default_value_t = TemplateStyleArg::FullTct)]
+    style: TemplateStyleArg,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TemplateStyleArg {
+    FullTct,
+    GridSection,
+    TsvHeader,
+}
+
+impl From<TemplateStyleArg> for IrregularTemplateStyle {
+    fn from(value: TemplateStyleArg) -> Self {
+        match value {
+            TemplateStyleArg::FullTct => Self::FullTct,
+            TemplateStyleArg::GridSection => Self::GridSection,
+            TemplateStyleArg::TsvHeader => Self::TsvHeader,
+        }
+    }
+}
 /// Options shared by static plotting and the interactive viewer.
 #[derive(Args, Clone)]
 struct PlotOptions {
@@ -155,6 +225,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             output,
             options,
         } => plot(input, output, options),
+        Command::Compositions(args) => compositions(args),
+        Command::Template { kind } => template(kind),
         Command::View { input, options } => view(input, options),
     }
 }
@@ -255,6 +327,52 @@ fn plot(input: PathBuf, output: PathBuf, options: PlotOptions) -> Result<(), Box
     Ok(())
 }
 
+fn compositions(args: CompositionsArgs) -> Result<(), Box<dyn Error>> {
+    let components = parse_components(&args.components)?;
+    let content = compositions_tsv(
+        args.subdivisions,
+        [&components[0], &components[1], &components[2]],
+        args.header,
+        NumericFormat {
+            decimal_places: args.precision,
+        },
+    )?;
+    write_generated(args.output, content)
+}
+
+fn template(kind: TemplateCommand) -> Result<(), Box<dyn Error>> {
+    match kind {
+        TemplateCommand::Regular(args) => {
+            let content = regular_template_tct(
+                args.subdivisions,
+                parse_components(&args.components)?,
+                &parse_field_specs(&args.fields)?,
+                NumericFormat {
+                    decimal_places: args.precision,
+                },
+            )?;
+            write_generated(args.output, content)
+        }
+        TemplateCommand::Irregular(args) => {
+            let content = irregular_template(
+                parse_components(&args.components)?,
+                &parse_field_specs(&args.fields)?,
+                args.style.into(),
+            );
+            write_generated(args.output, content)
+        }
+    }
+}
+
+fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<dyn Error>> {
+    if let Some(output) = output {
+        std::fs::write(&output, content)?;
+        println!("Wrote {}", output.display());
+    } else {
+        print!("{content}");
+    }
+    Ok(())
+}
 #[cfg(feature = "viewer")]
 fn view(input: PathBuf, options: PlotOptions) -> Result<(), Box<dyn Error>> {
     ternary_contours_cli::viewer::launch(
