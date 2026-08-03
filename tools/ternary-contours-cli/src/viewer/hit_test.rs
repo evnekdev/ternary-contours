@@ -165,13 +165,13 @@ impl HitGeometry {
                     }
                     ternary_contours::StableInvariantNode::Interior(_) => options.show_invariants,
                 };
-                if visible {
-                    if let Some(point) = transform.composition_to_logical(node.point().as_array()) {
-                        geometry.nodes.push(LogicalNode {
-                            point,
-                            feature: SelectedFeature::Invariant { node_index },
-                        });
-                    }
+                if visible
+                    && let Some(point) = transform.composition_to_logical(node.point().as_array())
+                {
+                    geometry.nodes.push(LogicalNode {
+                        point,
+                        feature: SelectedFeature::Invariant { node_index },
+                    });
                 }
             }
         }

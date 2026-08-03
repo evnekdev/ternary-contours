@@ -83,12 +83,17 @@ pub struct CalculationRequest {
 }
 
 #[derive(Clone, Debug)]
+pub struct CalculationOutput {
+    dataset: TabulatedTernaryDataset,
+    raw_projection: LiquidusProjection,
+    regularized_projection: Option<LiquidusProjection>,
+}
+
+#[derive(Clone, Debug)]
 pub enum WorkerResult {
     Ready {
         generation: u64,
-        dataset: TabulatedTernaryDataset,
-        raw_projection: LiquidusProjection,
-        regularized_projection: Option<LiquidusProjection>,
+        output: Box<CalculationOutput>,
     },
     Failed {
         generation: u64,
@@ -114,9 +119,11 @@ pub fn start_worker(request: CalculationRequest) -> Result<Receiver<WorkerResult
             let message = match result {
                 Ok((dataset, raw_projection, regularized_projection)) => WorkerResult::Ready {
                     generation: request.generation,
-                    dataset,
-                    raw_projection,
-                    regularized_projection,
+                    output: Box::new(CalculationOutput {
+                        dataset,
+                        raw_projection,
+                        regularized_projection,
+                    }),
                 },
                 Err(error) => WorkerResult::Failed {
                     generation: request.generation,
@@ -249,15 +256,10 @@ impl ViewerState {
             return false;
         }
         match result {
-            WorkerResult::Ready {
-                dataset,
-                raw_projection,
-                regularized_projection,
-                ..
-            } => {
-                self.dataset = Some(dataset);
-                self.raw_projection = Some(raw_projection);
-                self.regularized_projection = regularized_projection;
+            WorkerResult::Ready { output, .. } => {
+                self.dataset = Some(output.dataset);
+                self.raw_projection = Some(output.raw_projection);
+                self.regularized_projection = output.regularized_projection;
                 self.status = ViewerStatus::Ready;
                 self.last_successful_reload = Some(SystemTime::now());
                 self.dirty.render = true;
@@ -323,9 +325,11 @@ mod tests {
         let first = state.begin_request();
         assert!(state.apply_worker_result(WorkerResult::Ready {
             generation: first.generation,
-            dataset,
-            raw_projection: projection,
-            regularized_projection: None,
+            output: Box::new(CalculationOutput {
+                dataset,
+                raw_projection: projection,
+                regularized_projection: None,
+            }),
         }));
         let second = state.begin_request();
         assert!(state.apply_worker_result(WorkerResult::Failed {
