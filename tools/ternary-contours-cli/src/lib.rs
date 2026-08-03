@@ -17,5 +17,6 @@ pub use projection::{
     LiquidusProjection, ProjectionOptions, calculate_projection, parse_level_spec,
 };
 pub use render::{
-    OutputFormat, RenderOptions, RenderedBitmap, render_to_bitmap, render_to_path, rgb_to_rgba,
+    OutputFormat, RenderOptions, RenderPathMode, RenderedBitmap, render_to_bitmap,
+    render_to_bitmap_with_raw, render_to_path, render_to_path_with_raw, rgb_to_rgba,
 };

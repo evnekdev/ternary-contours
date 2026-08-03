@@ -33,6 +33,14 @@ impl OutputFormat {
         }
     }
 }
+/// Which stable-boundary paths the renderer should show.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum RenderPathMode {
+    Raw,
+    #[default]
+    Regularized,
+    Overlay,
+}
 
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
@@ -45,6 +53,11 @@ pub struct RenderOptions {
     pub show_binary_invariants: bool,
     pub show_grid: bool,
     pub show_samples: bool,
+    pub show_labels: bool,
+    pub show_legend: bool,
+    pub marker_size: u32,
+    pub line_width: u32,
+    pub path_mode: RenderPathMode,
 }
 
 impl Default for RenderOptions {
@@ -59,6 +72,11 @@ impl Default for RenderOptions {
             show_binary_invariants: true,
             show_grid: false,
             show_samples: false,
+            show_labels: true,
+            show_legend: true,
+            marker_size: 8,
+            line_width: 3,
+            path_mode: RenderPathMode::Regularized,
         }
     }
 }
@@ -91,6 +109,18 @@ pub fn render_to_path(
     options: &RenderOptions,
     format: Option<OutputFormat>,
 ) -> Result<(), RenderError> {
+    render_to_path_with_raw(path, dataset, projection, None, options, format)
+}
+
+/// Export using the same renderer while optionally retaining raw paths for an overlay.
+pub fn render_to_path_with_raw(
+    path: impl AsRef<Path>,
+    dataset: &TabulatedTernaryDataset,
+    projection: &LiquidusProjection,
+    raw_projection: Option<&LiquidusProjection>,
+    options: &RenderOptions,
+    format: Option<OutputFormat>,
+) -> Result<(), RenderError> {
     let path = path.as_ref();
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -100,7 +130,7 @@ pub fn render_to_path(
     match format.unwrap_or(OutputFormat::from_path(path)?) {
         OutputFormat::Svg => {
             let root = SVGBackend::new(path, (options.width, options.height)).into_drawing_area();
-            render(&root, dataset, projection, options)
+            render(&root, dataset, projection, raw_projection, options)
                 .map_err(|error| RenderError::Draw(error.to_string()))?;
             root.present()
                 .map_err(|error| RenderError::Draw(error.to_string()))
@@ -108,7 +138,7 @@ pub fn render_to_path(
         OutputFormat::Png => {
             let root =
                 BitMapBackend::new(path, (options.width, options.height)).into_drawing_area();
-            render(&root, dataset, projection, options)
+            render(&root, dataset, projection, raw_projection, options)
                 .map_err(|error| RenderError::Draw(error.to_string()))?;
             root.present()
                 .map_err(|error| RenderError::Draw(error.to_string()))
@@ -126,12 +156,22 @@ pub fn render_to_bitmap(
     projection: &LiquidusProjection,
     options: &RenderOptions,
 ) -> Result<RenderedBitmap, RenderError> {
+    render_to_bitmap_with_raw(dataset, projection, None, options)
+}
+
+/// Render to an in-memory texture while optionally retaining raw paths for an overlay.
+pub fn render_to_bitmap_with_raw(
+    dataset: &TabulatedTernaryDataset,
+    projection: &LiquidusProjection,
+    raw_projection: Option<&LiquidusProjection>,
+    options: &RenderOptions,
+) -> Result<RenderedBitmap, RenderError> {
     let rgb_len = rgb_len(options.width, options.height)?;
     let mut rgb = vec![0; rgb_len];
     {
         let root = BitMapBackend::with_buffer(&mut rgb, (options.width, options.height))
             .into_drawing_area();
-        render(&root, dataset, projection, options)
+        render(&root, dataset, projection, raw_projection, options)
             .map_err(|error| RenderError::Draw(error.to_string()))?;
         root.present()
             .map_err(|error| RenderError::Draw(error.to_string()))?;
@@ -142,7 +182,6 @@ pub fn render_to_bitmap(
         rgba: rgb_to_rgba(&rgb),
     })
 }
-
 fn rgb_len(width: u32, height: u32) -> Result<usize, RenderError> {
     let pixels = usize::try_from(width)
         .ok()
@@ -172,6 +211,7 @@ fn render<DB: DrawingBackend>(
     root: &DrawingArea<DB, Shift>,
     dataset: &TabulatedTernaryDataset,
     projection: &LiquidusProjection,
+    raw_projection: Option<&LiquidusProjection>,
     options: &RenderOptions,
 ) -> Result<(), Box<dyn Error>>
 where
@@ -187,12 +227,16 @@ where
         .caption(title, ("sans-serif", 24, FontStyle::Bold, &BLACK))
         .margin(30)
         .build()?;
-    chart
-        .configure_mesh()
-        .axis_a_name(&dataset.components[0].name)
-        .axis_b_name(&dataset.components[1].name)
-        .axis_c_name(&dataset.components[2].name)
-        .draw()?;
+    if options.show_labels {
+        chart
+            .configure_mesh()
+            .axis_a_name(&dataset.components[0].name)
+            .axis_b_name(&dataset.components[1].name)
+            .axis_c_name(&dataset.components[2].name)
+            .draw()?;
+    } else {
+        chart.configure_mesh().draw()?;
+    }
 
     let phase_names = dataset
         .phases
@@ -202,8 +246,8 @@ where
     if options.show_isotherms {
         chart.draw_series(
             TernaryStableContourSeries::new(&projection.stable_contours)
-                .style_by_phase(phase_style)
-                .legend(true)
+                .style_by_phase(|phase| phase_style(phase, options.line_width))
+                .legend(options.show_legend)
                 .phase_formatter(|phase| {
                     phase_names
                         .get(&phase)
@@ -213,14 +257,29 @@ where
         )?;
     }
     if options.show_univariants {
-        for path in &projection.stable_boundaries.univariants {
-            chart.draw_series(TernaryLineSeries::new(
-                path.points
-                    .iter()
-                    .map(|point| TernaryPoint::from(point.as_array()))
-                    .collect::<Vec<_>>(),
-                BLACK.mix(0.72).stroke_width(3),
-            ))?;
+        let raw = raw_projection.unwrap_or(projection);
+        let paths = match options.path_mode {
+            RenderPathMode::Raw => {
+                vec![(raw, RGBColor(208, 111, 29).stroke_width(options.line_width))]
+            }
+            RenderPathMode::Regularized => {
+                vec![(projection, BLACK.mix(0.72).stroke_width(options.line_width))]
+            }
+            RenderPathMode::Overlay => vec![
+                (raw, RGBColor(208, 111, 29).stroke_width(options.line_width)),
+                (projection, BLACK.mix(0.72).stroke_width(options.line_width)),
+            ],
+        };
+        for (source, style) in paths {
+            for path in &source.stable_boundaries.univariants {
+                chart.draw_series(TernaryLineSeries::new(
+                    path.points
+                        .iter()
+                        .map(|point| TernaryPoint::from(point.as_array()))
+                        .collect::<Vec<_>>(),
+                    style,
+                ))?;
+            }
         }
     }
     if options.show_binary_invariants {
@@ -235,7 +294,7 @@ where
             chart.draw_series(
                 TernaryPointSeries::new(points)
                     .marker(MarkerShape::Diamond)
-                    .size(8)
+                    .size(options.marker_size)
                     .style(RGBColor(232, 125, 28).filled()),
             )?;
         }
@@ -252,7 +311,7 @@ where
             chart.draw_series(
                 TernaryPointSeries::new(points)
                     .marker(MarkerShape::Circle)
-                    .size(9)
+                    .size(options.marker_size.saturating_add(1))
                     .style(RGBColor(164, 48, 143).filled()),
             )?;
         }
@@ -267,19 +326,25 @@ where
         chart.draw_series(
             TernaryPointSeries::new(points)
                 .marker(MarkerShape::Circle)
-                .size(if options.show_grid { 3 } else { 5 })
+                .size(if options.show_grid {
+                    3
+                } else {
+                    options.marker_size.min(6)
+                })
                 .style(BLACK.mix(0.35).filled()),
         )?;
     }
-    chart
-        .configure_series_labels()
-        .background_style(WHITE.mix(0.82))
-        .border_style(BLACK)
-        .draw()?;
+    if options.show_legend && options.show_isotherms {
+        chart
+            .configure_series_labels()
+            .background_style(WHITE.mix(0.82))
+            .border_style(BLACK)
+            .draw()?;
+    }
     Ok(())
 }
 
-fn phase_style(phase: StablePhaseId) -> ShapeStyle {
+fn phase_style(phase: StablePhaseId, line_width: u32) -> ShapeStyle {
     const PALETTE: [RGBColor; 8] = [
         RGBColor(31, 119, 180),
         RGBColor(214, 39, 40),
@@ -290,7 +355,7 @@ fn phase_style(phase: StablePhaseId) -> ShapeStyle {
         RGBColor(140, 86, 75),
         RGBColor(227, 119, 194),
     ];
-    PALETTE[phase.0 as usize % PALETTE.len()].stroke_width(2)
+    PALETTE[phase.0 as usize % PALETTE.len()].stroke_width(line_width)
 }
 
 #[cfg(test)]
