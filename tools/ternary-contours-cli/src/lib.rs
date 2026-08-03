@@ -8,10 +8,14 @@ pub mod model;
 pub mod parser;
 pub mod projection;
 pub mod render;
+#[cfg(feature = "viewer")]
+pub mod viewer;
 
 pub use model::*;
 pub use parser::{TctError, parse_path, parse_str};
 pub use projection::{
     LiquidusProjection, ProjectionOptions, calculate_projection, parse_level_spec,
 };
-pub use render::{OutputFormat, RenderOptions, render_to_path};
+pub use render::{
+    OutputFormat, RenderOptions, RenderedBitmap, render_to_bitmap, render_to_path, rgb_to_rgba,
+};

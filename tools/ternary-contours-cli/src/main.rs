@@ -10,7 +10,7 @@ use ternary_contours_cli::{
 #[command(
     name = "ternary-contours-cli",
     version,
-    about = "Inspect, validate, and plot TCT liquidus tables"
+    about = "Inspect, validate, plot, and view TCT liquidus tables"
 )]
 struct Cli {
     #[arg(short, long, global = true)]
@@ -36,9 +36,16 @@ enum Command {
         #[command(flatten)]
         options: PlotOptions,
     },
+    /// Open the optional native liquidus inspection viewer.
+    View {
+        input: PathBuf,
+        #[command(flatten)]
+        options: PlotOptions,
+    },
 }
 
-#[derive(Args)]
+/// Options shared by static plotting and the interactive viewer.
+#[derive(Args, Clone)]
 struct PlotOptions {
     #[arg(long)]
     levels: Option<String>,
@@ -68,6 +75,38 @@ struct PlotOptions {
     title: Option<String>,
     #[arg(long, value_enum)]
     format: Option<FormatArg>,
+}
+
+impl PlotOptions {
+    fn projection_options(&self) -> Result<ProjectionOptions, Box<dyn Error>> {
+        let levels = self.levels.as_deref().map(parse_level_spec).transpose()?;
+        Ok(ProjectionOptions {
+            levels: levels.unwrap_or_default(),
+            sampling_subdivisions: self.sampling_subdivisions,
+            regularize: self.regularize && !self.no_regularize,
+            ..ProjectionOptions::default()
+        })
+    }
+
+    fn render_options(&self) -> RenderOptions {
+        let selected_layers = self.show_isotherms
+            || self.show_univariants
+            || self.show_invariants
+            || self.show_binary_invariants;
+        let mut render = RenderOptions::default();
+        if selected_layers {
+            render.show_isotherms = self.show_isotherms;
+            render.show_univariants = self.show_univariants;
+            render.show_invariants = self.show_invariants;
+            render.show_binary_invariants = self.show_binary_invariants;
+        }
+        render.show_grid = self.show_grid;
+        render.show_samples = self.show_samples;
+        render.width = self.width.unwrap_or(render.width);
+        render.height = self.height.unwrap_or(render.height);
+        render.title = self.title.clone();
+        render
+    }
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -116,6 +155,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
             output,
             options,
         } => plot(input, output, options),
+        Command::View { input, options } => view(input, options),
     }
 }
 
@@ -196,35 +236,8 @@ fn validate(input: PathBuf, warnings_as_errors: bool) -> Result<(), Box<dyn Erro
 
 fn plot(input: PathBuf, output: PathBuf, options: PlotOptions) -> Result<(), Box<dyn Error>> {
     let dataset = parse_path(&input)?;
-    let levels = options
-        .levels
-        .as_deref()
-        .map(parse_level_spec)
-        .transpose()?;
-    let projection = calculate_projection(
-        &dataset,
-        &ProjectionOptions {
-            levels: levels.unwrap_or_default(),
-            sampling_subdivisions: options.sampling_subdivisions,
-            regularize: options.regularize && !options.no_regularize,
-        },
-    )?;
-    let selected_layers = options.show_isotherms
-        || options.show_univariants
-        || options.show_invariants
-        || options.show_binary_invariants;
-    let mut render = RenderOptions::default();
-    if selected_layers {
-        render.show_isotherms = options.show_isotherms;
-        render.show_univariants = options.show_univariants;
-        render.show_invariants = options.show_invariants;
-        render.show_binary_invariants = options.show_binary_invariants;
-    }
-    render.show_grid = options.show_grid;
-    render.show_samples = options.show_samples;
-    render.width = options.width.unwrap_or(render.width);
-    render.height = options.height.unwrap_or(render.height);
-    render.title = options.title;
+    let projection = calculate_projection(&dataset, &options.projection_options()?)?;
+    let render = options.render_options();
     render_to_path(
         &output,
         &dataset,
@@ -240,4 +253,18 @@ fn plot(input: PathBuf, output: PathBuf, options: PlotOptions) -> Result<(), Box
         projection.diagnostics.univariant_count,
     );
     Ok(())
+}
+
+#[cfg(feature = "viewer")]
+fn view(input: PathBuf, options: PlotOptions) -> Result<(), Box<dyn Error>> {
+    ternary_contours_cli::viewer::launch(
+        input,
+        options.projection_options()?,
+        options.render_options(),
+    )
+}
+
+#[cfg(not(feature = "viewer"))]
+fn view(_input: PathBuf, _options: PlotOptions) -> Result<(), Box<dyn Error>> {
+    Err("the `view` command requires the optional `viewer` feature; rerun with `cargo run -p ternary-contours-cli --features viewer -- view <input.tct>`".into())
 }
