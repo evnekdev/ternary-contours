@@ -78,8 +78,14 @@ impl ViewerOptions {
 #[derive(Clone, Debug)]
 pub struct CalculationRequest {
     pub generation: u64,
-    pub input_path: PathBuf,
+    pub input: CalculationInput,
     pub options: ProjectionOptions,
+}
+
+#[derive(Clone, Debug)]
+pub enum CalculationInput {
+    Path(PathBuf),
+    Dataset(TabulatedTernaryDataset),
 }
 
 #[derive(Clone, Debug)]
@@ -146,7 +152,10 @@ fn calculate_request(
     ),
     String,
 > {
-    let dataset = parse_path(&request.input_path).map_err(|error| error.to_string())?;
+    let dataset = match &request.input {
+        CalculationInput::Path(path) => parse_path(path).map_err(|error| error.to_string())?,
+        CalculationInput::Dataset(dataset) => dataset.clone(),
+    };
     let mut raw_options = request.options.clone();
     raw_options.regularize = false;
     let raw_projection =
@@ -216,11 +225,24 @@ impl ViewerState {
         self.dirty.projection = false;
         CalculationRequest {
             generation: self.generation,
-            input_path: self.input_path.clone(),
+            input: CalculationInput::Path(self.input_path.clone()),
             options: self.calculation_options.clone(),
         }
     }
 
+    pub fn begin_dataset_request(
+        &mut self,
+        dataset: TabulatedTernaryDataset,
+    ) -> CalculationRequest {
+        self.generation = self.generation.saturating_add(1);
+        self.status = ViewerStatus::Calculating;
+        self.dirty.projection = false;
+        CalculationRequest {
+            generation: self.generation,
+            input: CalculationInput::Dataset(dataset),
+            options: self.calculation_options.clone(),
+        }
+    }
     pub fn invalidate_projection(&mut self) {
         self.generation = self.generation.saturating_add(1);
         self.dirty.projection = true;
