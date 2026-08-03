@@ -63,10 +63,20 @@ impl Default for RenderOptions {
     }
 }
 
+/// An opaque RGBA image produced by the shared Plotters renderer.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RenderedBitmap {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     #[error("output file must use a .svg or .png extension: {0}")]
     UnsupportedOutput(String),
+    #[error("render dimensions must be positive and fit in memory: {width}x{height}")]
+    InvalidDimensions { width: u32, height: u32 },
     #[error("could not create output directory: {0}")]
     CreateDirectory(#[from] std::io::Error),
     #[error("rendering failed: {0}")]
@@ -104,6 +114,58 @@ pub fn render_to_path(
                 .map_err(|error| RenderError::Draw(error.to_string()))
         }
     }
+}
+
+/// Render the same static plot into an RGBA bitmap suitable for a native texture.
+///
+/// Plotters' in-memory bitmap backend writes RGB bytes in channel order. The
+/// conversion is explicit so callers never need to depend on a backend-specific
+/// RGB/BGR assumption.
+pub fn render_to_bitmap(
+    dataset: &TabulatedTernaryDataset,
+    projection: &LiquidusProjection,
+    options: &RenderOptions,
+) -> Result<RenderedBitmap, RenderError> {
+    let rgb_len = rgb_len(options.width, options.height)?;
+    let mut rgb = vec![0; rgb_len];
+    {
+        let root = BitMapBackend::with_buffer(&mut rgb, (options.width, options.height))
+            .into_drawing_area();
+        render(&root, dataset, projection, options)
+            .map_err(|error| RenderError::Draw(error.to_string()))?;
+        root.present()
+            .map_err(|error| RenderError::Draw(error.to_string()))?;
+    }
+    Ok(RenderedBitmap {
+        width: options.width,
+        height: options.height,
+        rgba: rgb_to_rgba(&rgb),
+    })
+}
+
+fn rgb_len(width: u32, height: u32) -> Result<usize, RenderError> {
+    let pixels = usize::try_from(width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .ok_or(RenderError::InvalidDimensions { width, height })?;
+    pixels
+        .checked_mul(3)
+        .filter(|_| width > 0 && height > 0)
+        .ok_or(RenderError::InvalidDimensions { width, height })
+}
+
+/// Convert Plotters' RGB memory buffer to egui-compatible, opaque RGBA bytes.
+pub fn rgb_to_rgba(rgb: &[u8]) -> Vec<u8> {
+    debug_assert_eq!(rgb.len() % 3, 0);
+    let mut rgba = Vec::with_capacity(rgb.len() / 3 * 4);
+    for pixel in rgb.chunks_exact(3) {
+        rgba.extend_from_slice(&[pixel[0], pixel[1], pixel[2], u8::MAX]);
+    }
+    rgba
 }
 
 fn render<DB: DrawingBackend>(
@@ -229,4 +291,60 @@ fn phase_style(phase: StablePhaseId) -> ShapeStyle {
         RGBColor(227, 119, 194),
     ];
     PALETTE[phase.0 as usize % PALETTE.len()].stroke_width(2)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{ProjectionOptions, calculate_projection, parse_str};
+
+    #[test]
+    fn rgb_to_rgba_preserves_channel_order_and_adds_opacity() {
+        assert_eq!(
+            rgb_to_rgba(&[0x12, 0x34, 0x56, 0xab, 0xcd, 0xef]),
+            vec![0x12, 0x34, 0x56, 0xff, 0xab, 0xcd, 0xef, 0xff]
+        );
+    }
+
+    #[test]
+    fn bitmap_render_has_requested_dimensions_and_plot_pixels() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        let bitmap = render_to_bitmap(
+            &dataset,
+            &projection,
+            &RenderOptions {
+                width: 360,
+                height: 300,
+                ..RenderOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!((bitmap.width, bitmap.height), (360, 300));
+        assert_eq!(bitmap.rgba.len(), 360 * 300 * 4);
+        assert!(
+            bitmap
+                .rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[..3] != [255, 255, 255])
+        );
+    }
+
+    #[test]
+    fn zero_bitmap_dimension_is_rejected() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        assert!(matches!(
+            render_to_bitmap(
+                &dataset,
+                &projection,
+                &RenderOptions {
+                    width: 0,
+                    ..RenderOptions::default()
+                }
+            ),
+            Err(RenderError::InvalidDimensions { .. })
+        ));
+    }
 }
