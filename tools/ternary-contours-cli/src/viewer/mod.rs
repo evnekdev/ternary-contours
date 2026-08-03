@@ -2,6 +2,7 @@
 
 mod app;
 mod controls;
+mod hit_test;
 mod state;
 mod texture;
 
@@ -10,6 +11,7 @@ use std::{error::Error, path::PathBuf};
 use crate::{ProjectionOptions, RenderOptions};
 
 pub use app::LiquidusViewerApp;
+pub use hit_test::{SelectedFeature, ViewerTransform};
 pub use state::{DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
 
 pub fn launch(

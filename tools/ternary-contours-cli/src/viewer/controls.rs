@@ -182,10 +182,47 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     });
 
     ui.collapsing("Diagnostics", |ui| {
-        ui.small(
-            "Raw/regularized overlays, source points, and sampling points are available above.",
-        );
-        ui.small("Feature IDs and endpoint diagnostics appear after selecting a feature.");
+        let mut changed = false;
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_path_vertices,
+                "Path vertices",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_contour_endpoints,
+                "Contour endpoints",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_univariant_endpoints,
+                "Univariant endpoints",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_invariant_ids,
+                "Invariant node IDs",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_univariant_ids,
+                "Univariant IDs",
+            )
+            .changed();
+        changed |= ui
+            .checkbox(
+                &mut state.viewer_options.show_phase_pair_labels,
+                "Phase-pair labels",
+            )
+            .changed();
+        if changed {
+            state.mark_render_dirty();
+        }
+        ui.small("Sampling-grid edge diagnostics are unavailable for irregular source grids.");
     });
     apply
 }

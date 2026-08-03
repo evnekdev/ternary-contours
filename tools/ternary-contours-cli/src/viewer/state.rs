@@ -5,8 +5,10 @@ use std::{
     time::SystemTime,
 };
 
+use super::hit_test::SelectedFeature;
+
 use crate::{
-    LiquidusProjection, ProjectionOptions, RenderOptions, TabulatedTernaryDataset,
+    LiquidusProjection, ProjectionOptions, RenderOptions, RenderPathMode, TabulatedTernaryDataset,
     calculate_projection, parse_path,
 };
 
@@ -16,6 +18,7 @@ pub struct DirtyFlags {
     pub projection: bool,
     pub render: bool,
     pub texture: bool,
+    pub hit_geometry: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +42,12 @@ pub struct ViewerOptions {
     pub level_text: String,
     pub regularization_spacing: f64,
     pub path_display: PathDisplayMode,
+    pub show_path_vertices: bool,
+    pub show_contour_endpoints: bool,
+    pub show_univariant_endpoints: bool,
+    pub show_invariant_ids: bool,
+    pub show_univariant_ids: bool,
+    pub show_phase_pair_labels: bool,
 }
 
 impl ViewerOptions {
@@ -56,6 +65,12 @@ impl ViewerOptions {
             } else {
                 PathDisplayMode::Raw
             },
+            show_path_vertices: false,
+            show_contour_endpoints: false,
+            show_univariant_endpoints: false,
+            show_invariant_ids: false,
+            show_univariant_ids: false,
+            show_phase_pair_labels: false,
         }
     }
 }
@@ -150,6 +165,7 @@ pub struct ViewerState {
     pub viewer_options: ViewerOptions,
     pub dirty: DirtyFlags,
     pub status: ViewerStatus,
+    pub selection: Option<SelectedFeature>,
     pub last_successful_reload: Option<SystemTime>,
     generation: u64,
 }
@@ -158,10 +174,16 @@ impl ViewerState {
     pub fn new(
         input_path: PathBuf,
         calculation_options: ProjectionOptions,
-        render_options: RenderOptions,
+        mut render_options: RenderOptions,
     ) -> Self {
+        let viewer_options = ViewerOptions::from_projection(&calculation_options);
+        render_options.path_mode = match viewer_options.path_display {
+            PathDisplayMode::Raw => RenderPathMode::Raw,
+            PathDisplayMode::Regularized => RenderPathMode::Regularized,
+            PathDisplayMode::Overlay => RenderPathMode::Overlay,
+        };
         Self {
-            viewer_options: ViewerOptions::from_projection(&calculation_options),
+            viewer_options,
             input_path,
             dataset: None,
             raw_projection: None,
@@ -172,8 +194,10 @@ impl ViewerState {
                 projection: true,
                 render: true,
                 texture: true,
+                hit_geometry: true,
             },
             status: ViewerStatus::Idle,
+            selection: None,
             last_successful_reload: None,
             generation: 0,
         }
@@ -195,6 +219,8 @@ impl ViewerState {
         self.dirty.projection = true;
         self.dirty.render = true;
         self.dirty.texture = true;
+        self.dirty.hit_geometry = true;
+        self.selection = None;
         if matches!(self.status, ViewerStatus::Calculating) {
             self.status = ViewerStatus::Idle;
         }
@@ -203,6 +229,8 @@ impl ViewerState {
     pub fn mark_render_dirty(&mut self) {
         self.dirty.render = true;
         self.dirty.texture = true;
+        self.dirty.hit_geometry = true;
+        self.selection = None;
     }
 
     pub fn active_projection(&self) -> Option<&LiquidusProjection> {
@@ -234,6 +262,8 @@ impl ViewerState {
                 self.last_successful_reload = Some(SystemTime::now());
                 self.dirty.render = true;
                 self.dirty.texture = true;
+                self.dirty.hit_geometry = true;
+                self.selection = None;
             }
             WorkerResult::Failed { message, .. } => {
                 self.status = ViewerStatus::Failed(message);
@@ -250,6 +280,7 @@ impl ViewerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::{calculate_projection, parse_str};
 
     fn state() -> ViewerState {
@@ -306,6 +337,24 @@ mod tests {
         assert!(matches!(state.status, ViewerStatus::Failed(_)));
     }
 
+    #[test]
+    fn raw_and_regularized_modes_initialise_shared_render_options() {
+        let raw = state();
+        assert_eq!(raw.render_options.path_mode, RenderPathMode::Raw);
+
+        let regularized = ViewerState::new(
+            PathBuf::from("fixture.tct"),
+            ProjectionOptions {
+                regularize: true,
+                ..ProjectionOptions::default()
+            },
+            RenderOptions::default(),
+        );
+        assert_eq!(
+            regularized.render_options.path_mode,
+            RenderPathMode::Regularized
+        );
+    }
     #[test]
     fn path_mode_prefers_requested_available_projection() {
         let mut state = state();
