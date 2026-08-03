@@ -43,6 +43,44 @@ With no `--show-*` layer selection, plots show isotherms, univariants, and both
 classes of invariant by default. `--regularize` redraws the same graph with
 path regularization; it never changes the parser or numerical pipeline.
 
+## Interactive viewer
+
+The native inspection window is optional. A normal `inspect`, `validate`, or
+`plot` build does not compile GUI dependencies. Enable it only when launching a
+viewer:
+
+```text
+cargo run -p ternary-contours-cli --features viewer -- \
+    view tools/ternary-contours-cli/fixtures/interior-invariant.tct
+
+cargo run -p ternary-contours-cli --features viewer -- \
+    view data.tct --levels 800:1400:50 --sampling-subdivisions 40
+```
+
+`view` accepts the same calculation and initial layer options as `plot`
+(`--levels`, `--sampling-subdivisions`, `--regularize`, the `--show-*` layer
+flags, `--width`, `--height`, and `--title`). Without the feature it exits with
+a concise command showing how to enable it.
+
+The left panel owns the calculation and render configuration. Enter levels as a
+comma list or `start:stop:step`, then press **Apply / recalculate**. Layer,
+label, legend, marker, and path-display changes only redraw the shared Plotters
+bitmap; levels, sampling, regularization, and reload create a worker request.
+The current file is reparsed and validated by the same TCT pipeline as the
+headless commands. A malformed reload retains the last valid projection and
+texture while showing the diagnostic in the status area.
+
+Use the toolbar to reload, export SVG/PNG beside the input as
+`<input>.viewer.svg` or `<input>.viewer.png`, and fit/reset the bitmap view.
+Scroll to zoom and drag to pan. Those operations crop and scale the shared
+bitmap; they do not modify ternary coordinates. Raw, regularized, and overlay
+modes draw the paths from the cached numerical projections with distinct styles.
+Click an invariant, univariant, isotherm, or source point for its numerical and
+topological details. The Diagnostics section keeps vertices, endpoints, IDs,
+and phase-pair labels opt-in.
+
+See [`docs/interactive-viewer.md`](../../../docs/interactive-viewer.md) for a
+manual smoke-test checklist and platform notes.
 ## Complete example
 
 ```text
@@ -108,6 +146,6 @@ rather than silently selecting one. Missing values remain undefined phase
 regions; they are never converted to zero or negative infinity. Individual
 irregular phase domains may be partial, but a later calculation that lacks
 coverage reports a conversion/calculation error. There is no `.xlsx` parsing,
-unit conversion, field merging, native viewer, or direct nonlinear tracing in
-this milestone. See [`docs/tct-format.md`](../../../docs/tct-format.md) for the
-full grammar and grid semantics.
+unit conversion, field merging, or direct nonlinear tracing in this milestone.
+See [`docs/tct-format.md`](../../../docs/tct-format.md) for the full grammar and
+grid semantics.
