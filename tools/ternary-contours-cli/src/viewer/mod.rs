@@ -1,7 +1,9 @@
 //! Native interactive viewer for manual liquidus inspection.
 
 mod app;
+mod controls;
 mod state;
+mod texture;
 
 use std::{error::Error, path::PathBuf};
 
