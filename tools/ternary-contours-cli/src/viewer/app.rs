@@ -3,16 +3,24 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 use eframe::egui;
 
 use crate::{
-    OutputFormat, ProjectionOptions, RenderOptions, render_to_bitmap_with_raw,
+    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, render_to_bitmap_with_raw,
     render_to_path_with_raw,
 };
 
 use super::{
     controls,
+    data_editor::{DataEditorAction, DataEditorUi},
     hit_test::{HitGeometry, NetworkSource, SelectedFeature, ViewerTransform},
     state::{PathDisplayMode, ViewerState, ViewerStatus, WorkerResult, start_worker},
     texture::RenderedTexture,
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ViewerTab {
+    Plot,
+    Data,
+    Diagnostics,
+}
 
 pub struct LiquidusViewerApp {
     pub(crate) state: ViewerState,
@@ -21,6 +29,10 @@ pub struct LiquidusViewerApp {
     hit_geometry: HitGeometry,
     zoom: f32,
     pan: egui::Vec2,
+    editor: Option<DatasetEditorState>,
+    editor_ui: DataEditorUi,
+    tab: ViewerTab,
+    sync_editor_on_success: bool,
 }
 
 impl LiquidusViewerApp {
@@ -36,25 +48,52 @@ impl LiquidusViewerApp {
             hit_geometry: HitGeometry::default(),
             zoom: 1.0,
             pan: egui::Vec2::ZERO,
+            editor: None,
+            editor_ui: DataEditorUi::default(),
+            tab: ViewerTab::Plot,
+            sync_editor_on_success: true,
         };
         app.start_calculation();
         app
     }
 
     pub(crate) fn start_calculation(&mut self) {
+        self.start_file_calculation();
+    }
+
+    fn start_file_calculation(&mut self) {
         if self.worker.is_some() {
             return;
         }
+        self.sync_editor_on_success = true;
         let request = self.state.begin_request();
+        self.launch_request(request);
+    }
+
+    fn start_dataset_calculation(&mut self, dataset: crate::TabulatedTernaryDataset) {
+        if self.worker.is_some() {
+            return;
+        }
+        self.sync_editor_on_success = false;
+        let request = self.state.begin_dataset_request(dataset);
+        self.launch_request(request);
+    }
+
+    fn launch_request(&mut self, request: super::state::CalculationRequest) {
         match start_worker(request) {
             Ok(worker) => self.worker = Some(worker),
             Err(message) => self.state.status = ViewerStatus::Failed(message),
         }
     }
-
     fn apply_and_recalculate(&mut self) {
         match controls::apply_calculation_options(&mut self.state) {
-            Ok(()) => self.start_calculation(),
+            Ok(()) => {
+                if let Some(editor) = &self.editor {
+                    self.start_dataset_calculation(editor.active.clone());
+                } else {
+                    self.start_file_calculation();
+                }
+            }
             Err(message) => self.state.status = ViewerStatus::Failed(message),
         }
     }
@@ -67,6 +106,13 @@ impl LiquidusViewerApp {
             Ok(result) => {
                 self.worker = None;
                 let accepted = self.state.apply_worker_result(result);
+                if accepted && self.sync_editor_on_success {
+                    if let Some(dataset) = self.state.dataset.clone() {
+                        self.editor = Some(DatasetEditorState::new(dataset));
+                        self.editor_ui = DataEditorUi::default();
+                    }
+                }
+                self.sync_editor_on_success = false;
                 if !accepted && matches!(self.state.status, ViewerStatus::Calculating) {
                     self.state.status = ViewerStatus::Idle;
                 }
@@ -440,6 +486,47 @@ impl LiquidusViewerApp {
             .map(|path| self.phase_names(&[path.phases.first, path.phases.second]))
             .unwrap_or_else(|| format!("U{id}"))
     }
+    fn show_data(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let dataset = {
+            let Some(editor) = self.editor.as_mut() else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Load a valid TCT dataset before editing data.")
+                });
+                return;
+            };
+            let action = super::data_editor::show(
+                ctx,
+                ui,
+                editor,
+                &mut self.editor_ui,
+                &self.state.input_path,
+            );
+            matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
+        };
+        if let Some(dataset) = dataset {
+            self.start_dataset_calculation(dataset);
+        }
+    }
+    fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.heading("Diagnostics");
+        if let Some(editor) = &self.editor {
+            ui.label(editor.validation.as_text());
+            if ui.button("Copy editor diagnostics").clicked() {
+                ctx.copy_text(editor.validation.as_text());
+            }
+        } else {
+            ui.small("Diagnostics will be available after the first successful load.");
+        }
+        if let Some(projection) = self.state.active_projection() {
+            ui.separator();
+            ui.label(format!(
+                "projection: {} isotherms, {} invariant nodes, {} univariants",
+                projection.diagnostics.contour_path_count,
+                projection.diagnostics.invariant_count,
+                projection.diagnostics.univariant_count,
+            ));
+        }
+    }
     fn show_plot(&mut self, ui: &mut egui::Ui) {
         let Some(texture) = self.texture.as_ref() else {
             ui.centered_and_justified(|ui| {
@@ -523,24 +610,23 @@ impl eframe::App for LiquidusViewerApp {
         self.refresh_texture(ctx);
 
         let mut fit = false;
-        let mut recalculate = false;
         let can_calculate = self.worker.is_none();
+        let mut reload = false;
+        let mut recalculate = false;
         egui::TopBottomPanel::top("viewer_toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 ui.strong("Liquidus inspection viewer");
                 ui.separator();
-                if ui
-                    .add_enabled(can_calculate, egui::Button::new("Reload"))
-                    .clicked()
-                {
-                    recalculate = true;
-                }
-                if ui
+                ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
+                ui.selectable_value(&mut self.tab, ViewerTab::Data, "Data");
+                ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
+                ui.separator();
+                reload = ui
+                    .add_enabled(can_calculate, egui::Button::new("Reload file"))
+                    .clicked();
+                recalculate = ui
                     .add_enabled(can_calculate, egui::Button::new("Recalculate"))
-                    .clicked()
-                {
-                    recalculate = true;
-                }
+                    .clicked();
                 if ui.button("Export SVG").clicked() {
                     self.export_current(OutputFormat::Svg);
                 }
@@ -554,16 +640,28 @@ impl eframe::App for LiquidusViewerApp {
         });
 
         let mut apply_from_controls = false;
-        egui::SidePanel::left("viewer_controls")
-            .resizable(true)
-            .default_width(270.0)
-            .show(ctx, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    apply_from_controls = controls::show(ui, &mut self.state);
-                    self.show_selection_details(ui);
+        match self.tab {
+            ViewerTab::Plot => {
+                egui::SidePanel::left("viewer_controls")
+                    .resizable(true)
+                    .default_width(270.0)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            apply_from_controls = controls::show(ui, &mut self.state);
+                            self.show_selection_details(ui);
+                        });
+                    });
+                egui::CentralPanel::default().show(ctx, |ui| self.show_plot(ui));
+            }
+            ViewerTab::Data => {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.show_data(ctx, ui));
                 });
-            });
-        egui::CentralPanel::default().show(ctx, |ui| self.show_plot(ui));
+            }
+            ViewerTab::Diagnostics => {
+                egui::CentralPanel::default().show(ctx, |ui| self.show_diagnostics_tab(ctx, ui));
+            }
+        }
         egui::TopBottomPanel::bottom("viewer_status").show(ctx, |ui| match &self.state.status {
             ViewerStatus::Idle => ui.label("Ready to calculate."),
             ViewerStatus::Calculating => {
@@ -576,6 +674,9 @@ impl eframe::App for LiquidusViewerApp {
         if fit {
             self.zoom = 1.0;
             self.pan = egui::Vec2::ZERO;
+        }
+        if can_calculate && reload {
+            self.start_file_calculation();
         }
         if can_calculate && (recalculate || apply_from_controls) {
             self.apply_and_recalculate();

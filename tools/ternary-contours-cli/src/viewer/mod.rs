@@ -2,6 +2,7 @@
 
 mod app;
 mod controls;
+mod data_editor;
 mod hit_test;
 mod state;
 mod texture;
@@ -12,7 +13,7 @@ use crate::{ProjectionOptions, RenderOptions};
 
 pub use app::LiquidusViewerApp;
 pub use hit_test::{SelectedFeature, ViewerTransform};
-pub use state::{DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
+pub use state::{CalculationInput, DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
 
 pub fn launch(
     input_path: PathBuf,
