@@ -85,7 +85,7 @@ pub struct CalculationRequest {
 #[derive(Clone, Debug)]
 pub enum CalculationInput {
     Path(PathBuf),
-    Dataset(TabulatedTernaryDataset),
+    Dataset(Box<TabulatedTernaryDataset>),
 }
 
 #[derive(Clone, Debug)]
@@ -154,7 +154,7 @@ fn calculate_request(
 > {
     let dataset = match &request.input {
         CalculationInput::Path(path) => parse_path(path).map_err(|error| error.to_string())?,
-        CalculationInput::Dataset(dataset) => dataset.clone(),
+        CalculationInput::Dataset(dataset) => dataset.as_ref().clone(),
     };
     let mut raw_options = request.options.clone();
     raw_options.regularize = false;
@@ -239,7 +239,7 @@ impl ViewerState {
         self.dirty.projection = false;
         CalculationRequest {
             generation: self.generation,
-            input: CalculationInput::Dataset(dataset),
+            input: CalculationInput::Dataset(Box::new(dataset)),
             options: self.calculation_options.clone(),
         }
     }

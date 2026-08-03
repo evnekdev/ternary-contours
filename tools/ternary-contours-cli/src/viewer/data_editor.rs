@@ -218,14 +218,14 @@ fn grid_list(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut Dat
             });
             state.message = editor.add_grid(grid).err();
         }
-        if ui.button("Duplicate grid").clicked() {
-            if let Some(mut grid) = editor.draft.grids.get(state.selected_grid).cloned() {
-                match &mut grid {
-                    TabulatedGrid::Regular(value) => value.name.push_str("_copy"),
-                    TabulatedGrid::Irregular(value) => value.name.push_str("_copy"),
-                }
-                state.message = editor.add_grid(grid).err();
+        if ui.button("Duplicate grid").clicked()
+            && let Some(mut grid) = editor.draft.grids.get(state.selected_grid).cloned()
+        {
+            match &mut grid {
+                TabulatedGrid::Regular(value) => value.name.push_str("_copy"),
+                TabulatedGrid::Irregular(value) => value.name.push_str("_copy"),
             }
+            state.message = editor.add_grid(grid).err();
         }
         if ui.button("Remove grid").clicked() {
             state.confirm_remove = true;
