@@ -22,6 +22,12 @@ exclude = [
     "tmp/**",
 ]
 
+[workspace]
+members = [
+    "tools/ternary-contours-cli",
+]
+resolver = "3"
+
 [features]
 default = []
 cubic-alpha = ["dep:spline1d"]
