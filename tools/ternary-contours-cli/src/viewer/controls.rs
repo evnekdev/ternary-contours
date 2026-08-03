@@ -23,13 +23,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
                 .unwrap_or_default()
         ));
     }
-    if let Some(loaded) = state.last_successful_reload {
-        if let Ok(elapsed) = loaded.elapsed() {
-            ui.small(format!(
-                "last successful reload: {} s ago",
-                elapsed.as_secs()
-            ));
-        }
+    if let Some(loaded) = state.last_successful_reload
+        && let Ok(elapsed) = loaded.elapsed()
+    {
+        ui.small(format!(
+            "last successful reload: {} s ago",
+            elapsed.as_secs()
+        ));
     }
 
     ui.separator();

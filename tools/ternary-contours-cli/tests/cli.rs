@@ -85,6 +85,7 @@ fn projection_exposes_invariants_and_univariants() {
     );
 }
 
+#[cfg(not(feature = "viewer"))]
 #[test]
 fn view_without_feature_reports_enablement_guidance() {
     let output = binary()
