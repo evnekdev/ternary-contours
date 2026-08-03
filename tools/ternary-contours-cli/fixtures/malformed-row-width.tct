@@ -1,0 +1,26 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 1
+[/phases]
+[properties]
+T required K
+[/properties]
+[grid invalid]
+phase = alpha
+type = regular
+subdivisions = 1
+order = canonical
+composition_columns = none
+properties = T
+columns:
+T
+data:
+100	unexpected
+105
+110
+[/grid]

@@ -1,0 +1,27 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 1
+[/phases]
+[properties]
+T required K
+[/properties]
+[grid missing]
+type = regular
+subdivisions = 2
+order = compositions
+composition_columns = authoritative
+properties = T
+columns:
+A	B	C	alpha.T
+data:
+0	0	1	100
+0	0.5	0.5	105
+0	1	0	110
+0.5	0	0.5	115
+0.5	0.5	0	120
+[/grid]

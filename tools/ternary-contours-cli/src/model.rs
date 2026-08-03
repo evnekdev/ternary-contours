@@ -155,7 +155,9 @@ impl TabulatedTernaryDataset {
     }
 
     pub fn property(&self, name: &str) -> Option<&PropertyDefinition> {
-        self.properties.iter().find(|property| property.name == name)
+        self.properties
+            .iter()
+            .find(|property| property.name == name)
     }
 
     pub fn field_count(&self) -> usize {

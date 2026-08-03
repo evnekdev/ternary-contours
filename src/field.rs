@@ -47,7 +47,7 @@ impl<'a> CubicGridField<'a> {
         #[cfg(not(feature = "cubic-alpha"))]
         {
             let _ = (field, options);
-            return Err(FieldError::CubicFeatureUnavailable);
+            Err(FieldError::CubicFeatureUnavailable)
         }
         #[cfg(feature = "cubic-alpha")]
         {

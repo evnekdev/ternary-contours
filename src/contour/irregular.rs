@@ -674,7 +674,7 @@ fn cubic_paths(
 ) -> Result<Vec<ContourPath>, IrregularContourError> {
     #[cfg(not(feature = "irregular-cubic-alpha"))]
     {
-        return Err(IrregularContourError::CubicFeatureUnavailable);
+        Err(IrregularContourError::CubicFeatureUnavailable)
     }
     #[cfg(feature = "irregular-cubic-alpha")]
     {

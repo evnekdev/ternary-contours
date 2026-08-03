@@ -1,0 +1,30 @@
+TCT 1.0
+[components]
+A
+B
+C
+[/components]
+[phases]
+alpha = 10
+beta = 20
+gamma = 30
+[/phases]
+[properties]
+T required K
+[/properties]
+[grid binary_events]
+type = regular
+subdivisions = 2
+order = canonical
+composition_columns = none
+properties = T
+columns:
+alpha.T	beta.T	gamma.T
+data:
+100	100	120
+100	110	110
+100	120	100
+110	100	110
+110	110	100
+120	100	100
+[/grid]
