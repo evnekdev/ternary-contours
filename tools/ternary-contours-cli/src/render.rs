@@ -372,6 +372,17 @@ mod tests {
     }
 
     #[test]
+    fn plotters_memory_backend_uses_rgb_channel_order() {
+        let mut rgb = vec![0; 3];
+        {
+            let root = BitMapBackend::with_buffer(&mut rgb, (1, 1)).into_drawing_area();
+            root.fill(&RGBColor(0x12, 0x34, 0x56)).unwrap();
+            root.present().unwrap();
+        }
+        assert_eq!(rgb, [0x12, 0x34, 0x56]);
+        assert_eq!(rgb_to_rgba(&rgb), [0x12, 0x34, 0x56, 0xff]);
+    }
+    #[test]
     fn bitmap_render_has_requested_dimensions_and_plot_pixels() {
         let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
         let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();

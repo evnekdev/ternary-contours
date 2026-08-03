@@ -84,3 +84,15 @@ fn projection_exposes_invariants_and_univariants() {
             .any(|path| path.phase.0 == 10)
     );
 }
+
+#[test]
+fn view_without_feature_reports_enablement_guidance() {
+    let output = binary()
+        .args(["view", &format!("{FIXTURES}/minimal-regular.tct")])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("requires the optional `viewer` feature")
+    );
+}

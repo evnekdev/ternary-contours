@@ -129,6 +129,13 @@ identification, and boundary-connected univariant tracing. Rendering is a
 separate `plotters-ternary` step. It uses deterministic phase colours and does
 not smooth paths.
 
+The optional `ternary-contours-cli view` command consumes this same parsed and
+validated dataset. When enabled with the `viewer` Cargo feature it calculates a
+`LiquidusProjection` on a worker thread and renders the existing Plotters scene
+to an in-memory RGBA bitmap. It never uses a GUI-specific TCT reader or a
+second numerical path. See [`interactive-viewer.md`](interactive-viewer.md) for
+launch commands, reload semantics, and inspection controls.
+
 The committed fixtures under `tools/ternary-contours-cli/fixtures` demonstrate
 regular and irregular inputs, optional properties, partial domains, shuffled
 authoritative rows, metastable equality suppression, interior/binary invariants,
