@@ -15,6 +15,7 @@ pub struct ProjectionOptions {
     pub levels: Vec<f64>,
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
+    pub regularization_spacing: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -216,6 +217,13 @@ pub fn calculate_projection(
             "sampling subdivisions must be positive".into(),
         ));
     }
+    if let Some(spacing) = options.regularization_spacing
+        && (!spacing.is_finite() || spacing <= 0.0)
+    {
+        return Err(ProjectionError::Levels(
+            "regularization spacing must be finite and positive".into(),
+        ));
+    }
     let prepared = PreparedStablePhaseEnsemble::new(
         sources,
         StableContourQuantity::Height,
@@ -227,7 +235,7 @@ pub fn calculate_projection(
     let stable_contours = prepared.contours(&levels)?;
     let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
         regularization: options.regularize.then_some(PathRegularizationOptions {
-            spacing: 0.02,
+            spacing: options.regularization_spacing.unwrap_or(0.02),
             protected_endpoint_distance: 0.0,
             ..PathRegularizationOptions::default()
         }),

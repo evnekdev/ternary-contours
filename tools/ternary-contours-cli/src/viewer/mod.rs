@@ -1,13 +1,41 @@
-//! Feature-gated native viewer entry point.
+//! Native interactive viewer for manual liquidus inspection.
+
+mod app;
+mod state;
 
 use std::{error::Error, path::PathBuf};
 
 use crate::{ProjectionOptions, RenderOptions};
 
+pub use app::LiquidusViewerApp;
+pub use state::{DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
+
 pub fn launch(
-    _input_path: PathBuf,
-    _calculation_options: ProjectionOptions,
-    _render_options: RenderOptions,
+    input_path: PathBuf,
+    calculation_options: ProjectionOptions,
+    render_options: RenderOptions,
 ) -> Result<(), Box<dyn Error>> {
-    Err("the native viewer is not available in this build".into())
+    let title = render_options
+        .title
+        .clone()
+        .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([render_options.width as f32, render_options.height as f32])
+            .with_min_inner_size([640.0, 480.0])
+            .with_title(title.clone()),
+        ..eframe::NativeOptions::default()
+    };
+    eframe::run_native(
+        &title,
+        native_options,
+        Box::new(move |_| {
+            Ok(Box::new(LiquidusViewerApp::new(
+                input_path,
+                calculation_options,
+                render_options,
+            )))
+        }),
+    )?;
+    Ok(())
 }
