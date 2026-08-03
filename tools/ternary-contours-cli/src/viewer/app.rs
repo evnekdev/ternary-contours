@@ -245,6 +245,9 @@ impl LiquidusViewerApp {
             ui.small("Click an invariant, univariant, isotherm, or source point to inspect it.");
             return;
         };
+        if ui.button("Copy selection details").clicked() {
+            ui.ctx().copy_text(format!("{selection:?}"));
+        }
         match selection {
             SelectedFeature::Invariant { node_index } => {
                 let Some(node) = self

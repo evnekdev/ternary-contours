@@ -80,7 +80,14 @@ pub fn serialize_tct(
         output.push_str(&quoted(units)?);
         output.push('\n');
     }
-    let missing = &options.missing_token;
+    let missing = if options.missing_token == "NA" {
+        dataset
+            .missing_tokens
+            .first()
+            .unwrap_or(&options.missing_token)
+    } else {
+        &options.missing_token
+    };
     output.push_str("default_missing = ");
     output.push_str(missing);
     output.push_str("\n\n[components]\n");

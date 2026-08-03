@@ -97,3 +97,68 @@ fn view_without_feature_reports_enablement_guidance() {
         String::from_utf8_lossy(&output.stderr).contains("requires the optional `viewer` feature")
     );
 }
+
+#[test]
+fn composition_and_template_commands_emit_deterministic_tsv() {
+    let output = binary()
+        .args([
+            "compositions",
+            "--subdivisions",
+            "2",
+            "--components",
+            "A,B,C",
+            "--header",
+            "--precision",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "A\tB\tC\n0.0\t0.0\t1.0\n0.0\t0.5\t0.5\n0.0\t1.0\t0.0\n0.5\t0.0\t0.5\n0.5\t0.5\t0.0\n1.0\t0.0\t0.0\n"
+    );
+
+    let folder =
+        std::env::temp_dir().join(format!("ternary-contours-template-{}", std::process::id()));
+    fs::create_dir_all(&folder).unwrap();
+    let regular = folder.join("regular.tct");
+    let result = binary()
+        .args([
+            "template",
+            "regular",
+            "--subdivisions",
+            "2",
+            "--components",
+            "A,B,C",
+            "--fields",
+            "alpha.T,beta.T",
+            "--output",
+            regular.to_str().unwrap(),
+        ])
+        .output()
+        .unwrap();
+    assert!(result.status.success());
+    let template = fs::read_to_string(&regular).unwrap();
+    assert!(template.contains("subdivisions = 2"));
+    assert_eq!(template.lines().filter(|line| *line == "NA\tNA").count(), 6);
+
+    let irregular = binary()
+        .args([
+            "template",
+            "irregular",
+            "--components",
+            "A,B,C",
+            "--fields",
+            "alpha.T",
+            "--style",
+            "tsv-header",
+        ])
+        .output()
+        .unwrap();
+    assert!(irregular.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&irregular.stdout),
+        "A\tB\tC\talpha.T\n"
+    );
+}

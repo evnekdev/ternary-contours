@@ -149,3 +149,21 @@ coverage reports a conversion/calculation error. There is no `.xlsx` parsing,
 unit conversion, field merging, or direct nonlinear tracing in this milestone.
 See [`docs/tct-format.md`](../../../docs/tct-format.md) for the full grammar and
 grid semantics.
+## Grid data entry and templates
+
+Headless Excel-compatible TSV generation does not require the viewer:
+
+```text
+cargo run -p ternary-contours-cli -- compositions --subdivisions 20 --components A,B,C --header
+cargo run -p ternary-contours-cli -- template regular --subdivisions 20 --components A,B,C --fields alpha.T,beta.T --output regular-template.tct
+cargo run -p ternary-contours-cli -- template irregular --components A,B,C --fields alpha.T --style tsv-header
+```
+
+The `compositions` command is the canonical `RegularTernaryGrid` order. Regular
+TCT templates contain `NA` scalar placeholders intentionally, so validation
+reports missing required `T` values until values are pasted. With the `viewer`
+feature, the **Data** tab offers regular/irregular TSV preview, validation,
+explicit add/replace semantics, dataset-level undo/redo, deterministic save,
+and recalculation using the same projection worker. See
+[`docs/grid-data-entry.md`](../../../docs/grid-data-entry.md) for the complete
+Excel workflows.

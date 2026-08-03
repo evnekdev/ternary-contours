@@ -140,3 +140,14 @@ The committed fixtures under `tools/ternary-contours-cli/fixtures` demonstrate
 regular and irregular inputs, optional properties, partial domains, shuffled
 authoritative rows, metastable equality suppression, interior/binary invariants,
 and key malformed cases.
+
+## TSV authoring helpers
+
+The CLI `compositions` command emits canonical regular compositions as literal
+TSV, and `template regular` / `template irregular` emit deterministic entry
+scaffolds. The native Data tab consumes the same low-level TSV row parser as
+TCT table data, then applies edits only by rebuilding a neutral
+`TabulatedTernaryDataset` and validating it with this parser. It never routes
+edited data through a GUI-specific numerical format. Regular templates contain
+missing scalar placeholders by design; required `T` values must be populated
+before the document validates. See [`grid-data-entry.md`](grid-data-entry.md).

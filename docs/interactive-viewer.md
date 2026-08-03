@@ -101,3 +101,14 @@ interior-invariant fixture opened through the `eframe` glow backend and ran
 without a startup error; the test process was then closed after launch. Full
 visual interaction remains a desktop checklist because the automated suite
 intentionally requires no display server.
+## Data entry
+
+Milestone 22 adds **Plot**, **Data**, and **Diagnostics** navigation. The Data
+tab keeps active data, an editable draft, and a paste preview separate from the
+last valid projection. Regular grids copy exact canonical compositions and
+accept values-only, guidance, or authoritative composition TSV. Irregular grids
+accept mapped composition/property columns with explicit normalization policy.
+Preview diagnostics are copyable and include source row/column errors; apply,
+apply-and-recalculate, revert, undo/redo, save, and Save As are explicit.
+Calculation still uses the existing worker and retains the last valid plot on
+failure. See [`grid-data-entry.md`](grid-data-entry.md).

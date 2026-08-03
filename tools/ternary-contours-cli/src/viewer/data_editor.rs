@@ -121,6 +121,17 @@ fn declarations(ui: &mut egui::Ui, editor: &mut DatasetEditorState) {
                 if ui.text_edit_singleline(&mut property.unit).changed() { editor.dirty = true; }
             });
         }
+        ui.horizontal(|ui| {
+            if ui.button("Add phase declaration").clicked() {
+                let next = editor.draft.phases.iter().map(|phase| phase.id.0).max().unwrap_or(0).saturating_add(1);
+                editor.draft.phases.push(crate::PhaseDefinition { name: format!("phase_{next}"), id: ternary_contours::StablePhaseId(next), line: 0 });
+                editor.dirty = true;
+            }
+            if ui.button("Add optional property").clicked() {
+                editor.draft.properties.push(crate::PropertyDefinition { name: "property".into(), required: false, unit: "1".into(), line: 0 });
+                editor.dirty = true;
+            }
+        });
         ui.small("The existing validator requires one declaration named T marked required.");
     });
 }
@@ -194,6 +205,18 @@ fn grid_list(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut Dat
                 }
                 Err(error) => state.message = Some(error),
             }
+        }
+        if ui.button("Add irregular draft grid").clicked() {
+            let grid = TabulatedGrid::Irregular(crate::IrregularTabulatedGrid {
+                name: format!("irregular_grid_{}", editor.draft.grids.len() + 1),
+                source: crate::SourceRange {
+                    first_line: 0,
+                    last_line: 0,
+                },
+                compositions: Vec::new(),
+                fields: Vec::new(),
+            });
+            state.message = editor.add_grid(grid).err();
         }
         if ui.button("Duplicate grid").clicked() {
             if let Some(mut grid) = editor.draft.grids.get(state.selected_grid).cloned() {
@@ -550,24 +573,38 @@ fn automatic_fields(
             .iter()
             .enumerate()
             .filter_map(|(column, header)| {
-                grid.fields().iter().find_map(|field| {
+                if let Some((phase_name, property)) = header.split_once('.') {
                     let phase = editor
                         .draft
                         .phases
                         .iter()
-                        .find(|phase| phase.id == field.phase_id)?;
-                    let qualified = format!("{}.{}", phase.name, field.property);
-                    (header == &qualified || header == &field.column_name).then(|| {
-                        FieldColumnMapping {
+                        .find(|phase| phase.name == phase_name)?;
+                    editor
+                        .draft
+                        .properties
+                        .iter()
+                        .any(|candidate| candidate.name == property)
+                        .then(|| FieldColumnMapping {
+                            source_column: column,
+                            destination: FieldKey {
+                                phase_id: phase.id,
+                                property: property.to_owned(),
+                            },
+                            label: header.clone(),
+                        })
+                } else {
+                    grid.fields()
+                        .iter()
+                        .find(|field| header == &field.column_name)
+                        .map(|field| FieldColumnMapping {
                             source_column: column,
                             destination: FieldKey {
                                 phase_id: field.phase_id,
                                 property: field.property.clone(),
                             },
-                            label: qualified,
-                        }
-                    })
-                })
+                            label: field.column_name.clone(),
+                        })
+                }
             })
             .collect::<Vec<_>>();
         if !mapped.is_empty() {
@@ -577,7 +614,7 @@ fn automatic_fields(
     grid.fields()
         .get(selected_field)
         .map(|field| FieldColumnMapping {
-            source_column: if header { 0 } else { 0 },
+            source_column: 0,
             destination: FieldKey {
                 phase_id: field.phase_id,
                 property: field.property.clone(),
@@ -587,7 +624,6 @@ fn automatic_fields(
         .into_iter()
         .collect()
 }
-
 fn component_columns(editor: &DatasetEditorState, text: &str, header: bool) -> Option<[usize; 3]> {
     let headers = header.then(|| {
         crate::ParsedTable::parse_tsv(text, HeaderMode::Present)
