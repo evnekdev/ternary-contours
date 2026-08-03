@@ -87,10 +87,18 @@ impl From<FormatArg> for OutputFormat {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
+    let verbose = cli.verbose;
     match run(cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
+            if verbose {
+                let mut cause = error.source();
+                while let Some(error) = cause {
+                    eprintln!("caused by: {error}");
+                    cause = error.source();
+                }
+            }
             ExitCode::from(2)
         }
     }
