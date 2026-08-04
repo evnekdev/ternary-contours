@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use ternary_contours::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
-    FieldInterpolation, IrregularTernaryMesh, PathRegularizationOptions,
+    CubicPartialDomainPolicy, FieldInterpolation, IrregularTernaryMesh, PathRegularizationOptions,
     PreparedStablePhaseEnsemble, RegularTernaryGrid, RegularTernaryScalarField,
     StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity, StableContourSet,
     StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
@@ -10,13 +10,15 @@ use ternary_contours::{
 };
 
 use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
+#[cfg(feature = "viewer")]
+use ternary_contours::{PartialCubicGridField, RegularTernaryPartialScalarField};
 
 /// Source interpolation family used consistently for every participating phase.
 ///
 /// Cubic-alpha is a regular-grid model derived from one-dimensional edge slopes;
-/// its continuation policy controls ternary interior evaluation. It is rejected
-/// for fields containing classified undefined values so interpolation never
-/// bridges `NA`, `NE`, or `CO` source regions.
+/// its continuation policy controls ternary interior evaluation. Classified
+/// undefined values use the selected partial-domain policy and never enter a
+/// finite stencil or get bridged by an invented scalar.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum SourceInterpolation {
     /// Piecewise-affine source evaluation.
@@ -41,6 +43,7 @@ impl SourceInterpolation {
                 method,
                 boundary_policy: CubicBoundaryPolicy::LinearFallback,
                 extrapolation: continuation,
+                partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
             }),
         }
     }
@@ -54,6 +57,9 @@ pub struct ProjectionOptions {
     pub regularize: bool,
     pub regularization_spacing: Option<f64>,
     pub source_interpolation: SourceInterpolation,
+    /// Policy used when cubic-alpha source fields contain classified undefined
+    /// samples. The viewer defaults to one-sided cubic followed by linear.
+    pub partial_domain_policy: CubicPartialDomainPolicy,
 }
 
 #[derive(Clone, Debug)]
@@ -72,6 +78,8 @@ pub struct ProjectionDiagnostics {
     pub invariant_count: usize,
     pub stable_polygon_count: usize,
     pub univariant_count: usize,
+    /// Local interpolation summaries for partial regular cubic-alpha fields.
+    pub partial_cubic_summaries: Vec<String>,
 }
 
 /// Numerical output shared by terminal reporting and static renderers.
@@ -161,6 +169,8 @@ struct RuntimePhase {
 enum PhaseSourceModel {
     Evaluator(RuntimePhase),
     CubicRegular(RegularTernaryScalarField),
+    #[cfg(feature = "viewer")]
+    CubicPartial(RegularTernaryPartialScalarField),
 }
 
 impl StablePhaseEvaluator for RuntimePhase {
@@ -243,6 +253,8 @@ pub fn calculate_projection(
     let mut extrema = Vec::new();
     let mut unavailable_fields = Vec::new();
     let mut source_coverage = Vec::new();
+    #[allow(unused_mut)]
+    let mut partial_cubic_summaries = Vec::new();
     for grid in &dataset.grids {
         match grid {
             TabulatedGrid::Regular(_) => regular_grid_count += 1,
@@ -308,8 +320,11 @@ pub fn calculate_projection(
                         .values
                         .iter()
                         .map(TabulatedValue::calculated_value)
-                        .collect::<Option<Vec<_>>>()
-                        .ok_or_else(|| ProjectionError::CubicSourceIncomplete {
+                        .collect::<Vec<_>>();
+                    if options.partial_domain_policy == CubicPartialDomainPolicy::Strict
+                        && values.iter().any(Option::is_none)
+                    {
+                        return Err(ProjectionError::CubicSourceIncomplete {
                             grid: grid.name.clone(),
                             phase: phase.clone(),
                             property: field.property.clone(),
@@ -317,16 +332,69 @@ pub fn calculate_projection(
                             non_existing: counts[1],
                             cut_off: counts[2],
                             missing: counts[3],
-                        })?;
-                    let cubic = RegularTernaryScalarField::new(grid.subdivisions, values).map_err(
-                        |error| ProjectionError::CubicSourceConstruction {
-                            grid: grid.name.clone(),
-                            phase,
-                            property: field.property.clone(),
-                            message: error.to_string(),
-                        },
-                    )?;
-                    PhaseSourceModel::CubicRegular(cubic)
+                        });
+                    }
+                    if values.iter().all(Option::is_some) {
+                        let complete = values.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+                        let cubic = RegularTernaryScalarField::new(grid.subdivisions, complete)
+                            .map_err(|error| ProjectionError::CubicSourceConstruction {
+                                grid: grid.name.clone(),
+                                phase: phase.clone(),
+                                property: field.property.clone(),
+                                message: error.to_string(),
+                            })?;
+                        PhaseSourceModel::CubicRegular(cubic)
+                    } else {
+                        #[cfg(feature = "viewer")]
+                        {
+                            let partial =
+                                RegularTernaryPartialScalarField::new(grid.subdivisions, values)
+                                    .map_err(|error| ProjectionError::CubicSourceConstruction {
+                                        grid: grid.name.clone(),
+                                        phase: phase.clone(),
+                                        property: field.property.clone(),
+                                        message: error.to_string(),
+                                    })?;
+                            let mut cubic_options = options
+                                .source_interpolation
+                                .cubic_options()
+                                .expect("cubic source model carries cubic options");
+                            cubic_options.partial_domain_policy = options.partial_domain_policy;
+                            let preview =
+                                PartialCubicGridField::new(partial.clone(), cubic_options)
+                                    .map_err(|error| ProjectionError::CubicSourceConstruction {
+                                        grid: grid.name.clone(),
+                                        phase: phase.clone(),
+                                        property: field.property.clone(),
+                                        message: error.to_string(),
+                                    })?;
+                            let diagnostics = preview.diagnostics();
+                            partial_cubic_summaries.push(format!(
+                                "{} {}.{}: cubic triangles {}, one-sided cubic triangles {}, linear fallback triangles {}, undefined triangles {}",
+                                grid.name,
+                                phase,
+                                field.property,
+                                diagnostics.cubic_triangles,
+                                diagnostics.one_sided_cubic_triangles,
+                                diagnostics.linear_fallback_triangles,
+                                diagnostics.undefined_triangles,
+                            ));
+                            PhaseSourceModel::CubicPartial(partial)
+                        }
+                        #[cfg(not(feature = "viewer"))]
+                        {
+                            let _ = values;
+                            return Err(ProjectionError::CubicSourceIncomplete {
+                                grid: grid.name.clone(),
+                                phase: phase.clone(),
+                                property: field.property.clone(),
+                                calculated: counts[0],
+                                non_existing: counts[1],
+                                cut_off: counts[2],
+                                missing: counts[3],
+                            });
+                        }
+                    }
                 }
                 (SourceInterpolation::CubicAlpha { .. }, TabulatedGrid::Irregular(grid)) => {
                     return Err(ProjectionError::CubicIrregularUnavailable {
@@ -373,15 +441,29 @@ pub fn calculate_projection(
         .map(|(phase, model)| {
             let source = match model {
                 PhaseSourceModel::Evaluator(evaluator) => StableScalarSource::evaluator(evaluator),
-                PhaseSourceModel::CubicRegular(field) => StableScalarSource::regular(
-                    field,
-                    FieldInterpolation::CubicAlpha(
-                        options
-                            .source_interpolation
-                            .cubic_options()
-                            .expect("cubic source model carries cubic options"),
-                    ),
-                ),
+                PhaseSourceModel::CubicRegular(field) => {
+                    let mut cubic_options = options
+                        .source_interpolation
+                        .cubic_options()
+                        .expect("cubic source model carries cubic options");
+                    cubic_options.partial_domain_policy = options.partial_domain_policy;
+                    StableScalarSource::regular(
+                        field,
+                        FieldInterpolation::CubicAlpha(cubic_options),
+                    )
+                }
+                #[cfg(feature = "viewer")]
+                PhaseSourceModel::CubicPartial(field) => {
+                    let mut cubic_options = options
+                        .source_interpolation
+                        .cubic_options()
+                        .expect("cubic source model carries cubic options");
+                    cubic_options.partial_domain_policy = options.partial_domain_policy;
+                    StableScalarSource::partial_regular(
+                        field,
+                        FieldInterpolation::CubicAlpha(cubic_options),
+                    )
+                }
             };
             StablePhaseSource::new(phase.id, source)
         })
@@ -465,6 +547,7 @@ pub fn calculate_projection(
         stable_polygon_count: stable_contours.diagnostics.nonempty_stable_polygons,
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
+        partial_cubic_summaries,
     };
     Ok(LiquidusProjection {
         levels,
@@ -620,9 +703,18 @@ mod tests {
 
     #[cfg(feature = "viewer")]
     #[test]
-    fn cubic_alpha_refuses_partial_domains_without_filling_classified_cells() {
-        let dataset = parse_str(include_str!("../fixtures/partial-phase-domain.tct")).unwrap();
-        let error = calculate_projection(
+    fn cubic_alpha_partial_regular_domains_use_local_fallbacks() {
+        let mut dataset = crate::default_regular_dataset();
+        if let TabulatedGrid::Regular(grid) = &mut dataset.grids[0] {
+            for field in &mut grid.fields {
+                for (index, value) in field.values.iter_mut().enumerate() {
+                    *value = TabulatedValue::calculated((index + field.phase_id.0 as usize) as f64)
+                        .unwrap();
+                }
+            }
+            grid.fields[0].values[0] = TabulatedValue::missing();
+        }
+        let projection = calculate_projection(
             &dataset,
             &ProjectionOptions {
                 source_interpolation: SourceInterpolation::CubicAlpha {
@@ -632,13 +724,39 @@ mod tests {
                 ..ProjectionOptions::default()
             },
         )
+        .unwrap();
+        assert_eq!(projection.input_summary.phase_count, 3);
+        assert!(projection.diagnostics.stable_polygon_count > 0);
+    }
+
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn cubic_alpha_strict_policy_retains_explicit_partial_rejection() {
+        let mut dataset = crate::default_regular_dataset();
+        if let TabulatedGrid::Regular(grid) = &mut dataset.grids[0] {
+            for field in &mut grid.fields {
+                for (index, value) in field.values.iter_mut().enumerate() {
+                    *value = TabulatedValue::calculated((index + 1) as f64).unwrap();
+                }
+            }
+            grid.fields[0].values[0] = TabulatedValue::missing();
+        }
+        let error = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                source_interpolation: SourceInterpolation::CubicAlpha {
+                    method: CubicAlphaMethod::Akima,
+                    continuation: BinaryExtrapolation::Muggianu,
+                },
+                partial_domain_policy: CubicPartialDomainPolicy::Strict,
+                ..ProjectionOptions::default()
+            },
+        )
         .unwrap_err();
         assert!(matches!(
             error,
             ProjectionError::CubicSourceIncomplete { .. }
-                | ProjectionError::CubicIrregularUnavailable { .. }
         ));
-        assert!(error.to_string().contains("grid"));
     }
 
     #[test]
@@ -667,3 +785,4 @@ mod tests {
         );
     }
 }
+
