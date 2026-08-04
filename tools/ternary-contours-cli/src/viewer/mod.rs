@@ -3,6 +3,7 @@
 mod app;
 mod controls;
 mod data_editor;
+mod grid_inspection;
 mod hit_test;
 mod save;
 mod state;
