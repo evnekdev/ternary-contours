@@ -79,13 +79,24 @@ cargo run -p ternary-contours-cli --features viewer -- \
 flags, `--width`, `--height`, and `--title`). Without the feature it exits with
 a concise command showing how to enable it.
 
-The left panel owns the calculation and render configuration. Enter levels as a
-comma list or `start:stop:step`, then press **Apply / recalculate**. Layer,
-label, legend, marker, and path-display changes only redraw the shared Plotters
-bitmap; levels, sampling, regularization, and reload create a worker request.
-The current file is reparsed and validated by the same TCT pipeline as the
-headless commands. A malformed reload retains the last valid projection and
-texture while showing the diagnostic in the status area.
+The document-first top-level navigation order is **Data**, **Diagnostics**,
+**Grid inspection**, then **Plot**. An Untitled document starts on Data; a
+successfully calculated file opens on Plot. The Plot-side panel owns calculation
+and render configuration. Enter levels as a comma list or `start:stop:step`;
+valid levels, sampling, and regularization text commit on Enter or focus loss
+and coalesce into a short debounced worker recalculation. **Recalculate now**
+remains available for recovery. Layer, label, legend, marker, and path-display
+changes only redraw the shared Plotters bitmap.
+
+Source interpolation is Linear by default, so denser sampling refines contour
+extraction but leaves each source-cell evaluation planar. Complete regular
+fields can select Cubic alpha in the viewer, choose Akima, Makima, PCHIP, or
+Steffen edge slopes, and choose Raw barycentric, Muggianu, or Kohler
+continuation. The viewer rejects cubic interpolation across classified undefined
+values and disables it for participating irregular fields. The current file is
+reparsed and validated by the same TCT pipeline as the headless commands. A
+malformed reload retains the last valid projection and texture while showing the
+diagnostic in the status area.
 
 Use the toolbar to reload, export SVG/PNG beside the input as
 `<input>.viewer.svg` or `<input>.viewer.png`, and fit/reset the bitmap view.
@@ -94,7 +105,10 @@ bitmap; they do not modify ternary coordinates. Raw, regularized, and overlay
 modes draw the paths from the cached numerical projections with distinct styles.
 Click an invariant, univariant, isotherm, or source point for its numerical and
 topological details. The Diagnostics section keeps vertices, endpoints, IDs,
-and phase-pair labels opt-in.
+and phase-pair labels opt-in. It also reports source coverage and the semantic
+`A`/`B`/`C` corner mapping. Ordinary bitmap, SVG, and PNG plots use component
+names at their pure corners only; they do not export barycentric coordinate
+vectors.
 
 See [`docs/interactive-viewer.md`](../../../docs/interactive-viewer.md) for a
 manual smoke-test checklist and platform notes.
