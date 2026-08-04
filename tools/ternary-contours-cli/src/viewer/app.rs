@@ -14,7 +14,9 @@ use super::{
     controls,
     data_editor::{DataEditorAction, DataEditorUi},
     hit_test::{HitGeometry, NetworkSource, SelectedFeature, ViewerTransform},
-    state::{PathDisplayMode, ViewerState, ViewerStatus, WorkerResult, start_worker},
+    state::{
+        CalculationRequest, PathDisplayMode, ViewerState, ViewerStatus, WorkerResult, start_worker,
+    },
     texture::RenderedTexture,
 };
 
@@ -36,6 +38,7 @@ pub struct LiquidusViewerApp {
     editor_ui: DataEditorUi,
     tab: ViewerTab,
     sync_editor_on_success: bool,
+    pending_request: Option<CalculationRequest>,
 }
 
 impl LiquidusViewerApp {
@@ -55,6 +58,7 @@ impl LiquidusViewerApp {
             editor_ui: DataEditorUi::default(),
             tab: ViewerTab::Plot,
             sync_editor_on_success: true,
+            pending_request: None,
         };
         app.start_calculation();
         app
@@ -77,6 +81,7 @@ impl LiquidusViewerApp {
             editor_ui: DataEditorUi::default(),
             tab: ViewerTab::Data,
             sync_editor_on_success: false,
+            pending_request: None,
         }
     }
     pub(crate) fn start_calculation(&mut self) {
@@ -84,27 +89,32 @@ impl LiquidusViewerApp {
     }
 
     fn start_file_calculation(&mut self) {
-        if self.worker.is_some() {
-            return;
-        }
         self.sync_editor_on_success = true;
         let request = self.state.begin_request();
-        self.launch_request(request);
+        self.queue_request(request);
     }
 
     fn start_dataset_calculation(&mut self, dataset: crate::TabulatedTernaryDataset) {
-        if self.worker.is_some() {
-            return;
-        }
         self.sync_editor_on_success = false;
         let request = self.state.begin_dataset_request(dataset);
-        self.launch_request(request);
+        self.queue_request(request);
     }
 
-    fn launch_request(&mut self, request: super::state::CalculationRequest) {
+    fn queue_request(&mut self, request: CalculationRequest) {
+        if self.worker.is_some() {
+            self.pending_request = Some(request);
+        } else {
+            self.launch_request(request);
+        }
+    }
+
+    fn launch_request(&mut self, request: CalculationRequest) {
         match start_worker(request) {
             Ok(worker) => self.worker = Some(worker),
-            Err(message) => self.state.status = ViewerStatus::Failed(message),
+            Err(message) => {
+                self.state.status = ViewerStatus::Failed(message.clone());
+                self.state.message = Some(format!("Calculation failed: {message}"));
+            }
         }
     }
     fn apply_and_recalculate(&mut self) {
@@ -116,7 +126,10 @@ impl LiquidusViewerApp {
                     self.start_file_calculation();
                 }
             }
-            Err(message) => self.state.status = ViewerStatus::Failed(message),
+            Err(message) => {
+                self.state.status = ViewerStatus::Failed(message.clone());
+                self.state.message = Some(format!("Calculation failed: {message}"));
+            }
         }
     }
 
@@ -128,6 +141,19 @@ impl LiquidusViewerApp {
             Ok(result) => {
                 self.worker = None;
                 let accepted = self.state.apply_worker_result(result);
+                if accepted {
+                    self.texture = None;
+                    if let Some(dataset) = self.state.dataset.as_ref() {
+                        let title = self
+                            .state
+                            .render_options
+                            .title
+                            .as_deref()
+                            .or(dataset.title.as_deref())
+                            .unwrap_or("Untitled ternary system");
+                        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.to_owned()));
+                    }
+                }
                 if accepted
                     && self.sync_editor_on_success
                     && let Some(dataset) = self.state.dataset.clone()
@@ -139,11 +165,23 @@ impl LiquidusViewerApp {
                 if !accepted && matches!(self.state.status, ViewerStatus::Calculating) {
                     self.state.status = ViewerStatus::Idle;
                 }
+                if let Some(request) = self.pending_request.take() {
+                    self.launch_request(request);
+                }
                 ctx.request_repaint();
             }
             Err(TryRecvError::Disconnected) => {
                 self.worker = None;
-                self.state.status = ViewerStatus::Failed("calculation worker disconnected".into());
+                if let Some(request) = self.pending_request.take() {
+                    self.launch_request(request);
+                } else {
+                    self.state.status =
+                        ViewerStatus::Failed("calculation worker disconnected".into());
+                    self.state.message = Some(
+                        "Calculation failed: worker disconnected; displaying the previous valid plot."
+                            .into(),
+                    );
+                }
             }
             Err(TryRecvError::Empty) => {
                 ctx.request_repaint_after(std::time::Duration::from_millis(80));
@@ -215,13 +253,19 @@ impl LiquidusViewerApp {
                         self.state.dirty.render = false;
                         self.state.dirty.texture = false;
                     }
-                    Err(message) => self.state.status = ViewerStatus::Failed(message),
+                    Err(message) => {
+                        self.state.status = ViewerStatus::Failed(message.clone());
+                        self.state.message = Some(format!("Rendering failed: {message}"));
+                    }
                 }
             }
-            Err(error) => self.state.status = ViewerStatus::Failed(error.to_string()),
+            Err(error) => {
+                let message = error.to_string();
+                self.state.status = ViewerStatus::Failed(message.clone());
+                self.state.message = Some(format!("Rendering failed: {message}"));
+            }
         }
     }
-
     fn export_current(&mut self, format: OutputFormat) {
         let result = {
             let Some(dataset) = self.state.dataset.as_ref() else {
@@ -596,7 +640,17 @@ impl LiquidusViewerApp {
     }
     fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
+        if let Some(message) = &self.state.message {
+            ui.colored_label(egui::Color32::RED, message);
+            if self.state.raw_projection.is_some() {
+                ui.small("The previous valid projection remains displayed.");
+            }
+            if ui.button("Copy calculation message").clicked() {
+                ctx.copy_text(message.clone());
+            }
+        }
         if let Some(editor) = &self.editor {
+            ui.separator();
             ui.label(editor.validation.as_text());
             if ui.button("Copy editor diagnostics").clicked() {
                 ctx.copy_text(editor.validation.as_text());
@@ -605,22 +659,49 @@ impl LiquidusViewerApp {
             ui.small("Diagnostics will be available after the first successful load.");
         }
         if let Some(projection) = self.state.active_projection() {
+            let binary = projection
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Binary(_)))
+                .count();
+            let interior = projection
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Interior(_)))
+                .count();
             ui.separator();
             ui.label(format!(
-                "projection: {} isotherms, {} invariant nodes, {} univariants",
+                "projection: {} stable polygons, {} isotherms, {} invariant nodes ({} binary, {} interior), {} univariants",
+                projection.diagnostics.stable_polygon_count,
                 projection.diagnostics.contour_path_count,
                 projection.diagnostics.invariant_count,
+                binary,
+                interior,
                 projection.diagnostics.univariant_count,
+            ));
+            ui.label(format!(
+                "temperature range: {:.6} to {:.6}",
+                projection.input_summary.temperature_range[0],
+                projection.input_summary.temperature_range[1],
             ));
         }
     }
     fn show_plot(&mut self, ui: &mut egui::Ui) {
         let Some(texture) = self.texture.as_ref() else {
-            ui.centered_and_justified(|ui| {
-                if matches!(self.state.status, ViewerStatus::Calculating) {
+            ui.centered_and_justified(|ui| match &self.state.status {
+                ViewerStatus::Calculating => {
                     ui.spinner();
-                    ui.label("Parsing and calculating the stable liquidus projection...");
-                } else {
+                    ui.label("Calculating the current dataset...");
+                }
+                ViewerStatus::Failed(message) => {
+                    ui.colored_label(egui::Color32::RED, message);
+                    if self.state.raw_projection.is_some() {
+                        ui.label("The previous valid projection remains displayed.");
+                    }
+                }
+                _ => {
                     ui.label("A valid projection will appear here after calculation.");
                 }
             });
@@ -684,9 +765,31 @@ impl LiquidusViewerApp {
                 egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
             );
         }
+        if let ViewerStatus::Failed(message) = &self.state.status {
+            let overlay = egui::Rect::from_min_size(
+                viewport.min + egui::vec2(12.0, 12.0),
+                egui::vec2((viewport.width() - 24.0).max(120.0), 58.0),
+            );
+            painter.rect_filled(overlay, 4.0, egui::Color32::from_black_alpha(190));
+            painter.text(
+                overlay.left_top() + egui::vec2(10.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                message,
+                egui::FontId::proportional(14.0),
+                egui::Color32::LIGHT_RED,
+            );
+            if self.state.raw_projection.is_some() {
+                painter.text(
+                    overlay.left_bottom() - egui::vec2(-10.0, 8.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    "Previous valid projection shown",
+                    egui::FontId::proportional(12.0),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
     }
 }
-
 fn format_composition([a, b, c]: [f64; 3]) -> String {
     format!("({a:.5}, {b:.5}, {c:.5})")
 }

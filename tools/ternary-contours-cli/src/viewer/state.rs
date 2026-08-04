@@ -252,6 +252,7 @@ impl ViewerState {
     pub fn begin_request(&mut self) -> CalculationRequest {
         self.generation = self.generation.saturating_add(1);
         self.status = ViewerStatus::Calculating;
+        self.message = None;
         self.dirty.projection = false;
         CalculationRequest {
             generation: self.generation,
@@ -266,6 +267,7 @@ impl ViewerState {
     ) -> CalculationRequest {
         self.generation = self.generation.saturating_add(1);
         self.status = ViewerStatus::Calculating;
+        self.message = None;
         self.dirty.projection = false;
         CalculationRequest {
             generation: self.generation,
@@ -309,6 +311,7 @@ impl ViewerState {
         }
         match result {
             WorkerResult::Ready { output, .. } => {
+                self.message = None;
                 self.dataset = Some(output.dataset);
                 self.raw_projection = Some(output.raw_projection);
                 self.regularized_projection = output.regularized_projection;
@@ -320,7 +323,13 @@ impl ViewerState {
                 self.selection = None;
             }
             WorkerResult::Failed { message, .. } => {
-                self.status = ViewerStatus::Failed(message);
+                let has_previous = self.raw_projection.is_some();
+                self.status = ViewerStatus::Failed(message.clone());
+                self.message = Some(if has_previous {
+                    format!("Calculation failed; displaying the previous valid plot: {message}")
+                } else {
+                    format!("Calculation failed: {message}")
+                });
             }
         }
         true
@@ -380,6 +389,27 @@ mod tests {
             generation: request.generation,
             message: "stale".into(),
         }));
+    }
+
+    #[test]
+    fn accepted_worker_result_replaces_dataset_and_invalidates_render_geometry() {
+        let old_dataset = parse_str(include_str!("../../fixtures/minimal-regular.tct")).unwrap();
+        let new_dataset = old_dataset.clone();
+        let projection = calculate_projection(&new_dataset, &ProjectionOptions::default()).unwrap();
+        let mut state = state();
+        let request = state.begin_dataset_request(new_dataset.clone());
+        assert!(state.apply_worker_result(WorkerResult::Ready {
+            generation: request.generation,
+            output: Box::new(CalculationOutput {
+                dataset: new_dataset.clone(),
+                raw_projection: projection,
+                regularized_projection: None,
+            }),
+        }));
+        assert_eq!(state.dataset, Some(new_dataset));
+        assert!(state.dirty.texture);
+        assert!(state.dirty.hit_geometry);
+        assert!(matches!(state.status, ViewerStatus::Ready));
     }
 
     #[test]

@@ -32,6 +32,7 @@ pub struct ProjectionDiagnostics {
     pub regularized: bool,
     pub contour_path_count: usize,
     pub invariant_count: usize,
+    pub stable_polygon_count: usize,
     pub univariant_count: usize,
 }
 
@@ -56,6 +57,14 @@ pub enum ProjectionError {
     },
     #[error("invalid projection levels: {0}")]
     Levels(String),
+    #[error(
+        "no contour paths were produced because the requested levels do not intersect the calculated temperature range: {minimum} to {maximum} {unit}"
+    )]
+    NoContourPaths {
+        minimum: f64,
+        maximum: f64,
+        unit: String,
+    },
     #[error("stable liquidus preparation failed: {0}")]
     Preparation(#[from] ternary_contours::StableContourError),
     #[error("stable boundary calculation failed: {0}")]
@@ -233,6 +242,23 @@ pub fn calculate_projection(
         },
     )?;
     let stable_contours = prepared.contours(&levels)?;
+    if stable_contours
+        .levels
+        .iter()
+        .all(|level| level.paths.is_empty())
+        && levels
+            .iter()
+            .all(|level| *level < minimum || *level > maximum)
+    {
+        return Err(ProjectionError::NoContourPaths {
+            minimum,
+            maximum,
+            unit: dataset
+                .property("T")
+                .map(|property| property.unit.clone())
+                .unwrap_or_default(),
+        });
+    }
     let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
         regularization: options.regularize.then_some(PathRegularizationOptions {
             spacing: options.regularization_spacing.unwrap_or(0.02),
@@ -249,6 +275,7 @@ pub fn calculate_projection(
             .iter()
             .map(|level| level.paths.len())
             .sum(),
+        stable_polygon_count: stable_contours.diagnostics.nonempty_stable_polygons,
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
     };
@@ -334,4 +361,52 @@ fn parse_level(value: &str) -> Result<f64, ProjectionError> {
         .ok()
         .filter(|value| value.is_finite())
         .ok_or_else(|| ProjectionError::Levels(format!("`{value}` is not a finite number")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parse_str;
+
+    #[test]
+    fn partial_phase_domains_are_supported_without_global_rejection() {
+        let dataset = parse_str(include_str!("../fixtures/partial-phase-domain.tct")).unwrap();
+        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        assert_eq!(projection.input_summary.phase_count, 2);
+        assert!(projection.input_summary.temperature_range[0].is_finite());
+    }
+
+    #[test]
+    fn all_declared_temperature_fields_are_in_the_stable_ensemble() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        assert_eq!(projection.input_summary.phase_count, 3);
+        assert!(projection.diagnostics.stable_polygon_count > 0);
+    }
+
+    #[test]
+    fn out_of_range_levels_have_an_explicit_empty_contour_error() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let error = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                levels: vec![1_000.0, 1_100.0],
+                ..ProjectionOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProjectionError::NoContourPaths {
+                minimum: 100.0,
+                maximum: 120.0,
+                ..
+            }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("do not intersect the calculated temperature range")
+        );
+    }
 }
