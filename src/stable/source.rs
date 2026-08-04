@@ -1,3 +1,5 @@
+#[cfg(feature = "cubic-alpha")]
+use crate::RegularTernaryPartialScalarField;
 use crate::{FieldInterpolation, RegularTernaryScalarField};
 #[cfg(feature = "irregular-delaunay")]
 use crate::{IrregularFieldInterpolation, IrregularTernaryScalarField};
@@ -72,6 +74,14 @@ pub enum StableScalarSource<'a> {
         /// Interpolation used while resampling.
         interpolation: FieldInterpolation,
     },
+    /// A regular source with unavailable vertices and local cubic fallbacks.
+    #[cfg(feature = "cubic-alpha")]
+    PartialRegular {
+        /// Partial regular source field.
+        field: &'a RegularTernaryPartialScalarField,
+        /// Interpolation used while resampling.
+        interpolation: FieldInterpolation,
+    },
     /// An irregular Delaunay field with linear or optional cubic-alpha sampling.
     #[cfg(feature = "irregular-delaunay")]
     Irregular {
@@ -95,6 +105,15 @@ impl core::fmt::Debug for StableScalarSource<'_> {
                 interpolation,
             } => formatter
                 .debug_struct("Regular")
+                .field("subdivisions", &field.subdivisions())
+                .field("interpolation", interpolation)
+                .finish(),
+            #[cfg(feature = "cubic-alpha")]
+            Self::PartialRegular {
+                field,
+                interpolation,
+            } => formatter
+                .debug_struct("PartialRegular")
                 .field("subdivisions", &field.subdivisions())
                 .field("interpolation", interpolation)
                 .finish(),
@@ -135,6 +154,18 @@ impl<'a> StableScalarSource<'a> {
         }
     }
 
+    /// Construct a regular source with unavailable vertices.
+    #[cfg(feature = "cubic-alpha")]
+    pub const fn partial_regular(
+        field: &'a RegularTernaryPartialScalarField,
+        interpolation: FieldInterpolation,
+    ) -> Self {
+        Self::PartialRegular {
+            field,
+            interpolation,
+        }
+    }
+
     /// Construct a direct partial-domain evaluator source.
     pub const fn evaluator(evaluator: &'a dyn StablePhaseEvaluator) -> Self {
         Self::Evaluator { evaluator }
@@ -143,6 +174,10 @@ impl<'a> StableScalarSource<'a> {
     pub(crate) fn geometry_key(self) -> SourceGeometryKey<'a> {
         match self {
             Self::Regular { field, .. } => SourceGeometryKey::regular(field.subdivisions()),
+            #[cfg(feature = "cubic-alpha")]
+            Self::PartialRegular { field, .. } => {
+                SourceGeometryKey::PartialRegular(field.subdivisions(), core::marker::PhantomData)
+            }
             #[cfg(feature = "irregular-delaunay")]
             Self::Irregular { field, .. } => SourceGeometryKey::Irregular(field.mesh()),
             Self::Evaluator { evaluator } => SourceGeometryKey::Evaluator(
@@ -157,6 +192,11 @@ impl<'a> StableScalarSource<'a> {
             (Self::Regular { field: left, .. }, Self::Regular { field: right, .. }) => {
                 left.subdivisions() == right.subdivisions()
             }
+            #[cfg(feature = "cubic-alpha")]
+            (
+                Self::PartialRegular { field: left, .. },
+                Self::PartialRegular { field: right, .. },
+            ) => left.subdivisions() == right.subdivisions(),
             #[cfg(feature = "irregular-delaunay")]
             (Self::Irregular { field: left, .. }, Self::Irregular { field: right, .. }) => {
                 left.mesh().has_same_identity(right.mesh())
@@ -212,6 +252,8 @@ impl<'a> StablePhaseSource<'a> {
 #[derive(Clone, Copy)]
 pub(crate) enum SourceGeometryKey<'a> {
     Regular(usize, core::marker::PhantomData<&'a ()>),
+    #[cfg(feature = "cubic-alpha")]
+    PartialRegular(usize, core::marker::PhantomData<&'a ()>),
     #[cfg(feature = "irregular-delaunay")]
     Irregular(&'a crate::IrregularTernaryMesh),
     Evaluator(usize, core::marker::PhantomData<&'a ()>),
@@ -225,6 +267,8 @@ impl<'a> SourceGeometryKey<'a> {
     pub(crate) fn matches(self, other: Self) -> bool {
         match (self, other) {
             (Self::Regular(left, _), Self::Regular(right, _)) => left == right,
+            #[cfg(feature = "cubic-alpha")]
+            (Self::PartialRegular(left, _), Self::PartialRegular(right, _)) => left == right,
             #[cfg(feature = "irregular-delaunay")]
             (Self::Irregular(left), Self::Irregular(right)) => left.has_same_identity(right),
             (Self::Evaluator(left, _), Self::Evaluator(right, _)) => left == right,
@@ -233,7 +277,16 @@ impl<'a> SourceGeometryKey<'a> {
     }
 
     pub(crate) const fn is_regular(self) -> bool {
-        matches!(self, Self::Regular(_, _))
+        matches!(self, Self::Regular(_, _)) || {
+            #[cfg(feature = "cubic-alpha")]
+            {
+                matches!(self, Self::PartialRegular(_, _))
+            }
+            #[cfg(not(feature = "cubic-alpha"))]
+            {
+                false
+            }
+        }
     }
 
     pub(crate) const fn is_irregular(self) -> bool {
@@ -253,3 +306,4 @@ pub(crate) enum ScalarRole {
     Height,
     Secondary,
 }
+
