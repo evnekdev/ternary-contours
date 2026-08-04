@@ -1,6 +1,6 @@
 use crate::{RenderPathMode, SourceInterpolation, parse_level_spec};
 use eframe::egui;
-use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod};
+use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy};
 
 use super::state::{PathDisplayMode, ViewerState, ViewerStatus};
 
@@ -145,6 +145,34 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
                 ui.selectable_value(&mut method, CubicAlphaMethod::Steffen, "Steffen");
             });
         ui.small("These are one-dimensional edge-slope estimators used by the ternary cubic-alpha model.");
+        ui.label("Partial-domain cubic fallback");
+        let old_partial_policy = state.calculation_options.partial_domain_policy;
+        let mut partial_policy = old_partial_policy;
+        egui::ComboBox::from_id_salt("cubic_partial_domain_policy")
+            .selected_text(partial_domain_policy_name(partial_policy))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::Strict,
+                    "Strict cubic",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::OneSided,
+                    "One-sided cubic",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::OneSidedThenLinear,
+                    "One-sided cubic, then linear",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::LinearNearDomain,
+                    "Linear near domain boundaries",
+                );
+            });
+        ui.small("Undefined, non-existing, and cut-off samples stay outside numerical stencils.");
         ui.label("Continuation outside the local derivative stencil");
         let old_continuation = continuation;
         egui::ComboBox::from_id_salt("cubic_continuation")
@@ -163,6 +191,11 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
                 method,
                 continuation,
             };
+            state.invalidate_projection();
+            change.calculation_changed = true;
+        }
+        if old_partial_policy != partial_policy {
+            state.calculation_options.partial_domain_policy = partial_policy;
             state.invalidate_projection();
             change.calculation_changed = true;
         }
@@ -426,6 +459,16 @@ fn cubic_method_name(method: CubicAlphaMethod) -> &'static str {
     }
 }
 
+fn partial_domain_policy_name(policy: CubicPartialDomainPolicy) -> &'static str {
+    match policy {
+        CubicPartialDomainPolicy::Strict => "Strict cubic",
+        CubicPartialDomainPolicy::OneSided => "One-sided cubic",
+        CubicPartialDomainPolicy::OneSidedThenLinear => "One-sided cubic, then linear",
+        CubicPartialDomainPolicy::LinearNearDomain => "Linear near domain boundaries",
+        _ => "Unsupported",
+    }
+}
+
 fn continuation_name(continuation: BinaryExtrapolation) -> &'static str {
     match continuation {
         BinaryExtrapolation::RawBarycentric => "Raw barycentric",
@@ -536,3 +579,4 @@ mod tests {
         assert_eq!(options.extrapolation, BinaryExtrapolation::Kohler);
     }
 }
+
