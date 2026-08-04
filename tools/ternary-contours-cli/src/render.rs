@@ -54,6 +54,7 @@ pub struct RenderOptions {
     pub show_grid: bool,
     pub show_samples: bool,
     pub show_labels: bool,
+    pub show_corner_labels: bool,
     pub show_legend: bool,
     pub marker_size: u32,
     pub line_width: u32,
@@ -73,6 +74,7 @@ impl Default for RenderOptions {
             show_grid: false,
             show_samples: false,
             show_labels: true,
+            show_corner_labels: true,
             show_legend: true,
             marker_size: 8,
             line_width: 3,
@@ -227,16 +229,24 @@ where
         .caption(title, ("sans-serif", 24, FontStyle::Bold, &BLACK))
         .margin(30)
         .build()?;
+    let mut mesh = chart.configure_mesh();
     if options.show_labels {
-        chart
-            .configure_mesh()
+        mesh = mesh
             .axis_a_name(&dataset.components[0].name)
             .axis_b_name(&dataset.components[1].name)
-            .axis_c_name(&dataset.components[2].name)
-            .draw()?;
+            .axis_c_name(&dataset.components[2].name);
     } else {
-        chart.configure_mesh().draw()?;
+        mesh = mesh.hide_axis_names();
     }
+    if options.show_corner_labels {
+        mesh = mesh
+            .corner_a_name(corner_label(&dataset.components[0].name, "[1, 0, 0]"))
+            .corner_b_name(corner_label(&dataset.components[1].name, "[0, 1, 0]"))
+            .corner_c_name(corner_label(&dataset.components[2].name, "[0, 0, 1]"));
+    } else {
+        mesh = mesh.hide_corner_names();
+    }
+    mesh.draw()?;
 
     let phase_names = dataset
         .phases
@@ -344,6 +354,10 @@ where
     Ok(())
 }
 
+fn corner_label(name: &str, composition: &str) -> String {
+    format!("{name} {composition}")
+}
+
 fn phase_style(phase: StablePhaseId, line_width: u32) -> ShapeStyle {
     const PALETTE: [RGBColor; 8] = [
         RGBColor(31, 119, 180),
@@ -362,6 +376,13 @@ fn phase_style(phase: StablePhaseId, line_width: u32) -> ShapeStyle {
 mod tests {
     use super::*;
     use crate::{ProjectionOptions, calculate_projection, parse_str};
+
+    #[test]
+    fn corner_labels_follow_semantic_composition_coordinates() {
+        assert_eq!(corner_label("CaO", "[1, 0, 0]"), "CaO [1, 0, 0]");
+        assert_eq!(corner_label("PbO", "[0, 1, 0]"), "PbO [0, 1, 0]");
+        assert_eq!(corner_label("ZnO", "[0, 0, 1]"), "ZnO [0, 0, 1]");
+    }
 
     #[test]
     fn rgb_to_rgba_preserves_channel_order_and_adds_opacity() {

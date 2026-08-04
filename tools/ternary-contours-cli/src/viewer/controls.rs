@@ -1,8 +1,7 @@
+use crate::{RenderPathMode, parse_level_spec};
 use eframe::egui;
 
-use crate::{RenderPathMode, parse_level_spec};
-
-use super::state::{PathDisplayMode, ViewerState};
+use super::state::{PathDisplayMode, ViewerState, ViewerStatus};
 
 pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     let mut apply = false;
@@ -32,6 +31,28 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
         ));
     }
 
+    if let Some(projection) = state.active_projection() {
+        let binary = projection
+            .stable_boundaries
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Binary(_)))
+            .count();
+        let interior = projection
+            .stable_boundaries
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Interior(_)))
+            .count();
+        ui.small(format!(
+            "projection: {} stable polygons, {} isotherm paths, {} univariants, {} binary + {} interior invariants",
+            projection.diagnostics.stable_polygon_count,
+            projection.diagnostics.contour_path_count,
+            projection.diagnostics.univariant_count,
+            binary,
+            interior
+        ));
+    }
     ui.separator();
     ui.heading("Levels");
     ui.label("Comma list or start:stop:step");
@@ -92,7 +113,13 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     if state.dirty.projection {
         ui.colored_label(egui::Color32::YELLOW, "Calculation settings changed.");
     }
-    if ui.button("Apply / recalculate").clicked() {
+    if ui
+        .add_enabled(
+            !matches!(state.status, ViewerStatus::Calculating),
+            egui::Button::new("Apply / recalculate"),
+        )
+        .clicked()
+    {
         apply = true;
     }
 
@@ -131,6 +158,12 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
         .changed();
     render_changed |= ui
         .checkbox(&mut state.render_options.show_labels, "Axis labels")
+        .changed();
+    render_changed |= ui
+        .checkbox(
+            &mut state.render_options.show_corner_labels,
+            "Corner composition labels",
+        )
         .changed();
     render_changed |= ui
         .checkbox(&mut state.render_options.show_legend, "Legend")
@@ -253,7 +286,7 @@ fn format_levels(levels: &[f64]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     if levels.len() > 6 {
-        format!("{displayed}, …")
+        format!("{displayed}, \u{2026}")
     } else {
         displayed
     }
