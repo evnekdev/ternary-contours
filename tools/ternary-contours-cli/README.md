@@ -89,11 +89,12 @@ remains available for recovery. Layer, label, legend, marker, and path-display
 changes only redraw the shared Plotters bitmap.
 
 Source interpolation is Linear by default, so denser sampling refines contour
-extraction but leaves each source-cell evaluation planar. Complete regular
-fields can select Cubic alpha in the viewer, choose Akima, Makima, PCHIP, or
-Steffen edge slopes, and choose Raw barycentric, Muggianu, or Kohler
-continuation. The viewer rejects cubic interpolation across classified undefined
-values and disables it for participating irregular fields. The current file is
+extraction but leaves each source-cell evaluation planar. Regular fields can select Cubic alpha in the viewer, choose Akima, Makima,
+PCHIP, or Steffen edge slopes, and choose Raw barycentric, Muggianu, or Kohler
+continuation. **Partial-domain cubic fallback** defaults to *One-sided cubic,
+then linear*: classified undefined vertices never enter a numerical stencil;
+only their local triangles are undefined. Strict cubic is available for audits,
+and participating irregular fields still use Linear Delaunay. The current file is
 reparsed and validated by the same TCT pipeline as the headless commands. A
 malformed reload retains the last valid projection and texture while showing the
 diagnostic in the status area.
