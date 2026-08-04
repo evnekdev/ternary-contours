@@ -7,7 +7,7 @@ use ternary_contours::{
     StablePhaseId, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
 };
 
-use crate::{TabulatedGrid, TabulatedTernaryDataset};
+use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
 
 /// Controls for a stable liquidus calculation.
 #[derive(Clone, Debug, Default)]
@@ -55,6 +55,8 @@ pub enum ProjectionError {
         phase: StablePhaseId,
         message: String,
     },
+    #[error("no calculated finite temperature samples are available: {details}")]
+    NoCalculatedTemperatureSamples { details: String },
     #[error("invalid projection levels: {0}")]
     Levels(String),
     #[error(
@@ -65,8 +67,11 @@ pub enum ProjectionError {
         maximum: f64,
         unit: String,
     },
-    #[error("stable liquidus preparation failed: {0}")]
-    Preparation(#[from] ternary_contours::StableContourError),
+    #[error("stable liquidus preparation failed: {error}; tabulated source coverage: {details}")]
+    Preparation {
+        error: ternary_contours::StableContourError,
+        details: String,
+    },
     #[error("stable boundary calculation failed: {0}")]
     Boundaries(#[from] ternary_contours::StableBoundaryError),
 }
@@ -74,11 +79,11 @@ pub enum ProjectionError {
 enum RuntimeField {
     Regular {
         grid: RegularTernaryGrid,
-        values: Vec<Option<f64>>,
+        values: Vec<TabulatedValue>,
     },
     Irregular {
         mesh: Box<IrregularTernaryMesh>,
-        values: Vec<Option<f64>>,
+        values: Vec<TabulatedValue>,
     },
 }
 
@@ -88,46 +93,69 @@ struct RuntimePhase {
 
 impl StablePhaseEvaluator for RuntimePhase {
     fn evaluate(&self, composition: [f64; 3]) -> StablePhaseEvaluation {
-        let value = match &self.field {
-            RuntimeField::Regular { grid, values } => {
-                grid.locate(composition).ok().and_then(|location| {
-                    location
-                        .triangle
-                        .vertices
-                        .into_iter()
-                        .zip(location.barycentric)
-                        .try_fold(0.0, |value, (vertex, weight)| {
-                            values
-                                .get(vertex.0)
-                                .copied()
-                                .flatten()
-                                .map(|sample| value + weight * sample)
-                        })
-                })
-            }
-            RuntimeField::Irregular { mesh, values } => {
-                mesh.locate(composition).ok().and_then(|location| {
-                    location
-                        .triangle
-                        .vertices
-                        .into_iter()
-                        .zip(location.barycentric)
-                        .try_fold(0.0, |value, (vertex, weight)| {
-                            values
-                                .get(vertex.0)
-                                .copied()
-                                .flatten()
-                                .map(|sample| value + weight * sample)
-                        })
-                })
-            }
+        let result = match &self.field {
+            RuntimeField::Regular { grid, values } => grid
+                .locate(composition)
+                .map_err(|_| StablePhaseUndefinedReason::OutsidePhaseDomain)
+                .and_then(|location| {
+                    interpolate_tabulated(
+                        values,
+                        location
+                            .triangle
+                            .vertices
+                            .into_iter()
+                            .zip(location.barycentric)
+                            .map(|(vertex, weight)| (vertex.0, weight)),
+                    )
+                }),
+            RuntimeField::Irregular { mesh, values } => mesh
+                .locate(composition)
+                .map_err(|_| StablePhaseUndefinedReason::OutsidePhaseDomain)
+                .and_then(|location| {
+                    interpolate_tabulated(
+                        values,
+                        location
+                            .triangle
+                            .vertices
+                            .into_iter()
+                            .zip(location.barycentric)
+                            .map(|(vertex, weight)| (vertex.0, weight)),
+                    )
+                }),
         };
-        match value {
-            Some(value) if value.is_finite() => StablePhaseEvaluation::Defined { value },
-            _ => StablePhaseEvaluation::Undefined {
-                reason: StablePhaseUndefinedReason::OutsidePhaseDomain,
+        match result {
+            Ok(value) if value.is_finite() => StablePhaseEvaluation::Defined { value },
+            Ok(_) => StablePhaseEvaluation::Undefined {
+                reason: StablePhaseUndefinedReason::NonFiniteResult,
             },
+            Err(reason) => StablePhaseEvaluation::Undefined { reason },
         }
+    }
+}
+
+fn interpolate_tabulated(
+    values: &[TabulatedValue],
+    vertices: impl IntoIterator<Item = (usize, f64)>,
+) -> Result<f64, StablePhaseUndefinedReason> {
+    vertices
+        .into_iter()
+        .try_fold(0.0, |interpolated, (index, weight)| {
+            let sample = values
+                .get(index)
+                .ok_or(StablePhaseUndefinedReason::MissingTabulatedInput)?;
+            let value = sample
+                .calculated_value()
+                .ok_or_else(|| undefined_reason(sample))?;
+            Ok(interpolated + weight * value)
+        })
+}
+
+fn undefined_reason(value: &TabulatedValue) -> StablePhaseUndefinedReason {
+    match value.state {
+        TabulatedValueState::Calculated => StablePhaseUndefinedReason::NonFiniteResult,
+        TabulatedValueState::NonExisting => StablePhaseUndefinedReason::ClassifiedNonExisting,
+        TabulatedValueState::CutOff => StablePhaseUndefinedReason::ClassifiedCutOff,
+        TabulatedValueState::Missing => StablePhaseUndefinedReason::MissingTabulatedInput,
     }
 }
 
@@ -141,6 +169,8 @@ pub fn calculate_projection(
     let mut regular_grid_count = 0;
     let mut irregular_grid_count = 0;
     let mut extrema = Vec::new();
+    let mut unavailable_fields = Vec::new();
+    let mut source_coverage = Vec::new();
     for grid in &dataset.grids {
         match grid {
             TabulatedGrid::Regular(_) => regular_grid_count += 1,
@@ -150,7 +180,35 @@ pub fn calculate_projection(
             if field.property != "T" {
                 continue;
             }
-            extrema.extend(field.values.iter().flatten().copied());
+            let calculated = field
+                .values
+                .iter()
+                .filter_map(TabulatedValue::calculated_value)
+                .collect::<Vec<_>>();
+            let counts = field.values.iter().fold([0usize; 4], |mut counts, value| {
+                counts[match value.state {
+                    TabulatedValueState::Calculated => 0,
+                    TabulatedValueState::NonExisting => 1,
+                    TabulatedValueState::CutOff => 2,
+                    TabulatedValueState::Missing => 3,
+                }] += 1;
+                counts
+            });
+            let coverage = format!(
+                "grid {} phase {}.{} (calculated {}, non-existing {}, cut-off {}, missing {})",
+                grid.name(),
+                field.phase_id.0,
+                field.property,
+                counts[0],
+                counts[1],
+                counts[2],
+                counts[3]
+            );
+            if calculated.is_empty() {
+                unavailable_fields.push(coverage.clone());
+            }
+            source_coverage.push(coverage);
+            extrema.extend(calculated);
             let runtime = match grid {
                 TabulatedGrid::Regular(grid) => RuntimeField::Regular {
                     grid: RegularTernaryGrid::new(grid.subdivisions)
@@ -172,11 +230,11 @@ pub fn calculate_projection(
             fields.insert(field.phase_id, runtime);
         }
     }
-    let minimum = extrema
-        .iter()
-        .copied()
-        .reduce(f64::min)
-        .ok_or_else(|| ProjectionError::Levels("no finite temperature samples".into()))?;
+    let minimum = extrema.iter().copied().reduce(f64::min).ok_or_else(|| {
+        ProjectionError::NoCalculatedTemperatureSamples {
+            details: unavailable_fields.join("; "),
+        }
+    })?;
     let maximum = extrema
         .iter()
         .copied()
@@ -240,8 +298,18 @@ pub fn calculate_projection(
             subdivisions: sampling_subdivisions,
             ..StableGridOptions::default()
         },
-    )?;
-    let stable_contours = prepared.contours(&levels)?;
+    )
+    .map_err(|error| ProjectionError::Preparation {
+        error,
+        details: source_coverage.join("; "),
+    })?;
+    let stable_contours =
+        prepared
+            .contours(&levels)
+            .map_err(|error| ProjectionError::Preparation {
+                error,
+                details: source_coverage.join("; "),
+            })?;
     if stable_contours
         .levels
         .iter()
@@ -382,6 +450,22 @@ mod tests {
         let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
         assert_eq!(projection.input_summary.phase_count, 3);
         assert!(projection.diagnostics.stable_polygon_count > 0);
+    }
+
+    #[test]
+    fn classified_missing_coverage_reports_each_temperature_field() {
+        let error = calculate_projection(
+            &crate::default_regular_dataset(),
+            &ProjectionOptions::default(),
+        )
+        .unwrap_err();
+        let message = error.to_string();
+        assert!(matches!(
+            error,
+            ProjectionError::NoCalculatedTemperatureSamples { .. }
+        ));
+        assert!(message.contains("grid regular phase 1.T"));
+        assert!(message.contains("non-existing 0, cut-off 0, missing 66"));
     }
 
     #[test]

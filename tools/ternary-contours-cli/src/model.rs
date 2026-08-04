@@ -70,12 +70,209 @@ pub struct SourceRange {
     pub last_line: usize,
 }
 
+/// Classification of one tabulated scalar entry.
+///
+/// These states remain independent from the GUI. Only a calculated entry
+/// contributes a finite scalar to a liquidus projection; the other states keep
+/// the reason why the input is unavailable.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum TabulatedValueState {
+    /// A finite scalar result exists.
+    Calculated,
+    /// The phase is not present or meaningful at this composition.
+    NonExisting,
+    /// The calculation exceeded an explicit high-temperature limit.
+    CutOff,
+    /// The point has not yet been calculated or classified.
+    #[default]
+    Missing,
+}
+
+impl TabulatedValueState {
+    /// Compact deterministic token used in TSV and TCT output.
+    pub const fn token(self) -> &'static str {
+        match self {
+            Self::Calculated => "OK",
+            Self::NonExisting => "NE",
+            Self::CutOff => "CO",
+            Self::Missing => "NA",
+        }
+    }
+}
+
+/// One classified scalar input cell.
+///
+/// `value` is meaningful only for [`TabulatedValueState::Calculated`]. The
+/// optional note is metadata (for example a cut-off limit); it is never used
+/// by interpolation.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TabulatedValue {
+    pub state: TabulatedValueState,
+    pub value: Option<f64>,
+    pub note: Option<String>,
+}
+
+impl TabulatedValue {
+    pub fn calculated(value: f64) -> Result<Self, String> {
+        value
+            .is_finite()
+            .then_some(Self {
+                state: TabulatedValueState::Calculated,
+                value: Some(value),
+                note: None,
+            })
+            .ok_or_else(|| "calculated values must be finite".into())
+    }
+
+    pub const fn missing() -> Self {
+        Self {
+            state: TabulatedValueState::Missing,
+            value: None,
+            note: None,
+        }
+    }
+
+    pub const fn non_existing() -> Self {
+        Self {
+            state: TabulatedValueState::NonExisting,
+            value: None,
+            note: None,
+        }
+    }
+
+    pub const fn cut_off() -> Self {
+        Self {
+            state: TabulatedValueState::CutOff,
+            value: None,
+            note: None,
+        }
+    }
+
+    pub const fn calculated_value(&self) -> Option<f64> {
+        match self {
+            Self {
+                state: TabulatedValueState::Calculated,
+                value: Some(value),
+                ..
+            } => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub const fn is_calculated(&self) -> bool {
+        matches!(self.state, TabulatedValueState::Calculated)
+    }
+
+    /// Validate the state/value invariant before applying or serializing data.
+    pub fn validate(&self) -> Result<(), String> {
+        if self
+            .note
+            .as_deref()
+            .is_some_and(|note| note.contains(['\t', '\n', '\r']))
+        {
+            return Err("classified-value notes cannot contain tabs or line breaks".into());
+        }
+        match (self.state, self.value, self.note.as_deref()) {
+            (TabulatedValueState::Calculated, Some(value), None) if value.is_finite() => Ok(()),
+            (TabulatedValueState::Calculated, Some(_), Some(_)) => {
+                Err("calculated values cannot carry a classified-state note".into())
+            }
+            (TabulatedValueState::Calculated, _, _) => {
+                Err("calculated values require one finite scalar".into())
+            }
+            (_, None, _) => Ok(()),
+            (state, Some(_), _) => Err(format!(
+                "{} values must not carry an active calculated scalar",
+                state.token()
+            )),
+        }
+    }
+
+    /// Render a cell for TSV or TCT. `missing_token` configures only generic
+    /// missing values; `NE` and `CO` remain distinct and unambiguous.
+    pub fn token_with_format(
+        &self,
+        numeric: impl FnOnce(f64) -> String,
+        missing_token: &str,
+    ) -> String {
+        match self.state {
+            TabulatedValueState::Calculated => self
+                .value
+                .filter(|value| value.is_finite())
+                .map(numeric)
+                .unwrap_or_else(|| missing_token.to_owned()),
+            TabulatedValueState::Missing => state_token("NA", self.note.as_deref(), missing_token),
+            TabulatedValueState::NonExisting => {
+                state_token("NE", self.note.as_deref(), missing_token)
+            }
+            TabulatedValueState::CutOff => state_token("CO", self.note.as_deref(), missing_token),
+        }
+    }
+}
+
+fn state_token(state: &str, note: Option<&str>, missing_token: &str) -> String {
+    match (state, note.filter(|note| !note.trim().is_empty())) {
+        ("NA", None) => missing_token.to_owned(),
+        (_, Some(note)) => format!("{state}:{}", note.trim()),
+        _ => state.to_owned(),
+    }
+}
+
+/// Parse one scalar cell shared by TCT and Excel-compatible TSV imports.
+///
+/// `NE`, `CO`, and `NA` are recognized by default. A suffixed note such as
+/// `CO:3000` or `NE:outside domain` is retained as metadata. Configured
+/// missing tokens also map to [`TabulatedValueState::Missing`].
+pub fn parse_tabulated_value_token(
+    token: &str,
+    missing_tokens: &[String],
+    blank_is_missing: bool,
+) -> Result<TabulatedValue, String> {
+    let token = token.trim();
+    if token.is_empty() {
+        return blank_is_missing
+            .then_some(TabulatedValue::missing())
+            .ok_or_else(|| {
+                "blank cells are not zero; enable blank-as-missing to accept them".into()
+            });
+    }
+    let state = |prefix: &str, state: TabulatedValueState| {
+        let exact = token.eq_ignore_ascii_case(prefix);
+        let annotated = token
+            .get(..prefix.len())
+            .filter(|head| head.eq_ignore_ascii_case(prefix))
+            .and_then(|_| token.get(prefix.len()..))
+            .filter(|suffix| suffix.starts_with(':'));
+        (exact || annotated.is_some()).then(|| TabulatedValue {
+            state,
+            value: None,
+            note: annotated
+                .map(|suffix| suffix[1..].trim())
+                .filter(|note| !note.is_empty())
+                .map(ToOwned::to_owned),
+        })
+    };
+    if let Some(value) = state("NE", TabulatedValueState::NonExisting)
+        .or_else(|| state("CO", TabulatedValueState::CutOff))
+        .or_else(|| state("NA", TabulatedValueState::Missing))
+    {
+        return Ok(value);
+    }
+    if missing_tokens.iter().any(|missing| missing == token) {
+        return Ok(TabulatedValue::missing());
+    }
+    let value = token
+        .parse::<f64>()
+        .map_err(|_| "invalid numeric or classified-state token".to_owned())?;
+    TabulatedValue::calculated(value)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabulatedField {
     pub phase_id: StablePhaseId,
     pub property: String,
     pub column_name: String,
-    pub values: Vec<Option<f64>>,
+    pub values: Vec<TabulatedValue>,
     pub row_lines: Vec<usize>,
 }
 
@@ -172,7 +369,7 @@ pub fn default_regular_dataset() -> TabulatedTernaryDataset {
         phase_id,
         property: "T".into(),
         column_name: format!("{}.T", phase_name),
-        values: vec![None; row_count],
+        values: vec![TabulatedValue::missing(); row_count],
         row_lines: vec![0; row_count],
     })
     .collect();
@@ -299,7 +496,7 @@ impl TabulatedTernaryDataset {
             return Err("at least one grid is required".into());
         }
         for grid in &self.grids {
-            let expected = match grid {
+            match grid {
                 TabulatedGrid::Regular(value) => {
                     if value.subdivisions == 0 {
                         return Err(format!(
@@ -328,9 +525,9 @@ impl TabulatedTernaryDataset {
                             expected
                         ));
                     }
-                    Some(expected)
+                    let _ = expected;
                 }
-                TabulatedGrid::Irregular(_) => None,
+                TabulatedGrid::Irregular(_) => {}
             };
             for field in grid.fields() {
                 if !self
@@ -349,16 +546,37 @@ impl TabulatedTernaryDataset {
                         field.property
                     ));
                 }
-                if expected.is_some_and(|count| field.values.len() != count) {
+                if field.values.len() != grid.compositions().len() {
                     return Err(format!(
                         "grid {} field {}.{} has {} values; expected {}",
                         grid.name(),
                         field.phase_id.0,
                         field.property,
                         field.values.len(),
-                        expected.unwrap_or_default()
+                        grid.compositions().len()
                     ));
                 }
+                for (row, value) in field.values.iter().enumerate() {
+                    value.validate().map_err(|message| {
+                        format!(
+                            "grid {} field {}.{} row {}: {message}",
+                            grid.name(),
+                            field.phase_id.0,
+                            field.property,
+                            row + 1
+                        )
+                    })?;
+                }
+            }
+            if grid.fields().iter().enumerate().any(|(index, field)| {
+                grid.fields()[..index].iter().any(|prior| {
+                    prior.phase_id == field.phase_id && prior.property == field.property
+                })
+            }) {
+                return Err(format!(
+                    "grid {} has duplicate phase/property fields",
+                    grid.name()
+                ));
             }
         }
         for phase in &self.phases {
@@ -380,6 +598,61 @@ impl TabulatedTernaryDataset {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn classified_values_enforce_finite_calculated_scalars_and_keep_states_distinct() {
+        assert_eq!(
+            TabulatedValue::calculated(1234.5)
+                .unwrap()
+                .calculated_value(),
+            Some(1234.5)
+        );
+        assert!(TabulatedValue::calculated(f64::NAN).is_err());
+        for value in [
+            TabulatedValue::non_existing(),
+            TabulatedValue::cut_off(),
+            TabulatedValue::missing(),
+        ] {
+            assert!(value.validate().is_ok());
+            assert!(value.calculated_value().is_none());
+        }
+        assert!(
+            TabulatedValue {
+                state: TabulatedValueState::CutOff,
+                value: Some(1.0),
+                note: None,
+            }
+            .validate()
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn state_tokens_parse_for_tct_and_excel_cells() {
+        let missing = vec!["NA".into(), "MISSING".into()];
+        assert_eq!(
+            parse_tabulated_value_token("NE", &missing, false)
+                .unwrap()
+                .state,
+            TabulatedValueState::NonExisting
+        );
+        let cutoff = parse_tabulated_value_token("CO:3000", &missing, false).unwrap();
+        assert_eq!(cutoff.state, TabulatedValueState::CutOff);
+        assert_eq!(cutoff.note.as_deref(), Some("3000"));
+        assert_eq!(
+            parse_tabulated_value_token("MISSING", &missing, false)
+                .unwrap()
+                .state,
+            TabulatedValueState::Missing
+        );
+        assert!(parse_tabulated_value_token("", &missing, false).is_err());
+        assert_eq!(
+            parse_tabulated_value_token("", &missing, true)
+                .unwrap()
+                .state,
+            TabulatedValueState::Missing
+        );
+    }
 
     #[test]
     fn default_regular_dataset_is_editable_and_structurally_complete() {
@@ -422,11 +695,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["Phase1.T", "Phase2.T", "Phase3.T"]
         );
-        assert!(
-            grid.fields
+        assert!(grid.fields.iter().all(|field| {
+            field
+                .values
                 .iter()
-                .all(|field| field.values.iter().all(Option::is_none))
-        );
+                .all(|value| value.state == TabulatedValueState::Missing)
+        }));
         let text = crate::serialize_tct(&dataset, &crate::TctSerializeOptions::default()).unwrap();
         let round_trip = crate::parse_str(&text).unwrap();
         assert_eq!(round_trip.title, dataset.title);

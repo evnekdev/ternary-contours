@@ -12,6 +12,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataEditorAction {
     None,
+    /// Draft data was applied but numerical work was not requested.
+    Applied,
     Recalculate,
 }
 
@@ -262,7 +264,11 @@ fn grid_list(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut Dat
             .fields()
             .iter()
             .fold((0, 0), |(defined, missing), field| {
-                let known = field.values.iter().filter(|value| value.is_some()).count();
+                let known = field
+                    .values
+                    .iter()
+                    .filter(|value| value.is_calculated())
+                    .count();
                 (defined + known, missing + field.values.len() - known)
             });
         let detail = match grid {
@@ -402,7 +408,7 @@ fn regular_editor(
             grid.compositions.len(),
             grid.fields
                 .iter()
-                .any(|field| field.values.iter().any(Option::is_some)),
+                .any(|field| field.values.iter().any(|value| value.is_calculated())),
         ),
         _ => return DataEditorAction::None,
     };
@@ -644,7 +650,10 @@ fn apply_buttons(
             .add_enabled(has_preview, egui::Button::new("Apply"))
             .clicked()
         {
-            state.message = apply_preview(editor, state, regular).err();
+            match apply_preview(editor, state, regular) {
+                Ok(()) => action = DataEditorAction::Applied,
+                Err(error) => state.message = Some(error),
+            }
         }
         if ui
             .add_enabled(has_preview, egui::Button::new("Apply and recalculate"))
@@ -852,19 +861,22 @@ fn canonical_table(
                 let point = grid.compositions[index];
                 let value = field
                     .and_then(|field| field.values.get(index))
-                    .copied()
-                    .flatten();
+                    .map(|value| {
+                        value.token_with_format(
+                            |number| format!("{number:.6}"),
+                            editor
+                                .draft
+                                .missing_tokens
+                                .first()
+                                .map(String::as_str)
+                                .unwrap_or("NA"),
+                        )
+                    })
+                    .unwrap_or_else(|| "NA".into());
                 ui.horizontal(|ui| {
                     ui.monospace(format!("{:>5}", index + 1));
                     ui.monospace(format!("{:.6}\t{:.6}\t{:.6}", point[0], point[1], point[2]));
-                    ui.monospace(value.map(|value| format!("{value:.6}")).unwrap_or_else(|| {
-                        editor
-                            .draft
-                            .missing_tokens
-                            .first()
-                            .cloned()
-                            .unwrap_or_else(|| "NA".into())
-                    }));
+                    ui.monospace(value);
                 });
             }
         },
@@ -923,15 +935,14 @@ fn grid_tsv(
     for (row, point) in grid.compositions().iter().enumerate() {
         let mut cells = point.map(|value| format!("{value:.6}")).to_vec();
         cells.extend(fields.iter().map(|field| {
-            field.values[row]
-                .map(|value| format!("{value:.6}"))
-                .unwrap_or_else(|| {
-                    dataset
-                        .missing_tokens
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "NA".into())
-                })
+            field.values[row].token_with_format(
+                |value| format!("{value:.6}"),
+                dataset
+                    .missing_tokens
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("NA"),
+            )
         }));
         lines.push(cells.join("\t"));
     }

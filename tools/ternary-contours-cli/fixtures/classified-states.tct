@@ -1,0 +1,33 @@
+TCT 1.0
+
+title = "Classified grid states"
+default_missing = NA
+
+[components]
+A
+B
+C
+[/components]
+
+[phases]
+alpha = 1
+beta = 2
+[/phases]
+
+[properties]
+T required K
+[/properties]
+
+[grid "regular"]
+type = regular
+subdivisions = 1
+order = canonical
+composition_columns = none
+properties = T
+columns:
+alpha.T	beta.T
+data:
+100	NE
+CO:3000	90
+NA	80
+[/grid]

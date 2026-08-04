@@ -198,10 +198,15 @@ fn serialize_grid(
             cells.extend(composition.map(|value| options.numeric.format(value)));
         }
         for field in &fields {
-            cells.push(match field.values.get(row).copied().flatten() {
-                Some(value) => options.numeric.format(value),
-                None => missing.to_owned(),
-            });
+            cells.push(
+                field
+                    .values
+                    .get(row)
+                    .map(|value| {
+                        value.token_with_format(|number| options.numeric.format(number), missing)
+                    })
+                    .unwrap_or_else(|| missing.to_owned()),
+            );
         }
         output.push_str(&cells.join("\t"));
         output.push('\n');
@@ -303,11 +308,32 @@ mod tests {
     }
 
     #[test]
+    fn classified_values_serialize_deterministically_and_round_trip() {
+        let dataset = parse_str(include_str!("../fixtures/classified-states.tct")).unwrap();
+        let text = serialize_tct(&dataset, &TctSerializeOptions::default()).unwrap();
+        assert!(text.contains("CO:3000"));
+        assert!(text.contains("\tNE"));
+        let reparsed = parse_str(&text).unwrap();
+        assert_eq!(
+            reparsed.grids[0].fields()[0].values,
+            dataset.grids[0].fields()[0].values
+        );
+        assert_eq!(
+            reparsed.grids[0].fields()[1].values,
+            dataset.grids[0].fields()[1].values
+        );
+    }
+
+    #[test]
     fn missing_values_use_configured_token() {
         let mut dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
         match &mut dataset.grids[0] {
-            TabulatedGrid::Regular(grid) => grid.fields[0].values[0] = None,
-            TabulatedGrid::Irregular(grid) => grid.fields[0].values[0] = None,
+            TabulatedGrid::Regular(grid) => {
+                grid.fields[0].values[0] = crate::TabulatedValue::missing()
+            }
+            TabulatedGrid::Irregular(grid) => {
+                grid.fields[0].values[0] = crate::TabulatedValue::missing()
+            }
         }
         let text = serialize_tct(
             &dataset,

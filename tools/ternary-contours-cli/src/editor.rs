@@ -120,7 +120,7 @@ impl EditorValidationReport {
 pub struct PendingField {
     pub key: FieldKey,
     pub column_name: String,
-    pub values: Vec<Option<f64>>,
+    pub values: Vec<TabulatedValue>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -355,7 +355,7 @@ pub fn preview_irregular_paste(
         let index = compositions.len();
         compositions.push(point);
         for field in &mut fields {
-            field.values.push(None);
+            field.values.push(TabulatedValue::missing());
         }
         read_fields(
             row,
@@ -402,7 +402,7 @@ fn empty_fields(mappings: &[FieldColumnMapping], rows: usize) -> Vec<PendingFiel
         .map(|mapping| PendingField {
             key: mapping.destination.clone(),
             column_name: mapping.label.clone(),
-            values: vec![None; rows],
+            values: vec![TabulatedValue::missing(); rows],
         })
         .collect()
 }
@@ -545,20 +545,11 @@ fn read_fields(
         let Some(cell) = row.cells.get(mapping.source_column) else {
             continue;
         };
-        let value = if cell.text.is_empty() {
-            if blanks {
-                Ok(None)
-            } else {
-                Err("blank cells are not zero; enable blank-as-missing to accept them")
-            }
-        } else if missing.iter().any(|token| token == &cell.text) {
-            Ok(None)
-        } else {
-            parse_finite(&cell.text).map(Some)
-        };
+        let value = parse_tabulated_value_token(&cell.text, missing, blanks);
         match value {
             Ok(value) => {
-                report.missing_values += usize::from(value.is_none());
+                report.missing_values +=
+                    usize::from(matches!(value.state, crate::TabulatedValueState::Missing));
                 if let Some(destination) = fields
                     .get_mut(index)
                     .and_then(|field| field.values.get_mut(target))
@@ -697,8 +688,8 @@ fn residual(left: [f64; 3], right: [f64; 3]) -> f64 {
 
 use crate::{
     CompositionColumns, IrregularTabulatedGrid, RegularTabulatedGrid, RowOrder, SourceRange,
-    TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TctSerializeOptions, parse_str,
-    serialize_tct,
+    TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TctSerializeOptions,
+    parse_str, parse_tabulated_value_token, serialize_tct,
 };
 
 /// Separate applied data from a mutable draft and un-applied paste preview.
@@ -865,6 +856,179 @@ impl DatasetEditorState {
         }
         self.paste_preview = None;
         self.dirty = true;
+        Ok(())
+    }
+
+    /// Return per-state counts for a selected grid field in declaration order:
+    /// calculated, non-existing, cut-off, missing.
+    pub fn field_state_counts(
+        &self,
+        grid_index: usize,
+        field_index: usize,
+    ) -> Result<[usize; 4], String> {
+        let field = self
+            .draft
+            .grids
+            .get(grid_index)
+            .and_then(|grid| grid.fields().get(field_index))
+            .ok_or("selected grid field no longer exists")?;
+        Ok(field.values.iter().fold([0; 4], |mut counts, value| {
+            counts[match value.state {
+                crate::TabulatedValueState::Calculated => 0,
+                crate::TabulatedValueState::NonExisting => 1,
+                crate::TabulatedValueState::CutOff => 2,
+                crate::TabulatedValueState::Missing => 3,
+            }] += 1;
+            counts
+        }))
+    }
+
+    /// Whether this draft field differs from the last applied dataset.
+    pub fn field_is_modified(&self, grid_index: usize, field_index: usize) -> bool {
+        let Some(draft_grid) = self.draft.grids.get(grid_index) else {
+            return false;
+        };
+        let Some(draft_field) = draft_grid.fields().get(field_index) else {
+            return false;
+        };
+        self.active
+            .grids
+            .iter()
+            .find(|grid| grid.name() == draft_grid.name())
+            .and_then(|grid| {
+                grid.fields().iter().find(|field| {
+                    field.phase_id == draft_field.phase_id && field.property == draft_field.property
+                })
+            })
+            .is_none_or(|active| active != draft_field)
+    }
+
+    /// Edit one point without applying the full draft or launching numerical work.
+    pub fn set_field_point(
+        &mut self,
+        grid_index: usize,
+        field_index: usize,
+        row: usize,
+        value: TabulatedValue,
+    ) -> Result<(), String> {
+        value.validate()?;
+        let exists = self
+            .draft
+            .grids
+            .get(grid_index)
+            .and_then(|grid| grid.fields().get(field_index))
+            .and_then(|field| field.values.get(row))
+            .is_some();
+        if !exists {
+            return Err("selected grid point no longer exists".into());
+        }
+        self.snapshot_draft();
+        *grid_field_mut(&mut self.draft.grids[grid_index], field_index)
+            .and_then(|field| field.values.get_mut(row))
+            .ok_or("selected grid point no longer exists")? = value;
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Apply one non-calculated state to a group of selected point rows.
+    pub fn set_field_state_batch(
+        &mut self,
+        grid_index: usize,
+        field_index: usize,
+        rows: &[usize],
+        state: crate::TabulatedValueState,
+        note: Option<String>,
+    ) -> Result<(), String> {
+        if matches!(state, crate::TabulatedValueState::Calculated) {
+            return Err(
+                "batch calculated values require an explicit scalar value and confirmation".into(),
+            );
+        }
+        let count = self
+            .draft
+            .grids
+            .get(grid_index)
+            .and_then(|grid| grid.fields().get(field_index))
+            .map(|field| field.values.len())
+            .ok_or("selected grid field no longer exists")?;
+        if rows.iter().any(|row| *row >= count) {
+            return Err("a selected point no longer exists".into());
+        }
+        self.snapshot_draft();
+        let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
+            .ok_or("selected grid field no longer exists")?;
+        for row in rows {
+            field.values[*row] = TabulatedValue {
+                state,
+                value: None,
+                note: note.clone().filter(|note| !note.trim().is_empty()),
+            };
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Clear notes from selected points without changing their classified states.
+    pub fn clear_field_notes(
+        &mut self,
+        grid_index: usize,
+        field_index: usize,
+        rows: &[usize],
+    ) -> Result<(), String> {
+        let count = self
+            .draft
+            .grids
+            .get(grid_index)
+            .and_then(|grid| grid.fields().get(field_index))
+            .map(|field| field.values.len())
+            .ok_or("selected grid field no longer exists")?;
+        if rows.iter().any(|row| *row >= count) {
+            return Err("a selected point no longer exists".into());
+        }
+        self.snapshot_draft();
+        let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
+            .ok_or("selected grid field no longer exists")?;
+        for row in rows {
+            field.values[*row].note = None;
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    /// Restore a selected draft field from the last applied dataset.
+    pub fn revert_field(&mut self, grid_index: usize, field_index: usize) -> Result<(), String> {
+        let (grid_name, phase_id, property) = self
+            .draft
+            .grids
+            .get(grid_index)
+            .and_then(|grid| {
+                grid.fields().get(field_index).map(|field| {
+                    (
+                        grid.name().to_owned(),
+                        field.phase_id,
+                        field.property.clone(),
+                    )
+                })
+            })
+            .ok_or("selected grid field no longer exists")?;
+        let values = self
+            .active
+            .grids
+            .iter()
+            .find(|grid| grid.name() == grid_name)
+            .and_then(|grid| {
+                grid.fields()
+                    .iter()
+                    .find(|field| field.phase_id == phase_id && field.property == property)
+            })
+            .map(|field| (field.values.clone(), field.row_lines.clone()))
+            .ok_or("selected field does not exist in the applied dataset")?;
+        self.snapshot_draft();
+        let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
+            .ok_or("selected grid field no longer exists")?;
+        field.values = values.0;
+        field.row_lines = values.1;
+        self.dirty = self.draft != self.active;
         Ok(())
     }
 
@@ -1060,7 +1224,7 @@ impl DatasetEditorState {
         grid.order = RowOrder::Canonical;
         grid.composition_columns = CompositionColumns::None;
         for field in &mut grid.fields {
-            field.values = vec![None; grid.compositions.len()];
+            field.values = vec![TabulatedValue::missing(); grid.compositions.len()];
             field.row_lines = vec![0; grid.compositions.len()];
         }
         self.dirty = true;
@@ -1100,6 +1264,7 @@ impl DatasetEditorState {
         {
             return Err(format!("grid '{}' already exists", grid.name()));
         }
+        self.snapshot_draft();
         self.draft.grids.push(grid);
         self.dirty = true;
         Ok(())
@@ -1112,6 +1277,7 @@ impl DatasetEditorState {
         if index >= self.draft.grids.len() {
             return Err("selected grid no longer exists".into());
         }
+        self.snapshot_draft();
         self.draft.grids.remove(index);
         self.dirty = true;
         Ok(())
@@ -1184,6 +1350,13 @@ fn fields_from_pending(fields: &[PendingField]) -> Vec<TabulatedField> {
             row_lines: vec![0; field.values.len()],
         })
         .collect()
+}
+
+fn grid_field_mut(grid: &mut TabulatedGrid, index: usize) -> Option<&mut TabulatedField> {
+    match grid {
+        TabulatedGrid::Regular(value) => value.fields.get_mut(index),
+        TabulatedGrid::Irregular(value) => value.fields.get_mut(index),
+    }
 }
 
 fn mutate_field(grid: &mut TabulatedGrid, index: usize, field: TabulatedField) {
@@ -1343,6 +1516,53 @@ mod tests {
     }
 
     #[test]
+    fn classified_tsv_paste_and_point_edits_preserve_states_and_undo() {
+        let preview = preview_regular_paste(
+            "100\nNE\nCO:3000\nNA\n101\n102",
+            2,
+            &RegularPasteMapping {
+                header_mode: HeaderMode::Absent,
+                fields: vec![field(0, "T")],
+                ..Default::default()
+            },
+        );
+        assert!(preview.report.is_valid(), "{}", preview.report.as_text());
+        assert_eq!(preview.fields[0].values[0].calculated_value(), Some(100.0));
+        assert_eq!(
+            preview.fields[0].values[1].state,
+            crate::TabulatedValueState::NonExisting
+        );
+        assert_eq!(
+            preview.fields[0].values[2].state,
+            crate::TabulatedValueState::CutOff
+        );
+        assert_eq!(preview.fields[0].values[2].note.as_deref(), Some("3000"));
+
+        let mut state = DatasetEditorState::new(crate::default_regular_dataset());
+        state
+            .set_field_point(0, 0, 0, TabulatedValue::calculated(1200.0).unwrap())
+            .unwrap();
+        state
+            .set_field_state_batch(
+                0,
+                0,
+                &[1, 2],
+                crate::TabulatedValueState::CutOff,
+                Some("3000".into()),
+            )
+            .unwrap();
+        assert_eq!(state.field_state_counts(0, 0).unwrap(), [1, 0, 2, 63]);
+        assert_eq!(
+            state.draft.grids[0].fields()[0].values[1].note.as_deref(),
+            Some("3000")
+        );
+        assert!(state.draft_undo());
+        assert_eq!(state.field_state_counts(0, 0).unwrap(), [1, 0, 0, 65]);
+        state.revert_field(0, 0).unwrap();
+        assert_eq!(state.field_state_counts(0, 0).unwrap(), [0, 0, 0, 66]);
+    }
+
+    #[test]
     fn regular_resolution_regeneration_is_validated_and_clears_values() {
         let mut state = DatasetEditorState::new(crate::default_regular_dataset());
         assert!(regular_row_count(0).is_err());
@@ -1350,17 +1570,18 @@ mod tests {
         let TabulatedGrid::Regular(grid) = &mut state.draft.grids[0] else {
             panic!("expected regular grid");
         };
-        grid.fields[0].values[0] = Some(1200.0);
+        grid.fields[0].values[0] = TabulatedValue::calculated(1200.0).unwrap();
         state.regenerate_regular_grid(0, 20).unwrap();
         let TabulatedGrid::Regular(grid) = &state.draft.grids[0] else {
             panic!("expected regular grid");
         };
         assert_eq!(grid.compositions.len(), 231);
-        assert!(
-            grid.fields
+        assert!(grid.fields.iter().all(|field| {
+            field
+                .values
                 .iter()
-                .all(|field| field.values.iter().all(Option::is_none))
-        );
+                .all(|value| value.state == crate::TabulatedValueState::Missing)
+        }));
         assert!(state.draft_undo());
         let TabulatedGrid::Regular(grid) = &state.draft.grids[0] else {
             panic!("expected regular grid");

@@ -257,8 +257,8 @@ fn inspect(input: PathBuf) -> Result<(), Box<dyn Error>> {
                 .fold((0, 0), |(defined, undefined), field| {
                     let values = field.values.iter();
                     (
-                        defined + values.clone().flatten().count(),
-                        undefined + values.filter(|value| value.is_none()).count(),
+                        defined + values.clone().filter(|value| value.is_calculated()).count(),
+                        undefined + values.filter(|value| !value.is_calculated()).count(),
                     )
                 });
         match grid {
