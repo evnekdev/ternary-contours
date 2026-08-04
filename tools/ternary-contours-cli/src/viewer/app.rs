@@ -13,9 +13,11 @@ use crate::{
 use super::{
     controls,
     data_editor::{DataEditorAction, DataEditorUi},
+    grid_inspection::{self, GridInspectionAction, GridInspectionUi},
     hit_test::{HitGeometry, NetworkSource, SelectedFeature, ViewerTransform},
     state::{
-        CalculationRequest, PathDisplayMode, ViewerState, ViewerStatus, WorkerResult, start_worker,
+        CalculationRequest, PathDisplayMode, ViewerState, ViewerStatus, WorkerResult,
+        load_tct_dataset, start_worker,
     },
     texture::RenderedTexture,
 };
@@ -24,6 +26,7 @@ use super::{
 enum ViewerTab {
     Plot,
     Data,
+    GridInspection,
     Diagnostics,
 }
 
@@ -36,9 +39,11 @@ pub struct LiquidusViewerApp {
     pan: egui::Vec2,
     editor: Option<DatasetEditorState>,
     editor_ui: DataEditorUi,
+    grid_inspection_ui: GridInspectionUi,
     tab: ViewerTab,
     sync_editor_on_success: bool,
     pending_request: Option<CalculationRequest>,
+    open_confirmation: bool,
 }
 
 impl LiquidusViewerApp {
@@ -56,11 +61,28 @@ impl LiquidusViewerApp {
             pan: egui::Vec2::ZERO,
             editor: None,
             editor_ui: DataEditorUi::default(),
+            grid_inspection_ui: GridInspectionUi::default(),
             tab: ViewerTab::Plot,
-            sync_editor_on_success: true,
+            sync_editor_on_success: false,
             pending_request: None,
+            open_confirmation: false,
         };
-        app.start_calculation();
+        // Initial command-line file startup shares the exact parser, structural
+        // validation, editor construction, and Grid inspection initialization
+        // used by native Open. Calculation remains on the worker thread.
+        match load_tct_dataset(&app.state.input_path) {
+            Ok(dataset) => {
+                let editor = DatasetEditorState::new(dataset.clone());
+                app.grid_inspection_ui.initialise(&editor);
+                app.state.dataset = Some(dataset.clone());
+                app.editor = Some(editor);
+                app.start_dataset_calculation(dataset);
+            }
+            Err(error) => {
+                app.state.status = ViewerStatus::Failed(error.clone());
+                app.state.message = Some(format!("File could not be loaded: {error}"));
+            }
+        }
         app
     }
 
@@ -70,6 +92,8 @@ impl LiquidusViewerApp {
         dataset: crate::TabulatedTernaryDataset,
     ) -> Self {
         let editor = DatasetEditorState::new(dataset.clone());
+        let mut grid_inspection_ui = GridInspectionUi::default();
+        grid_inspection_ui.initialise(&editor);
         Self {
             state: ViewerState::new_unsaved(calculation_options, render_options, dataset),
             worker: None,
@@ -79,15 +103,13 @@ impl LiquidusViewerApp {
             pan: egui::Vec2::ZERO,
             editor: Some(editor),
             editor_ui: DataEditorUi::default(),
+            grid_inspection_ui,
             tab: ViewerTab::Data,
             sync_editor_on_success: false,
             pending_request: None,
+            open_confirmation: false,
         }
     }
-    pub(crate) fn start_calculation(&mut self) {
-        self.start_file_calculation();
-    }
-
     fn start_file_calculation(&mut self) {
         self.sync_editor_on_success = true;
         let request = self.state.begin_request();
@@ -158,7 +180,9 @@ impl LiquidusViewerApp {
                     && self.sync_editor_on_success
                     && let Some(dataset) = self.state.dataset.clone()
                 {
-                    self.editor = Some(DatasetEditorState::new(dataset));
+                    let editor = DatasetEditorState::new(dataset);
+                    self.grid_inspection_ui.initialise(&editor);
+                    self.editor = Some(editor);
                     self.editor_ui = DataEditorUi::default();
                 }
                 self.sync_editor_on_success = false;
@@ -584,18 +608,94 @@ impl LiquidusViewerApp {
         }
     }
 
-    fn save_document(&mut self, ctx: &egui::Context, force_dialog: bool) {
+    fn choose_open_path(&mut self) -> Option<PathBuf> {
+        let document = (!self.state.unsaved).then_some(self.state.input_path.as_path());
+        let directory = super::save::default_dialog_directory(
+            self.state.last_dialog_directory.as_deref(),
+            document,
+        );
+        rfd::FileDialog::new()
+            .set_title("Open Ternary Contour Table")
+            .add_filter("Ternary Contour Table", &["tct"])
+            .set_directory(directory)
+            .pick_file()
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.state.unsaved
+            || self.state.document_dirty
+            || self.editor.as_ref().is_some_and(|editor| editor.dirty)
+    }
+
+    /// Parse and construct all replacement state before touching the current
+    /// document. A malformed selection therefore preserves the visible plot and
+    /// every pending edit.
+    fn open_document_path(&mut self, ctx: &egui::Context, path: PathBuf) -> Result<(), String> {
+        let dataset = load_tct_dataset(&path)?;
+        let editor = DatasetEditorState::new(dataset.clone());
+        let mut grid_inspection_ui = GridInspectionUi::default();
+        grid_inspection_ui.initialise(&editor);
+
+        self.state
+            .replace_loaded_document(path.clone(), dataset.clone());
+        self.editor = Some(editor);
+        self.editor_ui = DataEditorUi::default();
+        self.grid_inspection_ui = grid_inspection_ui;
+        self.texture = None;
+        self.hit_geometry = HitGeometry::default();
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
+        self.open_confirmation = false;
+        self.start_dataset_calculation(dataset);
+        self.state.message = Some("Dataset loaded; calculating the new document?".into());
+        let title = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("Ternary contours - {name}"))
+            .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        Ok(())
+    }
+
+    fn begin_open_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.choose_open_path() else {
+            return;
+        };
+        if let Err(error) = self.open_document_path(ctx, path.clone()) {
+            self.state.message = Some(format!(
+                "File could not be loaded ({}): {error}",
+                path.display()
+            ));
+        }
+    }
+
+    fn save_document(&mut self, ctx: &egui::Context, force_dialog: bool) -> bool {
+        if let Some(editor) = self.editor.as_mut()
+            && editor.dirty
+        {
+            match editor.apply_draft() {
+                Ok(dataset) => {
+                    self.state.dataset = Some(dataset);
+                    self.state.mark_document_dirty();
+                }
+                Err(error) => {
+                    self.state.message =
+                        Some(format!("save failed: draft validation failed: {error}"));
+                    return false;
+                }
+            }
+        }
         let path = if super::save::save_requires_dialog(self.state.unsaved, force_dialog) {
             self.choose_save_path()
         } else {
             Some(self.state.input_path.clone())
         };
         let Some(path) = path else {
-            return;
+            return false;
         };
         let Some(editor) = self.editor.as_ref() else {
             self.state.message = Some("no dataset is loaded".into());
-            return;
+            return false;
         };
         let result = serialize_tct(&editor.active, &TctSerializeOptions::default())
             .map_err(|error| error.to_string())
@@ -620,8 +720,10 @@ impl LiquidusViewerApp {
             }
             Err(error) => {
                 self.state.message = Some(format!("save failed: {error}"));
+                return false;
             }
         }
+        true
     }
     fn show_data(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let dataset = {
@@ -632,12 +734,59 @@ impl LiquidusViewerApp {
                 return;
             };
             let action = super::data_editor::show(ctx, ui, editor, &mut self.editor_ui);
+            if matches!(
+                action,
+                DataEditorAction::Applied | DataEditorAction::Recalculate
+            ) {
+                self.state.mark_document_dirty();
+            }
             matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
         };
         if let Some(dataset) = dataset {
             self.start_dataset_calculation(dataset);
         }
     }
+    fn show_grid_inspection(&mut self, ctx: &egui::Context) {
+        let action = if let Some(editor) = self.editor.as_mut() {
+            let mut action = GridInspectionAction::None;
+            egui::SidePanel::left("grid_inspection_controls")
+                .resizable(true)
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        action = grid_inspection::show_controls(
+                            ctx,
+                            ui,
+                            editor,
+                            &mut self.grid_inspection_ui,
+                        );
+                    });
+                });
+            action
+        } else {
+            GridInspectionAction::None
+        };
+        if matches!(
+            action,
+            GridInspectionAction::Applied | GridInspectionAction::Recalculate
+        ) {
+            self.state.mark_document_dirty();
+        }
+        let recalculate = matches!(action, GridInspectionAction::Recalculate);
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(editor) = self.editor.as_ref() {
+                grid_inspection::show_canvas(ui, editor, &mut self.grid_inspection_ui);
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Load a TCT dataset to inspect grid points.")
+                });
+            }
+        });
+        if recalculate && let Some(editor) = &self.editor {
+            self.start_dataset_calculation(editor.active.clone());
+        }
+    }
+
     fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
         if let Some(message) = &self.state.message {
@@ -803,6 +952,7 @@ impl eframe::App for LiquidusViewerApp {
         let can_calculate = self.worker.is_none();
         let mut reload = false;
         let mut recalculate = false;
+        let mut open_requested = false;
         let mut save_requested = false;
         let mut save_as_requested = false;
         egui::TopBottomPanel::top("viewer_toolbar").show(ctx, |ui| {
@@ -811,19 +961,23 @@ impl eframe::App for LiquidusViewerApp {
                 ui.separator();
                 ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
                 ui.selectable_value(&mut self.tab, ViewerTab::Data, "Data");
+                ui.selectable_value(&mut self.tab, ViewerTab::GridInspection, "Grid inspection");
                 ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
-                if self.tab == ViewerTab::Data {
-                    ui.separator();
-                    save_requested = ui.button("Save").clicked();
-                    save_as_requested = ui.button("Save As").clicked();
-                    let document_label = if self.state.unsaved {
-                        "Untitled - unsaved".to_owned()
-                    } else {
-                        self.state.input_path.display().to_string()
-                    };
-                    ui.label(document_label)
-                        .on_hover_text("Current document path");
-                }
+                ui.separator();
+                open_requested = ui.button("Open").clicked();
+                save_requested = ui.button("Save").clicked();
+                save_as_requested = ui.button("Save As").clicked();
+                let document_label = if self.state.unsaved {
+                    "Unsaved".to_owned()
+                } else if self.state.document_dirty
+                    || self.editor.as_ref().is_some_and(|editor| editor.dirty)
+                {
+                    format!("{} ? modified", self.state.input_path.display())
+                } else {
+                    self.state.input_path.display().to_string()
+                };
+                ui.label(document_label)
+                    .on_hover_text("Current document path");
                 ui.separator();
                 reload = ui
                     .add_enabled(
@@ -865,12 +1019,57 @@ impl eframe::App for LiquidusViewerApp {
                     egui::ScrollArea::vertical().show(ui, |ui| self.show_data(ctx, ui));
                 });
             }
+            ViewerTab::GridInspection => self.show_grid_inspection(ctx),
             ViewerTab::Diagnostics => {
                 egui::CentralPanel::default().show(ctx, |ui| self.show_diagnostics_tab(ctx, ui));
             }
         }
-        if can_calculate && (save_requested || save_as_requested) {
+        let shortcuts = ctx.input(|input| {
+            (
+                input.modifiers.command && input.key_pressed(egui::Key::O),
+                input.modifiers.command && input.key_pressed(egui::Key::S),
+                input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::S),
+            )
+        });
+        open_requested |= shortcuts.0;
+        save_requested |= shortcuts.1 && !shortcuts.2;
+        save_as_requested |= shortcuts.2;
+        if save_requested || save_as_requested {
             self.save_document(ctx, save_as_requested);
+        }
+        if open_requested {
+            if self.has_unsaved_changes() {
+                self.open_confirmation = true;
+            } else {
+                self.begin_open_dialog(ctx);
+            }
+        }
+        if self.open_confirmation {
+            let mut save_then_open = false;
+            let mut discard_then_open = false;
+            let mut cancel = false;
+            egui::Window::new("Unsaved changes")
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label("The current document has unsaved changes.");
+                    ui.horizontal(|ui| {
+                        save_then_open = ui.button("Save").clicked();
+                        discard_then_open = ui.button("Discard and open").clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
+                });
+            if cancel {
+                self.open_confirmation = false;
+            } else if save_then_open {
+                if self.save_document(ctx, false) {
+                    self.open_confirmation = false;
+                    self.begin_open_dialog(ctx);
+                }
+            } else if discard_then_open {
+                self.open_confirmation = false;
+                self.begin_open_dialog(ctx);
+            }
         }
 
         egui::TopBottomPanel::bottom("viewer_status").show(ctx, |ui| {
@@ -900,5 +1099,65 @@ impl eframe::App for LiquidusViewerApp {
         if can_calculate && (recalculate || apply_from_controls) {
             self.apply_and_recalculate();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_open_replaces_the_starter_dataset_and_initialises_grid_selection() {
+        let mut app = LiquidusViewerApp::new_default(
+            ProjectionOptions::default(),
+            RenderOptions::default(),
+            crate::default_regular_dataset(),
+        );
+        app.state.selection = Some(SelectedFeature::SourceSample {
+            grid_index: 0,
+            point_index: 0,
+        });
+        app.state.document_dirty = true;
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/classified-states.tct");
+        app.open_document_path(&egui::Context::default(), path.clone())
+            .unwrap();
+        let dataset = app.editor.as_ref().unwrap();
+        assert_eq!(
+            dataset.active.title.as_deref(),
+            Some("Classified grid states")
+        );
+        assert_eq!(dataset.active.grids.len(), 1);
+        assert_eq!(app.state.dataset.as_ref().unwrap().components[0].name, "A");
+        assert_eq!(app.grid_inspection_ui.selected_grid, 0);
+        assert_eq!(
+            app.grid_inspection_ui.selected_phase,
+            Some(ternary_contours::StablePhaseId(1))
+        );
+        assert_eq!(app.grid_inspection_ui.selected_property, "T");
+        assert!(app.state.selection.is_none());
+        assert!(!app.state.document_dirty);
+        assert_eq!(app.state.input_path, path);
+    }
+
+    #[test]
+    fn failed_native_open_preserves_the_current_unsaved_editor() {
+        let mut app = LiquidusViewerApp::new_default(
+            ProjectionOptions::default(),
+            RenderOptions::default(),
+            crate::default_regular_dataset(),
+        );
+        app.editor
+            .as_mut()
+            .unwrap()
+            .set_field_point(0, 0, 0, crate::TabulatedValue::calculated(1200.0).unwrap())
+            .unwrap();
+        let before = app.editor.as_ref().unwrap().draft.clone();
+        let missing = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/does-not-exist.tct");
+        assert!(
+            app.open_document_path(&egui::Context::default(), missing)
+                .is_err()
+        );
+        assert_eq!(app.editor.as_ref().unwrap().draft, before);
+        assert!(app.has_unsaved_changes());
     }
 }
