@@ -1,10 +1,13 @@
-use std::sync::mpsc::{Receiver, TryRecvError};
+use std::{
+    path::PathBuf,
+    sync::mpsc::{Receiver, TryRecvError},
+};
 
 use eframe::egui;
 
 use crate::{
-    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, render_to_bitmap_with_raw,
-    render_to_path_with_raw,
+    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, TctSerializeOptions,
+    render_to_bitmap_with_raw, render_to_path_with_raw, save_tct_atomic, serialize_tct,
 };
 
 use super::{
@@ -509,6 +512,73 @@ impl LiquidusViewerApp {
             .map(|path| self.phase_names(&[path.phases.first, path.phases.second]))
             .unwrap_or_else(|| format!("U{id}"))
     }
+    fn choose_save_path(&mut self) -> Option<PathBuf> {
+        let editor = self.editor.as_ref()?;
+        let document = (!self.state.unsaved).then_some(self.state.input_path.as_path());
+        let directory = super::save::default_dialog_directory(
+            self.state.last_dialog_directory.as_deref(),
+            document,
+        );
+        let filename = super::save::default_filename(
+            document,
+            self.state.unsaved,
+            editor.active.title.as_deref(),
+        );
+        let selected = rfd::FileDialog::new()
+            .set_title("Save Ternary Contour Table")
+            .add_filter("Ternary Contour Table", &["tct"])
+            .set_directory(directory)
+            .set_file_name(&filename)
+            .save_file();
+        let selected = selected?;
+        match super::save::ensure_tct_extension(selected) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                self.state.message = Some(error);
+                None
+            }
+        }
+    }
+
+    fn save_document(&mut self, ctx: &egui::Context, force_dialog: bool) {
+        let path = if super::save::save_requires_dialog(self.state.unsaved, force_dialog) {
+            self.choose_save_path()
+        } else {
+            Some(self.state.input_path.clone())
+        };
+        let Some(path) = path else {
+            return;
+        };
+        let Some(editor) = self.editor.as_ref() else {
+            self.state.message = Some("no dataset is loaded".into());
+            return;
+        };
+        let result = serialize_tct(&editor.active, &TctSerializeOptions::default())
+            .map_err(|error| error.to_string())
+            .and_then(|text| save_tct_atomic(&path, &text).map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.state.mark_saved(path.clone());
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.active.source_path = Some(path.clone());
+                    editor.draft.source_path = Some(path.clone());
+                }
+                if let Some(dataset) = self.state.dataset.as_mut() {
+                    dataset.source_path = Some(path.clone());
+                }
+                self.state.message = Some(format!("Saved {}", path.display()));
+                let title = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| format!("Ternary contours - {name}"))
+                    .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            }
+            Err(error) => {
+                self.state.message = Some(format!("save failed: {error}"));
+            }
+        }
+    }
     fn show_data(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         let dataset = {
             let Some(editor) = self.editor.as_mut() else {
@@ -517,20 +587,9 @@ impl LiquidusViewerApp {
                 });
                 return;
             };
-            let action = super::data_editor::show(
-                ctx,
-                ui,
-                editor,
-                &mut self.editor_ui,
-                &self.state.input_path,
-                self.state.unsaved,
-            );
+            let action = super::data_editor::show(ctx, ui, editor, &mut self.editor_ui);
             matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
         };
-        if let Some(path) = self.editor_ui.saved_path.take() {
-            self.state.input_path = path;
-            self.state.unsaved = false;
-        }
         if let Some(dataset) = dataset {
             self.start_dataset_calculation(dataset);
         }
@@ -641,13 +700,27 @@ impl eframe::App for LiquidusViewerApp {
         let can_calculate = self.worker.is_none();
         let mut reload = false;
         let mut recalculate = false;
+        let mut save_requested = false;
+        let mut save_as_requested = false;
         egui::TopBottomPanel::top("viewer_toolbar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.strong("Liquidus inspection viewer");
                 ui.separator();
                 ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
                 ui.selectable_value(&mut self.tab, ViewerTab::Data, "Data");
                 ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
+                if self.tab == ViewerTab::Data {
+                    ui.separator();
+                    save_requested = ui.button("Save").clicked();
+                    save_as_requested = ui.button("Save As").clicked();
+                    let document_label = if self.state.unsaved {
+                        "Untitled - unsaved".to_owned()
+                    } else {
+                        self.state.input_path.display().to_string()
+                    };
+                    ui.label(document_label)
+                        .on_hover_text("Current document path");
+                }
                 ui.separator();
                 reload = ui
                     .add_enabled(
@@ -693,13 +766,25 @@ impl eframe::App for LiquidusViewerApp {
                 egui::CentralPanel::default().show(ctx, |ui| self.show_diagnostics_tab(ctx, ui));
             }
         }
-        egui::TopBottomPanel::bottom("viewer_status").show(ctx, |ui| match &self.state.status {
-            ViewerStatus::Idle => ui.label("Ready to calculate."),
-            ViewerStatus::Calculating => {
-                ui.label("Calculation in progress; numerical controls are disabled.")
+        if can_calculate && (save_requested || save_as_requested) {
+            self.save_document(ctx, save_as_requested);
+        }
+
+        egui::TopBottomPanel::bottom("viewer_status").show(ctx, |ui| {
+            if let Some(message) = &self.state.message {
+                ui.label(message);
+            } else {
+                match &self.state.status {
+                    ViewerStatus::Idle => ui.label("Ready to calculate."),
+                    ViewerStatus::Calculating => {
+                        ui.label("Calculation in progress; numerical controls are disabled.")
+                    }
+                    ViewerStatus::Ready => {
+                        ui.label("Calculation complete. Scroll to zoom; drag to pan.")
+                    }
+                    ViewerStatus::Failed(message) => ui.colored_label(egui::Color32::RED, message),
+                };
             }
-            ViewerStatus::Ready => ui.label("Calculation complete. Scroll to zoom; drag to pan."),
-            ViewerStatus::Failed(message) => ui.colored_label(egui::Color32::RED, message),
         });
 
         if fit {
