@@ -506,7 +506,386 @@ impl LiquidusViewerApp {
                     self.phase_names(&[path.phase])
                 ));
                 ui.label(format!(
-                    "path {}: {}…3993 tokens truncated…d samples remain local.",
+                    "path {}: {}",
+                    path_index,
+                    if path.closed { "closed" } else { "open" }
+                ));
+                ui.label(format!("point count: {}", path.points.len()));
+                if let Some(point) = path.points.get(*nearest_point) {
+                    ui.label(format!(
+                        "nearest point: {}",
+                        format_composition(point.as_array())
+                    ));
+                }
+                ui.small("field residual is not retained by the stable-contour result API.");
+            }
+            SelectedFeature::SourceSample {
+                grid_index,
+                point_index,
+            } => {
+                let Some(grid) = self
+                    .state
+                    .dataset
+                    .as_ref()
+                    .and_then(|dataset| dataset.grids.get(*grid_index))
+                else {
+                    return;
+                };
+                ui.label(format!("Source sample: {}", grid.name()));
+                if let Some(point) = grid.compositions().get(*point_index) {
+                    ui.label(format!("composition: {}", format_composition(*point)));
+                }
+            }
+        }
+    }
+
+    fn phase_names(&self, phases: &[ternary_contours::StablePhaseId]) -> String {
+        phases
+            .iter()
+            .map(|phase| {
+                self.state
+                    .dataset
+                    .as_ref()
+                    .and_then(|dataset| dataset.phases.iter().find(|entry| entry.id == *phase))
+                    .map(|entry| entry.name.clone())
+                    .unwrap_or_else(|| format!("Phase {}", phase.0))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+    fn draw_diagnostics(&self, painter: &egui::Painter, transform: &ViewerTransform) {
+        let options = &self.state.viewer_options;
+        for (points, feature, _closed) in self.hit_geometry.paths() {
+            if options.show_path_vertices {
+                for point in points {
+                    let screen = transform.logical_to_screen(*point);
+                    let position = egui::pos2(screen[0] as f32, screen[1] as f32);
+                    match feature {
+                        SelectedFeature::Univariant {
+                            source: NetworkSource::Regularized,
+                            ..
+                        } => painter.rect_filled(
+                            egui::Rect::from_center_size(position, egui::vec2(4.0, 4.0)),
+                            0.0,
+                            egui::Color32::from_rgb(79, 209, 197),
+                        ),
+                        _ => painter.circle_filled(
+                            position,
+                            2.0_f32,
+                            egui::Color32::from_rgb(242, 196, 60),
+                        ),
+                    };
+                }
+            }
+            let show_endpoints = match feature {
+                SelectedFeature::Isotherm { .. } => options.show_contour_endpoints,
+                SelectedFeature::Univariant { .. } => options.show_univariant_endpoints,
+                _ => false,
+            };
+            if show_endpoints {
+                for point in [points.first(), points.last()].into_iter().flatten() {
+                    let screen = transform.logical_to_screen(*point);
+                    painter.circle_stroke(
+                        egui::pos2(screen[0] as f32, screen[1] as f32),
+                        4.0_f32,
+                        egui::Stroke::new(1.0_f32, egui::Color32::LIGHT_BLUE),
+                    );
+                }
+            }
+            if let SelectedFeature::Univariant { id, source } = feature
+                && (options.show_univariant_ids || options.show_phase_pair_labels)
+                && let Some(point) = points.get(points.len() / 2)
+            {
+                let screen = transform.logical_to_screen(*point);
+                let label = if options.show_phase_pair_labels {
+                    self.phase_pair_label(*id, *source)
+                } else {
+                    format!("U{id}")
+                };
+                painter.text(
+                    egui::pos2(screen[0] as f32, screen[1] as f32),
+                    egui::Align2::LEFT_TOP,
+                    label,
+                    egui::FontId::monospace(11.0_f32),
+                    egui::Color32::DARK_RED,
+                );
+            }
+        }
+        if options.show_invariant_ids {
+            for (point, feature) in self.hit_geometry.nodes() {
+                if let SelectedFeature::Invariant { node_index } = feature {
+                    let screen = transform.logical_to_screen(point);
+                    painter.text(
+                        egui::pos2(screen[0] as f32, screen[1] as f32),
+                        egui::Align2::LEFT_BOTTOM,
+                        format!("N{node_index}"),
+                        egui::FontId::monospace(11.0_f32),
+                        egui::Color32::PURPLE,
+                    );
+                }
+            }
+        }
+    }
+
+    fn phase_pair_label(&self, id: usize, source: NetworkSource) -> String {
+        let projection = match source {
+            NetworkSource::Raw => self.state.raw_projection.as_ref(),
+            NetworkSource::Regularized => self
+                .state
+                .regularized_projection
+                .as_ref()
+                .or(self.state.raw_projection.as_ref()),
+        };
+        projection
+            .and_then(|projection| {
+                projection
+                    .stable_boundaries
+                    .univariants
+                    .iter()
+                    .find(|path| path.id.0 == id)
+            })
+            .map(|path| self.phase_names(&[path.phases.first, path.phases.second]))
+            .unwrap_or_else(|| format!("U{id}"))
+    }
+    fn choose_save_path(&mut self) -> Option<PathBuf> {
+        let editor = self.editor.as_ref()?;
+        let document = (!self.state.unsaved).then_some(self.state.input_path.as_path());
+        let directory = super::save::default_dialog_directory(
+            self.state.last_dialog_directory.as_deref(),
+            document,
+        );
+        let filename = super::save::default_filename(
+            document,
+            self.state.unsaved,
+            editor.active.title.as_deref(),
+        );
+        let selected = rfd::FileDialog::new()
+            .set_title("Save Ternary Contour Table")
+            .add_filter("Ternary Contour Table", &["tct"])
+            .set_directory(directory)
+            .set_file_name(&filename)
+            .save_file();
+        let selected = selected?;
+        match super::save::ensure_tct_extension(selected) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                self.state.message = Some(error);
+                None
+            }
+        }
+    }
+
+    fn choose_open_path(&mut self) -> Option<PathBuf> {
+        let document = (!self.state.unsaved).then_some(self.state.input_path.as_path());
+        let directory = super::save::default_dialog_directory(
+            self.state.last_dialog_directory.as_deref(),
+            document,
+        );
+        rfd::FileDialog::new()
+            .set_title("Open Ternary Contour Table")
+            .add_filter("Ternary Contour Table", &["tct"])
+            .set_directory(directory)
+            .pick_file()
+    }
+
+    fn has_unsaved_changes(&self) -> bool {
+        self.state.unsaved
+            || self.state.document_dirty
+            || self.editor.as_ref().is_some_and(|editor| editor.dirty)
+    }
+
+    /// Parse and construct all replacement state before touching the current
+    /// document. A malformed selection therefore preserves the visible plot and
+    /// every pending edit.
+    fn open_document_path(&mut self, ctx: &egui::Context, path: PathBuf) -> Result<(), String> {
+        let dataset = load_tct_dataset(&path)?;
+        let editor = DatasetEditorState::new(dataset.clone());
+        let mut grid_inspection_ui = GridInspectionUi::default();
+        grid_inspection_ui.initialise(&editor);
+
+        self.state
+            .replace_loaded_document(path.clone(), dataset.clone());
+        self.editor = Some(editor);
+        self.editor_ui = DataEditorUi::default();
+        self.grid_inspection_ui = grid_inspection_ui;
+        self.texture = None;
+        self.hit_geometry = HitGeometry::default();
+        self.zoom = 1.0;
+        self.pan = egui::Vec2::ZERO;
+        self.open_confirmation = false;
+        self.tab = ViewerTab::Data;
+        self.show_plot_after_success = true;
+        self.start_dataset_calculation(dataset);
+        self.state.message = Some("Dataset loaded; calculating the new document.".into());
+        let title = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| format!("Ternary contours - {name}"))
+            .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        Ok(())
+    }
+
+    fn begin_open_dialog(&mut self, ctx: &egui::Context) {
+        let Some(path) = self.choose_open_path() else {
+            return;
+        };
+        if let Err(error) = self.open_document_path(ctx, path.clone()) {
+            self.state.message = Some(format!(
+                "File could not be loaded ({}): {error}",
+                path.display()
+            ));
+        }
+    }
+
+    fn save_document(&mut self, ctx: &egui::Context, force_dialog: bool) -> bool {
+        if let Some(editor) = self.editor.as_mut()
+            && editor.dirty
+        {
+            match editor.apply_draft() {
+                Ok(dataset) => {
+                    self.state.dataset = Some(dataset);
+                    self.state.mark_document_dirty();
+                }
+                Err(error) => {
+                    self.state.message =
+                        Some(format!("save failed: draft validation failed: {error}"));
+                    return false;
+                }
+            }
+        }
+        let path = if super::save::save_requires_dialog(self.state.unsaved, force_dialog) {
+            self.choose_save_path()
+        } else {
+            Some(self.state.input_path.clone())
+        };
+        let Some(path) = path else {
+            return false;
+        };
+        let Some(editor) = self.editor.as_ref() else {
+            self.state.message = Some("no dataset is loaded".into());
+            return false;
+        };
+        let result = serialize_tct(&editor.active, &TctSerializeOptions::default())
+            .map_err(|error| error.to_string())
+            .and_then(|text| save_tct_atomic(&path, &text).map_err(|error| error.to_string()));
+        match result {
+            Ok(()) => {
+                self.state.mark_saved(path.clone());
+                if let Some(editor) = self.editor.as_mut() {
+                    editor.active.source_path = Some(path.clone());
+                    editor.draft.source_path = Some(path.clone());
+                }
+                if let Some(dataset) = self.state.dataset.as_mut() {
+                    dataset.source_path = Some(path.clone());
+                }
+                self.state.message = Some(format!("Saved {}", path.display()));
+                let title = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|name| format!("Ternary contours - {name}"))
+                    .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+            }
+            Err(error) => {
+                self.state.message = Some(format!("save failed: {error}"));
+                return false;
+            }
+        }
+        true
+    }
+    fn show_data(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        let dataset = {
+            let Some(editor) = self.editor.as_mut() else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Load a valid TCT dataset before editing data.")
+                });
+                return;
+            };
+            let action = super::data_editor::show(ctx, ui, editor, &mut self.editor_ui);
+            if matches!(
+                action,
+                DataEditorAction::Applied | DataEditorAction::Recalculate
+            ) {
+                self.state.mark_document_dirty();
+            }
+            matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
+        };
+        if dataset.is_some() {
+            self.state.invalidate_projection();
+            self.schedule_recalculation();
+        }
+    }
+    fn show_grid_inspection(&mut self, ctx: &egui::Context) {
+        let action = if let Some(editor) = self.editor.as_mut() {
+            let mut action = GridInspectionAction::None;
+            egui::SidePanel::left("grid_inspection_controls")
+                .resizable(true)
+                .default_width(300.0)
+                .show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        action = grid_inspection::show_controls(
+                            ctx,
+                            ui,
+                            editor,
+                            &mut self.grid_inspection_ui,
+                        );
+                    });
+                });
+            action
+        } else {
+            GridInspectionAction::None
+        };
+        if !matches!(action, GridInspectionAction::None) {
+            self.state.mark_document_dirty();
+        }
+        let recalculate = matches!(
+            action,
+            GridInspectionAction::Applied | GridInspectionAction::Recalculate
+        );
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(editor) = self.editor.as_ref() {
+                grid_inspection::show_canvas(ui, editor, &mut self.grid_inspection_ui);
+            } else {
+                ui.centered_and_justified(|ui| {
+                    ui.label("Load a TCT dataset to inspect grid points.")
+                });
+            }
+        });
+        if recalculate {
+            self.state.invalidate_projection();
+            self.schedule_recalculation();
+        }
+    }
+
+    fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
+        ui.heading("Diagnostics");
+        if let Some(dataset) = self.state.dataset.as_ref() {
+            ui.separator();
+            ui.heading("Active numerical configuration");
+            let sampling = self
+                .state
+                .calculation_options
+                .sampling_subdivisions
+                .unwrap_or(24);
+            let sampling_points = (sampling + 1) * (sampling + 2) / 2;
+            ui.label(format!(
+                "Sampling grid: n = {sampling} ({sampling_points} evaluation vertices)"
+            ));
+            match self.state.calculation_options.source_interpolation {
+                SourceInterpolation::Linear => {
+                    ui.label("Source interpolation: Linear (piecewise planar)");
+                    ui.small("Cubic model: not selected.");
+                }
+                SourceInterpolation::CubicAlpha {
+                    method,
+                    continuation,
+                } => {
+                    ui.label(format!(
+                        "Source interpolation: Cubic alpha ({method:?}; {continuation:?} continuation)"
+                    ));
+                    ui.small(format!(
+                        "Partial-domain cubic fallback: {:?}. Undefined samples remain local.",
                         self.state.calculation_options.partial_domain_policy
                     ));
                     if let Some(projection) = self.state.raw_projection.as_ref() {
@@ -978,4 +1357,3 @@ mod tests {
         assert!(app.worker.is_none());
     }
 }
-
