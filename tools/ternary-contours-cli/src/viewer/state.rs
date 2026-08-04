@@ -115,6 +115,20 @@ impl WorkerResult {
     }
 }
 
+/// Parse and validate a TCT document before the viewer replaces any state.
+/// Both the file-backed command-line startup worker and native Open use this
+/// function so they preserve identical dataset semantics.
+pub fn load_tct_dataset(
+    path: impl AsRef<std::path::Path>,
+) -> Result<TabulatedTernaryDataset, String> {
+    let path = path.as_ref();
+    let dataset = parse_path(path).map_err(|error| format!("{}: {error}", path.display()))?;
+    dataset
+        .validate_structure()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    Ok(dataset)
+}
+
 /// Spawn an owned parse/validation/calculation request without touching GUI state.
 pub fn start_worker(request: CalculationRequest) -> Result<Receiver<WorkerResult>, String> {
     let (sender, receiver) = mpsc::channel();
@@ -153,7 +167,7 @@ fn calculate_request(
     String,
 > {
     let dataset = match &request.input {
-        CalculationInput::Path(path) => parse_path(path).map_err(|error| error.to_string())?,
+        CalculationInput::Path(path) => load_tct_dataset(path)?,
         CalculationInput::Dataset(dataset) => dataset.as_ref().clone(),
     };
     let mut raw_options = request.options.clone();
@@ -174,6 +188,8 @@ fn calculate_request(
 pub struct ViewerState {
     pub input_path: PathBuf,
     pub unsaved: bool,
+    /// Changes applied to a file-backed document but not yet saved.
+    pub document_dirty: bool,
     pub dataset: Option<TabulatedTernaryDataset>,
     pub raw_projection: Option<LiquidusProjection>,
     pub regularized_projection: Option<LiquidusProjection>,
@@ -186,6 +202,7 @@ pub struct ViewerState {
     pub last_successful_reload: Option<SystemTime>,
     pub last_dialog_directory: Option<PathBuf>,
     pub message: Option<String>,
+    pending_loaded_calculation: bool,
     generation: u64,
 }
 
@@ -205,6 +222,7 @@ impl ViewerState {
             viewer_options,
             input_path,
             unsaved: false,
+            document_dirty: false,
             dataset: None,
             raw_projection: None,
             regularized_projection: None,
@@ -221,6 +239,7 @@ impl ViewerState {
             last_successful_reload: None,
             last_dialog_directory: None,
             message: None,
+            pending_loaded_calculation: false,
             generation: 0,
         }
     }
@@ -237,6 +256,7 @@ impl ViewerState {
         );
         state.dataset = Some(dataset);
         state.unsaved = true;
+        state.document_dirty = false;
         state.dirty.projection = false;
         state.status = ViewerStatus::Idle;
         state
@@ -244,10 +264,42 @@ impl ViewerState {
     pub fn mark_saved(&mut self, path: PathBuf) {
         self.input_path = path.clone();
         self.unsaved = false;
+        self.document_dirty = false;
         self.last_dialog_directory = path
             .parent()
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(PathBuf::from);
+    }
+
+    pub fn mark_document_dirty(&mut self) {
+        self.document_dirty = true;
+    }
+
+    /// Transactionally replace the document after parsing and validation have
+    /// already completed. Old projections, selection, and render caches are
+    /// explicitly invalidated before a new calculation is requested.
+    pub fn replace_loaded_document(&mut self, path: PathBuf, dataset: TabulatedTernaryDataset) {
+        self.input_path = path.clone();
+        self.unsaved = false;
+        self.document_dirty = false;
+        self.dataset = Some(dataset);
+        self.raw_projection = None;
+        self.regularized_projection = None;
+        self.selection = None;
+        self.last_successful_reload = None;
+        self.last_dialog_directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(PathBuf::from);
+        self.message = Some("Dataset loaded; calculating the new document?".into());
+        self.pending_loaded_calculation = true;
+        self.status = ViewerStatus::Idle;
+        self.dirty = DirtyFlags {
+            projection: false,
+            render: true,
+            texture: true,
+            hit_geometry: true,
+        };
     }
     pub fn begin_request(&mut self) -> CalculationRequest {
         self.generation = self.generation.saturating_add(1);
@@ -311,6 +363,7 @@ impl ViewerState {
         }
         match result {
             WorkerResult::Ready { output, .. } => {
+                self.pending_loaded_calculation = false;
                 self.message = None;
                 self.dataset = Some(output.dataset);
                 self.raw_projection = Some(output.raw_projection);
@@ -324,8 +377,12 @@ impl ViewerState {
             }
             WorkerResult::Failed { message, .. } => {
                 let has_previous = self.raw_projection.is_some();
+                let loaded = self.pending_loaded_calculation;
+                self.pending_loaded_calculation = false;
                 self.status = ViewerStatus::Failed(message.clone());
-                self.message = Some(if has_previous {
+                self.message = Some(if loaded {
+                    format!("Dataset loaded, calculation failed: {message}")
+                } else if has_previous {
                     format!("Calculation failed; displaying the previous valid plot: {message}")
                 } else {
                     format!("Calculation failed: {message}")
@@ -352,6 +409,40 @@ mod tests {
             ProjectionOptions::default(),
             RenderOptions::default(),
         )
+    }
+
+    #[test]
+    fn loading_tct_and_replacing_document_is_transactional_and_clears_stale_results() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("fixtures/classified-states.tct");
+        let loaded = load_tct_dataset(&path).unwrap();
+        assert_eq!(
+            loaded.grids[0].fields()[0].values[1].state,
+            crate::TabulatedValueState::CutOff
+        );
+
+        let previous = parse_str(include_str!("../../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(&previous, &ProjectionOptions::default()).unwrap();
+        let mut state = state();
+        state.dataset = Some(previous);
+        state.raw_projection = Some(projection);
+        state.selection = Some(SelectedFeature::SourceSample {
+            grid_index: 0,
+            point_index: 0,
+        });
+        state.document_dirty = true;
+        state.replace_loaded_document(path.clone(), loaded.clone());
+        assert_eq!(state.dataset, Some(loaded));
+        assert!(state.raw_projection.is_none());
+        assert!(state.regularized_projection.is_none());
+        assert!(state.selection.is_none());
+        assert!(!state.unsaved);
+        assert!(!state.document_dirty);
+        assert_eq!(
+            state.last_dialog_directory,
+            path.parent().map(PathBuf::from)
+        );
+        assert!(state.dirty.texture && state.dirty.hit_geometry);
     }
 
     #[test]
