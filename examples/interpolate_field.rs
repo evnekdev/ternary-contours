@@ -31,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             FieldInterpolation::CubicAlpha(CubicAlphaBuildOptions {
                 method: CubicAlphaMethod::Pchip,
                 boundary_policy: CubicBoundaryPolicy::LinearFallback,
+                partial_domain_policy: Default::default(),
                 // Muggianu and Kohler are interior continuation policies within
                 // this one cubic-alpha interpolation family.
                 extrapolation: BinaryExtrapolation::Kohler,
@@ -50,3 +51,4 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+
