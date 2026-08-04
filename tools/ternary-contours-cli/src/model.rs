@@ -246,6 +246,132 @@ impl TabulatedTernaryDataset {
             .find(|property| property.name == name)
     }
 
+    /// Validate declarations and grid references without requiring scalar values.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        if self
+            .components
+            .iter()
+            .any(|component| component.name.trim().is_empty())
+            || self
+                .components
+                .iter()
+                .enumerate()
+                .any(|(index, component)| {
+                    self.components[..index]
+                        .iter()
+                        .any(|previous| previous.name == component.name)
+                })
+        {
+            return Err("component names must be non-empty and unique".into());
+        }
+        if self.phases.is_empty() {
+            return Err("at least one phase is required".into());
+        }
+        if self.phases.iter().any(|phase| phase.name.trim().is_empty())
+            || self.phases.iter().enumerate().any(|(index, phase)| {
+                self.phases[..index]
+                    .iter()
+                    .any(|previous| previous.name == phase.name || previous.id == phase.id)
+            })
+            || self.phases.iter().any(|phase| phase.id.0 == 0)
+        {
+            return Err("phase names and positive IDs must be unique".into());
+        }
+        if self
+            .properties
+            .iter()
+            .any(|property| property.name.trim().is_empty())
+            || self.properties.iter().enumerate().any(|(index, property)| {
+                self.properties[..index]
+                    .iter()
+                    .any(|previous| previous.name == property.name)
+            })
+        {
+            return Err("property names must be non-empty and unique".into());
+        }
+        let Some(temperature) = self.properties.iter().find(|property| property.name == "T") else {
+            return Err("required property T is missing".into());
+        };
+        if !temperature.required {
+            return Err("property T must remain required".into());
+        }
+        if self.grids.is_empty() {
+            return Err("at least one grid is required".into());
+        }
+        for grid in &self.grids {
+            let expected = match grid {
+                TabulatedGrid::Regular(value) => {
+                    if value.subdivisions == 0 {
+                        return Err(format!(
+                            "grid {} must have a positive subdivision count",
+                            grid.name()
+                        ));
+                    }
+                    let expected = value
+                        .subdivisions
+                        .checked_add(1)
+                        .and_then(|left| {
+                            value
+                                .subdivisions
+                                .checked_add(2)
+                                .and_then(|right| left.checked_mul(right))
+                        })
+                        .map(|value| value / 2)
+                        .ok_or_else(|| {
+                            format!("grid {} subdivision count overflows", grid.name())
+                        })?;
+                    if value.compositions.len() != expected {
+                        return Err(format!(
+                            "grid {} has {} compositions; expected {}",
+                            grid.name(),
+                            value.compositions.len(),
+                            expected
+                        ));
+                    }
+                    Some(expected)
+                }
+                TabulatedGrid::Irregular(_) => None,
+            };
+            for field in grid.fields() {
+                if !self
+                    .phases
+                    .iter()
+                    .any(|candidate| candidate.id == field.phase_id)
+                    || !self
+                        .properties
+                        .iter()
+                        .any(|candidate| candidate.name == field.property)
+                {
+                    return Err(format!(
+                        "grid {} references unknown field {}.{}",
+                        grid.name(),
+                        field.phase_id.0,
+                        field.property
+                    ));
+                }
+                if expected.is_some_and(|count| field.values.len() != count) {
+                    return Err(format!(
+                        "grid {} field {}.{} has {} values; expected {}",
+                        grid.name(),
+                        field.phase_id.0,
+                        field.property,
+                        field.values.len(),
+                        expected.unwrap_or_default()
+                    ));
+                }
+            }
+        }
+        for phase in &self.phases {
+            if !self.grids.iter().any(|grid| {
+                grid.fields()
+                    .iter()
+                    .any(|field| field.phase_id == phase.id && field.property == "T")
+            }) {
+                return Err(format!("phase {} has no required T field", phase.name));
+            }
+        }
+        Ok(())
+    }
     pub fn field_count(&self) -> usize {
         self.grids.iter().map(|grid| grid.fields().len()).sum()
     }

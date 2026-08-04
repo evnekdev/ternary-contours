@@ -62,6 +62,7 @@ pub fn serialize_tct(
     dataset: &TabulatedTernaryDataset,
     options: &TctSerializeOptions,
 ) -> Result<String, SerializeError> {
+    dataset.validate_structure().map_err(SerializeError)?;
     if options.missing_token.trim().is_empty()
         || options.missing_token.contains(char::is_whitespace)
     {
@@ -96,18 +97,14 @@ pub fn serialize_tct(
         output.push('\n');
     }
     output.push_str("[/components]\n\n[phases]\n");
-    let mut phases = dataset.phases.clone();
-    phases.sort_by_key(|phase| phase.id);
-    for phase in phases {
+    for phase in &dataset.phases {
         output.push_str(&quoted(&phase.name)?);
         output.push_str(" = ");
         output.push_str(&phase.id.0.to_string());
         output.push('\n');
     }
     output.push_str("[/phases]\n\n[properties]\n");
-    let mut properties = dataset.properties.clone();
-    properties.sort_by(|left, right| left.name.cmp(&right.name));
-    for property in properties {
+    for property in &dataset.properties {
         output.push_str(&property.name);
         output.push(' ');
         output.push_str(if property.required {
@@ -172,17 +169,11 @@ fn serialize_grid(
     });
     output.push('\n');
 
-    let mut fields = grid.fields().to_vec();
-    fields.sort_by(|left, right| {
-        left.phase_id
-            .cmp(&right.phase_id)
-            .then_with(|| left.property.cmp(&right.property))
-    });
+    let fields = grid.fields().to_vec();
     let mut field_properties = fields
         .iter()
         .map(|field| field.property.clone())
         .collect::<Vec<_>>();
-    field_properties.sort();
     field_properties.dedup();
     output.push_str("properties = ");
     output.push_str(&field_properties.join(" "));

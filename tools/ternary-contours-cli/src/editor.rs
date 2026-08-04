@@ -711,6 +711,8 @@ pub struct DatasetEditorState {
     pub dirty: bool,
     undo: Vec<TabulatedTernaryDataset>,
     redo: Vec<TabulatedTernaryDataset>,
+    draft_undo: Vec<TabulatedTernaryDataset>,
+    draft_redo: Vec<TabulatedTernaryDataset>,
     history_limit: usize,
 }
 
@@ -724,6 +726,8 @@ impl DatasetEditorState {
             dirty: false,
             undo: Vec::new(),
             redo: Vec::new(),
+            draft_undo: Vec::new(),
+            draft_redo: Vec::new(),
             history_limit: 32,
         }
     }
@@ -737,6 +741,8 @@ impl DatasetEditorState {
         self.draft = self.active.clone();
         self.paste_preview = None;
         self.validation = EditorValidationReport::default();
+        self.draft_undo.clear();
+        self.draft_redo.clear();
         self.dirty = false;
     }
 
@@ -772,6 +778,7 @@ impl DatasetEditorState {
     /// Validate the draft through the real TCT parser and make it the active
     /// editor dataset. The caller decides when to initiate numerical work.
     pub fn apply_draft(&mut self) -> Result<TabulatedTernaryDataset, String> {
+        self.draft.validate_structure()?;
         let text = serialize_tct(&self.draft, &TctSerializeOptions::default())
             .map_err(|error| error.to_string())?;
         let validated = parse_str(&text).map_err(|error| error.to_string())?;
@@ -780,6 +787,8 @@ impl DatasetEditorState {
         self.draft = validated.clone();
         self.paste_preview = None;
         self.validation = EditorValidationReport::default();
+        self.draft_undo.clear();
+        self.draft_redo.clear();
         self.dirty = false;
         Ok(validated)
     }
@@ -859,6 +868,229 @@ impl DatasetEditorState {
         Ok(())
     }
 
+    fn snapshot_draft(&mut self) {
+        self.draft_undo.push(self.draft.clone());
+        if self.draft_undo.len() > self.history_limit {
+            self.draft_undo.remove(0);
+        }
+        self.draft_redo.clear();
+    }
+
+    pub fn phase_field_references(&self, index: usize) -> Vec<String> {
+        let Some(phase) = self.draft.phases.get(index) else {
+            return Vec::new();
+        };
+        self.draft
+            .grids
+            .iter()
+            .flat_map(|grid| {
+                grid.fields()
+                    .iter()
+                    .filter(|field| field.phase_id == phase.id)
+                    .map(|field| format!("{}.{}", grid.name(), field.column_name))
+            })
+            .collect()
+    }
+
+    pub fn property_field_references(&self, index: usize) -> Vec<String> {
+        let Some(property) = self.draft.properties.get(index) else {
+            return Vec::new();
+        };
+        self.draft
+            .grids
+            .iter()
+            .flat_map(|grid| {
+                grid.fields()
+                    .iter()
+                    .filter(|field| field.property == property.name)
+                    .map(|field| format!("{}.{}", grid.name(), field.column_name))
+            })
+            .collect()
+    }
+
+    pub fn reorder_phase(&mut self, index: usize, delta: isize) -> Result<(), String> {
+        let target = index as isize + delta;
+        if target < 0 || target >= self.draft.phases.len() as isize {
+            return Err("phase is already at that boundary".into());
+        }
+        self.snapshot_draft();
+        self.draft.phases.swap(index, target as usize);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn add_phase(&mut self) -> Result<(), String> {
+        self.snapshot_draft();
+        let mut id = 1;
+        while self.draft.phases.iter().any(|phase| phase.id.0 == id) {
+            id += 1;
+        }
+        let mut name = format!("phase_{id}");
+        let mut suffix = 2;
+        while self.draft.phases.iter().any(|phase| phase.name == name) {
+            name = format!("phase_{id}_{suffix}");
+            suffix += 1;
+        }
+        self.draft.phases.push(crate::PhaseDefinition {
+            name,
+            id: StablePhaseId(id),
+            line: 0,
+        });
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn remove_phase(&mut self, index: usize) -> Result<(), String> {
+        if self.phase_field_references(index).is_empty() {
+            self.remove_phase_confirmed(index)
+        } else {
+            Err("phase is referenced by grid fields; confirm removal first".into())
+        }
+    }
+
+    pub fn remove_phase_confirmed(&mut self, index: usize) -> Result<(), String> {
+        if self.draft.phases.len() <= 1 {
+            return Err("a dataset must retain at least one phase".into());
+        }
+        if index >= self.draft.phases.len() {
+            return Err("selected phase no longer exists".into());
+        }
+        self.snapshot_draft();
+        let phase_id = self.draft.phases[index].id;
+        self.draft.phases.remove(index);
+        for grid in &mut self.draft.grids {
+            match grid {
+                TabulatedGrid::Regular(value) => {
+                    value.fields.retain(|field| field.phase_id != phase_id)
+                }
+                TabulatedGrid::Irregular(value) => {
+                    value.fields.retain(|field| field.phase_id != phase_id)
+                }
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn reorder_property(&mut self, index: usize, delta: isize) -> Result<(), String> {
+        let target = index as isize + delta;
+        if target < 0 || target >= self.draft.properties.len() as isize {
+            return Err("property is already at that boundary".into());
+        }
+        self.snapshot_draft();
+        self.draft.properties.swap(index, target as usize);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn add_property(&mut self) -> Result<(), String> {
+        self.snapshot_draft();
+        let mut suffix = 1;
+        let mut name = format!("property_{suffix}");
+        while self
+            .draft
+            .properties
+            .iter()
+            .any(|property| property.name == name)
+        {
+            suffix += 1;
+            name = format!("property_{suffix}");
+        }
+        self.draft.properties.push(crate::PropertyDefinition {
+            name,
+            required: false,
+            unit: "1".into(),
+            line: 0,
+        });
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn remove_property(&mut self, index: usize) -> Result<(), String> {
+        let Some(property) = self.draft.properties.get(index) else {
+            return Err("selected property no longer exists".into());
+        };
+        if property.name == "T" {
+            return Err("property T cannot be removed".into());
+        }
+        if self.property_field_references(index).is_empty() {
+            self.remove_property_confirmed(index)
+        } else {
+            Err("property is referenced by grid fields; confirm removal first".into())
+        }
+    }
+
+    pub fn remove_property_confirmed(&mut self, index: usize) -> Result<(), String> {
+        let Some(property_name) = self
+            .draft
+            .properties
+            .get(index)
+            .filter(|property| property.name != "T")
+            .map(|property| property.name.clone())
+        else {
+            return Err("property T cannot be removed".into());
+        };
+        self.snapshot_draft();
+        self.draft.properties.remove(index);
+        for grid in &mut self.draft.grids {
+            match grid {
+                TabulatedGrid::Regular(value) => {
+                    value.fields.retain(|field| field.property != property_name)
+                }
+                TabulatedGrid::Irregular(value) => {
+                    value.fields.retain(|field| field.property != property_name)
+                }
+            }
+        }
+        self.dirty = true;
+        Ok(())
+    }
+    pub fn regenerate_regular_grid(
+        &mut self,
+        grid_index: usize,
+        subdivisions: usize,
+    ) -> Result<(), String> {
+        let compositions = regular_compositions(subdivisions)?;
+        self.snapshot_draft();
+        let Some(TabulatedGrid::Regular(grid)) = self.draft.grids.get_mut(grid_index) else {
+            return Err("selected grid is not regular".into());
+        };
+        grid.compositions = compositions;
+        grid.subdivisions = subdivisions;
+        grid.order = RowOrder::Canonical;
+        grid.composition_columns = CompositionColumns::None;
+        for field in &mut grid.fields {
+            field.values = vec![None; grid.compositions.len()];
+            field.row_lines = vec![0; grid.compositions.len()];
+        }
+        self.dirty = true;
+        Ok(())
+    }
+    pub fn can_draft_undo(&self) -> bool {
+        !self.draft_undo.is_empty()
+    }
+    pub fn can_draft_redo(&self) -> bool {
+        !self.draft_redo.is_empty()
+    }
+    pub fn draft_undo(&mut self) -> bool {
+        let Some(previous) = self.draft_undo.pop() else {
+            return false;
+        };
+        self.draft_redo.push(self.draft.clone());
+        self.draft = previous;
+        self.dirty = self.draft != self.active;
+        true
+    }
+
+    pub fn draft_redo(&mut self) -> bool {
+        let Some(next) = self.draft_redo.pop() else {
+            return false;
+        };
+        self.draft_undo.push(self.draft.clone());
+        self.draft = next;
+        self.dirty = self.draft != self.active;
+        true
+    }
     pub fn add_grid(&mut self, grid: TabulatedGrid) -> Result<(), String> {
         if self
             .draft
@@ -1091,5 +1323,48 @@ mod tests {
         assert_eq!(state.active, original);
         assert!(state.redo());
         assert_eq!(state.active, applied);
+    }
+
+    #[test]
+    fn declaration_controls_preserve_ids_and_protect_referenced_fields() {
+        let mut state = DatasetEditorState::new(crate::default_regular_dataset());
+        state.add_phase().unwrap();
+        let added_id = state.draft.phases.last().unwrap().id;
+        state.reorder_phase(3, -1).unwrap();
+        assert_eq!(state.draft.phases[2].id, added_id);
+        assert!(state.remove_phase(2).is_ok());
+        assert!(state.remove_property(0).is_err());
+        state.add_property().unwrap();
+        state.reorder_property(1, -1).unwrap();
+        assert_eq!(state.draft.properties[0].name, "property_1");
+        assert!(state.draft.validate_structure().is_ok());
+        assert!(state.draft_undo());
+        assert!(state.draft_redo());
+    }
+
+    #[test]
+    fn regular_resolution_regeneration_is_validated_and_clears_values() {
+        let mut state = DatasetEditorState::new(crate::default_regular_dataset());
+        assert!(regular_row_count(0).is_err());
+        assert!(regular_row_count(20).is_ok());
+        let TabulatedGrid::Regular(grid) = &mut state.draft.grids[0] else {
+            panic!("expected regular grid");
+        };
+        grid.fields[0].values[0] = Some(1200.0);
+        state.regenerate_regular_grid(0, 20).unwrap();
+        let TabulatedGrid::Regular(grid) = &state.draft.grids[0] else {
+            panic!("expected regular grid");
+        };
+        assert_eq!(grid.compositions.len(), 231);
+        assert!(
+            grid.fields
+                .iter()
+                .all(|field| field.values.iter().all(Option::is_none))
+        );
+        assert!(state.draft_undo());
+        let TabulatedGrid::Regular(grid) = &state.draft.grids[0] else {
+            panic!("expected regular grid");
+        };
+        assert_eq!(grid.compositions.len(), 66);
     }
 }
