@@ -28,8 +28,16 @@ Without `--features viewer`, `view` exits with the enabling command while
 
 ## Controls and calculation policy
 
-The toolbar reloads, recalculates, exports SVG/PNG, and fits/resets the image
-view. The side panel owns all current options:
+The persistent toolbar provides **Open**, **Save**, **Save As**, the current
+file/unsaved marker, reload, recalculation, export, and fit/reset from every
+tab. Open uses the native `.tct` picker and remembers the last directory used
+by Open or Save As, then the current document directory, then the process
+working directory. It never defaults to a repository fixture directory. If a
+draft or file-backed document has changes, Open asks to **Save**, **Discard and
+open**, or **Cancel**. The selected file is parsed and validated before it
+replaces the current editor; a load failure leaves the document and plot intact.
+
+The side panel owns all current options:
 
 - Levels accept `800,900,1000` or `800:1400:50`; invalid text is reported
   before calculation and never crashes the window.
@@ -44,6 +52,26 @@ Parsing, validation, and calculation run on an owned worker request. Results
 carry a generation number; stale results are ignored. A failed reload leaves
 the last valid dataset, projection, and texture intact and reports the parser
 or numerical diagnostic in the status area.
+
+## Grid inspection
+
+The **Grid inspection** tab selects one grid, phase, and property at a time and
+draws every source vertex on a ternary diagram. Marker shape and colour are
+both meaningful: green filled circles are calculated finite values, grey crosses
+are non-existing, orange triangles are cut-off, and hollow circles are missing.
+Filters and compact labels avoid overloading large grids.
+
+Click a marker to inspect its canonical row, composition, current state, value,
+and optional note. Shift-click selects several points for batch non-existing,
+cut-off, missing, or note-clearing actions. Edits remain in the dataset draft
+while moving between grid fields; **Apply edits** and **Apply and recalculate**
+make their transition explicit. Save serializes the current draft and the first
+open after an unsaved edit will prompt before discarding it. A loaded file
+initializes the first grid field, preferring its `T` field.
+
+`NE`, `CO`, `CO:<limit>`, and `NA` round-trip through TCT and TSV. Classified
+undefined values do not participate in interpolation; numerical diagnostics
+preserve whether the source was non-existing, cut off, or missing.
 
 ## Inspection and diagnostics
 

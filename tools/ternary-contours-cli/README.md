@@ -5,6 +5,23 @@ checking stable liquidus isotherms, stable univariants, binary and interior
 invariants, and raw or regularized boundary paths from tabulated ternary data.
 It is a repository tool and is not published to crates.io.
 
+## Grid inspection and classified cells
+
+With the viewer feature, **Grid inspection** displays one selected grid, phase,
+and property as editable ternary markers. A finite scalar is **Calculated**;
+`NE` is **Non-existing**; `CO` or `CO:<limit>` is **Cut-off**; and `NA` is
+**Missing**. These are semantically distinct undefined states, not numeric
+sentinels. Only calculated values reach the liquidus evaluator.
+
+Use the persistent **Open**, **Save**, and **Save As** toolbar from any viewer
+tab. Open uses the native `.tct` picker, remembers the last Open/Save As
+directory for the session, and asks whether to save, discard, or cancel when
+the current draft is modified. The loaded TCT replaces the document
+transactionally; a load failure leaves the current editor and plot untouched.
+
+See [`docs/grid-inspection.md`](../../../docs/grid-inspection.md) for the
+marker legend, point editing, batch classification, and Excel TSV workflow.
+
 The input is a UTF-8 `.tct` (Ternary Contour Table) file. It combines small,
 sectioned metadata with literal TSV tables, so a rectangular range can be
 pasted directly from Excel without an `.xlsx` dependency.
