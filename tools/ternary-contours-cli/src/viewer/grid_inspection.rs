@@ -6,11 +6,17 @@ use eframe::egui;
 use ternary_contours::StablePhaseId;
 
 use crate::{
-    DatasetEditorState, NumericFormat, TabulatedGrid, TabulatedValue, TabulatedValueState,
-    TernaryRenderTransform,
+    DatasetEditorState, NumericFormat, PLOT_BACKGROUND_RGB, ProjectionOptions, TabulatedGrid,
+    TabulatedValue, TabulatedValueState, TernaryRenderTransform,
 };
 
-use super::hit_test::ViewerTransform;
+use super::{
+    controls,
+    hit_test::ViewerTransform,
+    interpolation_inspection::{
+        FieldInspectionCache, InspectionFieldIdentity, InterpolatedResult, InterpolatedResultState,
+    },
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GridInspectionAction {
@@ -20,6 +26,15 @@ pub enum GridInspectionAction {
     /// The draft was committed to the active dataset.
     Applied,
     Recalculate,
+    /// A local inspection setting changed; no document or liquidus recalculation is needed.
+    InspectionChanged,
+}
+/// The two focused workflows available in Grid inspection.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum GridInspectionMode {
+    #[default]
+    VertexSelection,
+    Interpolation,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -32,7 +47,6 @@ pub enum GridLabelMode {
     ValueAndState,
 }
 
-#[derive(Clone, Debug)]
 pub struct GridInspectionUi {
     pub selected_grid: usize,
     pub selected_phase: Option<StablePhaseId>,
@@ -47,6 +61,16 @@ pub struct GridInspectionUi {
     pub show_non_existing: bool,
     pub show_cut_off: bool,
     pub show_missing: bool,
+    pub mode: GridInspectionMode,
+    pub show_containing_triangle: bool,
+    pub results: Vec<InterpolatedResult>,
+    pub selected_result: Option<usize>,
+    pub show_local_barycentric: bool,
+    pub show_contributions: bool,
+    pub show_triangle_index: bool,
+    pub show_triangle_vertices: bool,
+    results_table_has_focus: bool,
+    inspection_cache: FieldInspectionCache,
     edit_state: TabulatedValueState,
     edit_value: String,
     edit_note: String,
@@ -70,6 +94,16 @@ impl Default for GridInspectionUi {
             show_non_existing: true,
             show_cut_off: true,
             show_missing: true,
+            mode: GridInspectionMode::VertexSelection,
+            show_containing_triangle: true,
+            results: Vec::new(),
+            selected_result: None,
+            show_local_barycentric: false,
+            show_contributions: false,
+            show_triangle_index: false,
+            show_triangle_vertices: false,
+            results_table_has_focus: false,
+            inspection_cache: FieldInspectionCache::default(),
             edit_state: TabulatedValueState::Missing,
             edit_value: String::new(),
             edit_note: String::new(),
@@ -85,6 +119,7 @@ impl GridInspectionUi {
         self.selected_rows.clear();
         self.edit_row = None;
         self.message = None;
+        self.reset_interpolation_state();
         let selected = editor
             .draft
             .grids
@@ -170,6 +205,68 @@ impl GridInspectionUi {
             .unwrap_or_default();
         self.edit_note = value.note.clone().unwrap_or_default();
     }
+    fn field_identity(&self) -> Option<InspectionFieldIdentity> {
+        Some(InspectionFieldIdentity {
+            grid_index: self.selected_grid,
+            phase_id: self.selected_phase?,
+            property: self.selected_property.clone(),
+        })
+    }
+
+    fn register_interpolation_query(
+        &mut self,
+        editor: &DatasetEditorState,
+        options: &ProjectionOptions,
+        composition: [f64; 3],
+    ) {
+        let Some(identity) = self.field_identity() else {
+            return;
+        };
+        let index = self
+            .results
+            .last()
+            .map_or(1, |result| result.index.saturating_add(1));
+        let result =
+            self.inspection_cache
+                .evaluate(&editor.draft, &identity, options, composition, index);
+        self.results.push(result);
+        self.selected_result = Some(self.results.len() - 1);
+    }
+
+    pub(crate) fn recalculate_interpolation_results(
+        &mut self,
+        editor: &DatasetEditorState,
+        options: &ProjectionOptions,
+    ) {
+        let Some(identity) = self.field_identity() else {
+            return;
+        };
+        for result in &mut self.results {
+            let composition = result.composition;
+            let updated = self.inspection_cache.evaluate(
+                &editor.draft,
+                &identity,
+                options,
+                composition,
+                result.index,
+            );
+            if let InterpolatedResultState::Error(message) = &updated.state {
+                result.stale = true;
+                result.stale_error = Some(message.clone());
+            } else {
+                *result = updated;
+            }
+        }
+        self.selected_result = self
+            .selected_result
+            .filter(|index| *index < self.results.len());
+    }
+
+    fn reset_interpolation_state(&mut self) {
+        self.results.clear();
+        self.selected_result = None;
+        self.inspection_cache.invalidate();
+    }
 }
 
 pub fn show_controls(
@@ -177,6 +274,7 @@ pub fn show_controls(
     ui: &mut egui::Ui,
     editor: &mut DatasetEditorState,
     state: &mut GridInspectionUi,
+    options: &mut ProjectionOptions,
 ) -> GridInspectionAction {
     state.ensure_selection(editor);
     let Some(_) = state.selected_field_index(editor) else {
@@ -191,7 +289,46 @@ pub fn show_controls(
     };
 
     ui.heading("Grid inspection");
-    selectors(ui, editor, state);
+    let mut inspection_changed = selectors(ui, editor, state);
+    ui.horizontal(|ui| {
+        ui.label("Mode:");
+        inspection_changed |= ui
+            .selectable_value(
+                &mut state.mode,
+                GridInspectionMode::VertexSelection,
+                "Vertex selection",
+            )
+            .changed();
+        inspection_changed |= ui
+            .selectable_value(
+                &mut state.mode,
+                GridInspectionMode::Interpolation,
+                "Interpolation",
+            )
+            .changed();
+    });
+    if state.mode == GridInspectionMode::Interpolation {
+        ui.separator();
+        ui.label("Interpolation settings");
+        let cubic_supported = matches!(
+            editor.draft.grids.get(state.selected_grid),
+            Some(TabulatedGrid::Regular(_))
+        );
+        inspection_changed |= controls::show_source_interpolation_controls(
+            ui,
+            options,
+            cubic_supported,
+            "grid_inspection",
+        );
+        ui.checkbox(
+            &mut state.show_containing_triangle,
+            "Highlight containing triangle",
+        );
+    }
+    if inspection_changed {
+        state.inspection_cache.invalidate();
+        state.recalculate_interpolation_results(editor, options);
+    }
     let Some(field_index) = state.selected_field_index(editor) else {
         return GridInspectionAction::None;
     };
@@ -268,6 +405,7 @@ pub fn show_controls(
         if ui.button("Previous field").clicked() {
             let fields = editor.draft.grids[state.selected_grid].fields();
             state.select_field(editor, field_index.saturating_sub(1));
+            inspection_changed = true;
             if fields.is_empty() {
                 state.message = Some("No scalar fields in this grid.".into());
             }
@@ -275,12 +413,19 @@ pub fn show_controls(
         if ui.button("Next field").clicked() {
             let next = (field_index + 1) % editor.draft.grids[state.selected_grid].fields().len();
             state.select_field(editor, next);
+            inspection_changed = true;
         }
     });
 
     ui.separator();
-    state.sync_point_editor(editor);
-    let mut action = point_editor(ui, editor, state, field_index);
+    let vertex_mode = state.mode == GridInspectionMode::VertexSelection;
+    let mut action = if vertex_mode {
+        state.sync_point_editor(editor);
+        point_editor(ui, editor, state, field_index)
+    } else {
+        ui.small("Click inside a source triangle to register an interpolation result.");
+        GridInspectionAction::None
+    };
     ui.separator();
     ui.label(format!("Selected points: {}", state.selected_rows.len()));
     let selected = state.selected_rows.iter().copied().collect::<Vec<_>>();
@@ -294,7 +439,10 @@ pub fn show_controls(
             ("Set selected to Missing", TabulatedValueState::Missing),
         ] {
             if ui
-                .add_enabled(!selected.is_empty(), egui::Button::new(label))
+                .add_enabled(
+                    vertex_mode && !selected.is_empty(),
+                    egui::Button::new(label),
+                )
                 .clicked()
             {
                 state.message = editor
@@ -306,7 +454,10 @@ pub fn show_controls(
             }
         }
         if ui
-            .add_enabled(!selected.is_empty(), egui::Button::new("Clear notes"))
+            .add_enabled(
+                vertex_mode && !selected.is_empty(),
+                egui::Button::new("Clear notes"),
+            )
             .clicked()
         {
             state.message = editor
@@ -318,7 +469,10 @@ pub fn show_controls(
         }
     });
     ui.horizontal(|ui| {
-        if ui.button("Revert selected field").clicked() {
+        if ui
+            .add_enabled(vertex_mode, egui::Button::new("Revert selected field"))
+            .clicked()
+        {
             state.message = editor.revert_field(state.selected_grid, field_index).err();
             if state.message.is_none() {
                 state.selected_rows.clear();
@@ -344,13 +498,25 @@ pub fn show_controls(
             }
         }
     });
+    if inspection_changed {
+        state.inspection_cache.invalidate();
+        state.recalculate_interpolation_results(editor, options);
+        if matches!(action, GridInspectionAction::None) {
+            action = GridInspectionAction::InspectionChanged;
+        }
+    }
+    if matches!(action, GridInspectionAction::DraftEdited) {
+        state.inspection_cache.invalidate();
+        state.recalculate_interpolation_results(editor, options);
+    }
     if let Some(message) = &state.message {
         ui.colored_label(egui::Color32::YELLOW, message);
     }
     action
 }
 
-fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridInspectionUi) {
+fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridInspectionUi) -> bool {
+    let mut changed = false;
     let grids = editor
         .draft
         .grids
@@ -365,8 +531,6 @@ fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridIns
                     .selectable_value(&mut state.selected_grid, index, name)
                     .clicked()
                 {
-                    state.initialise(editor);
-                    state.selected_grid = index;
                     if let Some(field_index) = editor.draft.grids[index]
                         .fields()
                         .iter()
@@ -375,6 +539,7 @@ fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridIns
                     {
                         state.select_field(editor, field_index);
                     }
+                    changed = true;
                 }
             }
         });
@@ -410,7 +575,8 @@ fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridIns
                 if ui
                     .selectable_value(&mut state.selected_phase, Some(*phase_id), name)
                     .clicked()
-                    && let Some(field) = editor.draft.grids[state.selected_grid]
+                {
+                    if let Some(field_index) = editor.draft.grids[state.selected_grid]
                         .fields()
                         .iter()
                         .position(|field| field.phase_id == *phase_id && field.property == "T")
@@ -420,8 +586,10 @@ fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridIns
                                 .iter()
                                 .position(|field| field.phase_id == *phase_id)
                         })
-                {
-                    state.select_field(editor, field);
+                    {
+                        state.select_field(editor, field_index);
+                    }
+                    changed = true;
                 }
             }
         });
@@ -446,11 +614,12 @@ fn selectors(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridIns
                 {
                     state.selected_rows.clear();
                     state.edit_row = None;
+                    changed = true;
                 }
             }
         });
+    changed
 }
-
 fn point_editor(
     ui: &mut egui::Ui,
     editor: &mut DatasetEditorState,
@@ -541,7 +710,12 @@ fn point_editor(
     GridInspectionAction::None
 }
 
-pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut GridInspectionUi) {
+pub fn show_canvas(
+    ui: &mut egui::Ui,
+    editor: &DatasetEditorState,
+    state: &mut GridInspectionUi,
+    options: &ProjectionOptions,
+) {
     state.ensure_selection(editor);
     let Some(field_index) = state.selected_field_index(editor) else {
         ui.centered_and_justified(|ui| ui.label("No inspectable scalar field."));
@@ -565,20 +739,20 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
         [f64::from(rect.width()), f64::from(rect.height())],
     );
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 4.0, egui::Color32::from_gray(20));
+    painter.rect_filled(rect, 4.0, grid_inspection_background());
     let corners = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
         .map(|point| screen_pos(&transform, point));
     painter.line_segment(
         [corners[0], corners[1]],
-        egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_GRAY),
+        egui::Stroke::new(1.5_f32, egui::Color32::DARK_GRAY),
     );
     painter.line_segment(
         [corners[1], corners[2]],
-        egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_GRAY),
+        egui::Stroke::new(1.5_f32, egui::Color32::DARK_GRAY),
     );
     painter.line_segment(
         [corners[2], corners[0]],
-        egui::Stroke::new(1.5_f32, egui::Color32::LIGHT_GRAY),
+        egui::Stroke::new(1.5_f32, egui::Color32::DARK_GRAY),
     );
     for (corner, component) in corners.into_iter().zip(&editor.draft.components) {
         painter.text(
@@ -586,7 +760,7 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
             egui::Align2::CENTER_CENTER,
             &component.name,
             egui::FontId::proportional(13.0),
-            egui::Color32::WHITE,
+            egui::Color32::BLACK,
         );
     }
     if state.show_regular_edges
@@ -601,7 +775,7 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
                             screen_pos(&transform, *left),
                             screen_pos(&transform, *right),
                         ],
-                        egui::Stroke::new(0.5_f32, egui::Color32::from_gray(70)),
+                        egui::Stroke::new(0.5_f32, egui::Color32::from_gray(170)),
                     );
                 }
             }
@@ -610,29 +784,50 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
     if response.clicked()
         && let Some(pointer) = response.interact_pointer_pos()
     {
-        let nearest = compositions
-            .iter()
-            .enumerate()
-            .filter(|(row, _)| {
-                values
-                    .get(*row)
-                    .is_some_and(|value| visible(value.state, state))
-            })
-            .map(|(row, point)| ((pointer - screen_pos(&transform, *point)).length(), row))
-            .filter(|(distance, _)| *distance <= state.marker_size + 5.0)
-            .min_by(|left, right| left.0.total_cmp(&right.0))
-            .map(|(_, row)| row);
-        if let Some(row) = nearest {
-            let extend = ui.input(|input| input.modifiers.shift);
-            if extend {
-                if !state.selected_rows.insert(row) {
-                    state.selected_rows.remove(&row);
+        match state.mode {
+            GridInspectionMode::VertexSelection => {
+                let nearest = compositions
+                    .iter()
+                    .enumerate()
+                    .filter(|(row, _)| {
+                        values
+                            .get(*row)
+                            .is_some_and(|value| visible(value.state, state))
+                    })
+                    .map(|(row, point)| ((pointer - screen_pos(&transform, *point)).length(), row))
+                    .filter(|(distance, _)| *distance <= state.marker_size + 5.0)
+                    .min_by(|left, right| left.0.total_cmp(&right.0))
+                    .map(|(_, row)| row);
+                if let Some(row) = nearest {
+                    let extend = ui.input(|input| input.modifiers.shift);
+                    if extend {
+                        if !state.selected_rows.insert(row) {
+                            state.selected_rows.remove(&row);
+                        }
+                    } else {
+                        state.selected_rows.clear();
+                        state.selected_rows.insert(row);
+                    }
+                    state.edit_row = None;
                 }
-            } else {
-                state.selected_rows.clear();
-                state.selected_rows.insert(row);
             }
-            state.edit_row = None;
+            GridInspectionMode::Interpolation => {
+                let composition = transform
+                    .screen_to_logical([f64::from(pointer.x), f64::from(pointer.y)])
+                    .and_then(|logical| transform.logical_to_composition(logical));
+                match composition {
+                    Some(composition)
+                        if composition.into_iter().all(|value| value >= -1.0e-10)
+                            && (composition.into_iter().sum::<f64>() - 1.0).abs() <= 1.0e-8 =>
+                    {
+                        state.register_interpolation_query(editor, options, composition);
+                    }
+                    _ => {
+                        state.message =
+                            Some("Interpolation points must lie inside the ternary simplex.".into())
+                    }
+                }
+            }
         }
     }
     for (row, (point, value)) in compositions.iter().zip(values).enumerate() {
@@ -656,12 +851,324 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
                 egui::Align2::LEFT_BOTTOM,
                 label(value, row, state.label_mode, state.label_precision),
                 egui::FontId::monospace(10.0),
-                egui::Color32::WHITE,
+                egui::Color32::BLACK,
+            );
+        }
+    }
+    if state.mode == GridInspectionMode::Interpolation {
+        for (result_row, result) in state.results.iter().enumerate() {
+            let selected = state.selected_result == Some(result_row);
+            let latest = result_row + 1 == state.results.len();
+            if state.show_containing_triangle
+                && (selected || latest)
+                && let Some(vertices) = result.triangle_vertex_indices
+            {
+                let triangle = vertices
+                    .into_iter()
+                    .filter_map(|index| compositions.get(index).copied())
+                    .map(|point| screen_pos(&transform, point))
+                    .collect::<Vec<_>>();
+                if triangle.len() == 3 {
+                    painter.add(egui::Shape::closed_line(
+                        vec![triangle[0], triangle[1], triangle[2], triangle[0]],
+                        egui::Stroke::new(
+                            if selected { 2.0_f32 } else { 1.0_f32 },
+                            egui::Color32::from_rgb(80, 110, 220),
+                        ),
+                    ));
+                }
+            }
+            let point = screen_pos(&transform, result.composition);
+            let colour = match result.state {
+                InterpolatedResultState::Defined => egui::Color32::from_rgb(41, 128, 185),
+                _ => egui::Color32::from_rgb(192, 57, 43),
+            };
+            painter.circle_filled(point, if latest { 7.0 } else { 4.0 }, colour);
+            if selected {
+                painter.circle_stroke(
+                    point,
+                    10.0,
+                    egui::Stroke::new(2.0_f32, egui::Color32::YELLOW),
+                );
+            }
+            painter.text(
+                point + egui::vec2(7.0, -7.0),
+                egui::Align2::LEFT_BOTTOM,
+                result.index.to_string(),
+                egui::FontId::monospace(10.0),
+                egui::Color32::BLACK,
             );
         }
     }
 }
 
+/// Render the independently scrollable right-side interpolation-results pane.
+pub fn show_results(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut GridInspectionUi) {
+    ui.heading("Interpolated Results");
+    ui.small("Source rows are displayed 1-based; Rust/grid indices remain 0-based internally.");
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Clear").clicked() {
+            state.results.clear();
+            state.selected_result = None;
+        }
+        if ui
+            .add_enabled(
+                state.selected_result.is_some(),
+                egui::Button::new("Delete selected"),
+            )
+            .clicked()
+            && let Some(index) = state.selected_result.take()
+            && index < state.results.len()
+        {
+            state.results.remove(index);
+            state.selected_result = index
+                .checked_sub(1)
+                .filter(|index| *index < state.results.len());
+        }
+        if ui
+            .add_enabled(
+                state.selected_result.is_some(),
+                egui::Button::new("Copy selected"),
+            )
+            .clicked()
+            && let Some(index) = state.selected_result
+            && let Some(result) = state.results.get(index)
+        {
+            ctx.copy_text(result_tsv(std::slice::from_ref(result), state, false));
+        }
+        if ui.button("Copy all").clicked() {
+            ctx.copy_text(result_tsv(&state.results, state, true));
+        }
+    });
+    ui.horizontal_wrapped(|ui| {
+        ui.checkbox(&mut state.show_local_barycentric, "Local lambda");
+        ui.checkbox(&mut state.show_contributions, "Linear + excess");
+        ui.checkbox(&mut state.show_triangle_index, "Triangle index");
+        ui.checkbox(&mut state.show_triangle_vertices, "Source rows");
+    });
+    if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::C))
+        && state.results_table_has_focus
+        && let Some(index) = state.selected_result
+        && let Some(result) = state.results.get(index)
+    {
+        ctx.copy_text(result_tsv(std::slice::from_ref(result), state, false));
+    }
+
+    let available = ui.available_size();
+    egui::ScrollArea::both()
+        .auto_shrink([false, false])
+        .max_height(available.y)
+        .show(ui, |ui| {
+            egui::Grid::new("interpolation_results_table")
+                .striped(true)
+                .min_col_width(72.0)
+                .show(ui, |ui| {
+                    ui.strong("Index");
+                    ui.strong("Grid");
+                    ui.strong("Phase");
+                    ui.strong("Property");
+                    let names = state
+                        .results
+                        .first()
+                        .map(|result| result.component_names.clone())
+                        .unwrap_or_else(|| ["A".into(), "B".into(), "C".into()]);
+                    ui.strong(format!("A ({})", names[0]));
+                    ui.strong(format!("B ({})", names[1]));
+                    ui.strong(format!("C ({})", names[2]));
+                    ui.strong("Method");
+                    ui.strong("State");
+                    ui.strong("Interpolated value");
+                    ui.strong("Unit");
+                    if state.show_local_barycentric {
+                        ui.strong("Local lambda0");
+                        ui.strong("Local lambda1");
+                        ui.strong("Local lambda2");
+                    }
+                    if state.show_contributions {
+                        ui.strong("Linear part");
+                        ui.strong("Excess part");
+                    }
+                    if state.show_triangle_index {
+                        ui.strong("Triangle index0");
+                    }
+                    if state.show_triangle_vertices {
+                        ui.strong("Vertex 0 row");
+                        ui.strong("Vertex 1 row");
+                        ui.strong("Vertex 2 row");
+                    }
+                    ui.end_row();
+
+                    for (row_index, result) in state.results.iter().enumerate() {
+                        let selected = state.selected_result == Some(row_index);
+                        let response = ui.selectable_label(selected, result.index.to_string());
+                        if response.clicked() {
+                            state.selected_result = Some(row_index);
+                            state.results_table_has_focus = true;
+                        }
+                        ui.label(&result.grid_name);
+                        ui.label(&result.phase_name);
+                        ui.label(&result.field.property);
+                        for value in result.composition {
+                            ui.label(format!("{value:.6}"));
+                        }
+                        ui.label(result.method_label());
+                        ui.label(if result.stale {
+                            format!("{} (stale)", result.state.label())
+                        } else {
+                            result.state.label().to_owned()
+                        })
+                        .on_hover_text(
+                            result
+                                .stale_error
+                                .as_deref()
+                                .unwrap_or(match &result.state {
+                                    InterpolatedResultState::Error(message) => message,
+                                    _ => "",
+                                }),
+                        );
+                        ui.label(
+                            result
+                                .value
+                                .map(|value| format!("{value:.8}"))
+                                .unwrap_or_else(|| result.state.value_token().into()),
+                        );
+                        ui.label(&result.unit);
+                        if state.show_local_barycentric {
+                            if let Some(values) = result.local_barycentric {
+                                for value in values {
+                                    ui.label(format!("{value:.6}"));
+                                }
+                            } else {
+                                for _ in 0..3 {
+                                    ui.label("N/A");
+                                }
+                            }
+                        }
+                        if state.show_contributions {
+                            ui.label(format_optional(result.linear_part));
+                            ui.label(format_optional(result.excess_part));
+                        }
+                        if state.show_triangle_index {
+                            ui.label(
+                                result
+                                    .triangle_index
+                                    .map(|index| index.to_string())
+                                    .unwrap_or_else(|| "N/A".into()),
+                            );
+                        }
+                        if state.show_triangle_vertices {
+                            for index in result.triangle_vertex_indices.unwrap_or([usize::MAX; 3]) {
+                                ui.label(if index == usize::MAX {
+                                    "N/A".into()
+                                } else {
+                                    displayed_source_row(index).to_string()
+                                });
+                            }
+                        }
+                        ui.end_row();
+                    }
+                });
+        });
+}
+
+fn format_optional(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.8}"))
+        .unwrap_or_else(|| "N/A".into())
+}
+
+/// Convert a zero-based Rust/grid index to the one-based source row shown in
+/// Grid inspection and emitted by its TSV export.
+pub(crate) const fn displayed_source_row(index: usize) -> usize {
+    index + 1
+}
+fn result_tsv(results: &[InterpolatedResult], state: &GridInspectionUi, full: bool) -> String {
+    let mut header = vec!["A", "B", "C", "InterpolatedValue", "State"];
+    if full {
+        header.splice(
+            0..0,
+            [
+                "Index",
+                "Grid",
+                "Phase",
+                "Property",
+                "InterpolationMethod",
+                "Unit",
+            ],
+        );
+        if state.show_local_barycentric {
+            header.extend(["local_lambda0", "local_lambda1", "local_lambda2"]);
+        }
+        if state.show_contributions {
+            header.extend(["linear_part", "excess_part"]);
+        }
+        if state.show_triangle_index {
+            header.push("triangle_index0");
+        }
+        if state.show_triangle_vertices {
+            header.extend(["vertex_0_row", "vertex_1_row", "vertex_2_row"]);
+        }
+    }
+    let mut rows = vec![header.join("\t")];
+    for result in results {
+        let mut cells = Vec::new();
+        if full {
+            cells.extend([
+                result.index.to_string(),
+                result.grid_name.clone(),
+                result.phase_name.clone(),
+                result.field.property.clone(),
+                result.method_label(),
+                result.unit.clone(),
+            ]);
+        }
+        cells.extend(result.composition.map(|value| format!("{value:.10}")));
+        cells.push(
+            result
+                .value
+                .map(|value| format!("{value:.10}"))
+                .unwrap_or_else(|| result.state.value_token().into()),
+        );
+        cells.push(result.state.label().into());
+        if full && state.show_local_barycentric {
+            if let Some(values) = result.local_barycentric {
+                cells.extend(values.map(|value| format!("{value:.10}")));
+            } else {
+                cells.extend(["N/A".into(), "N/A".into(), "N/A".into()]);
+            }
+        }
+        if full && state.show_contributions {
+            cells.extend([
+                format_optional(result.linear_part),
+                format_optional(result.excess_part),
+            ]);
+        }
+        if full && state.show_triangle_index {
+            cells.push(
+                result
+                    .triangle_index
+                    .map(|index| index.to_string())
+                    .unwrap_or_else(|| "N/A".into()),
+            );
+        }
+        if full && state.show_triangle_vertices {
+            cells.extend(
+                result
+                    .triangle_vertex_indices
+                    .unwrap_or([usize::MAX; 3])
+                    .map(|index| {
+                        if index == usize::MAX {
+                            "N/A".into()
+                        } else {
+                            displayed_source_row(index).to_string()
+                        }
+                    }),
+            );
+        }
+        rows.push(cells.join("\t"));
+    }
+    rows.join("\n") + "\n"
+}
 fn selected_field_tsv(
     dataset: &crate::TabulatedTernaryDataset,
     grid_index: usize,
@@ -773,6 +1280,14 @@ fn visible(value: TabulatedValueState, state: &GridInspectionUi) -> bool {
     }
 }
 
+fn grid_inspection_background() -> egui::Color32 {
+    egui::Color32::from_rgb(
+        PLOT_BACKGROUND_RGB[0],
+        PLOT_BACKGROUND_RGB[1],
+        PLOT_BACKGROUND_RGB[2],
+    )
+}
+
 fn screen_pos(transform: &ViewerTransform, composition: [f64; 3]) -> egui::Pos2 {
     let logical = transform
         .composition_to_logical(composition)
@@ -868,5 +1383,92 @@ mod tests {
             ),
             "CO (CO)"
         );
+    }
+
+    #[test]
+    fn interpolation_tsv_uses_unambiguous_one_based_source_rows() {
+        let result = InterpolatedResult {
+            index: 1,
+            field: InspectionFieldIdentity {
+                grid_index: 0,
+                phase_id: StablePhaseId(1),
+                property: "T".into(),
+            },
+            grid_name: "regular".into(),
+            phase_name: "Phase1".into(),
+            component_names: ["A".into(), "B".into(), "C".into()],
+            unit: "K".into(),
+            composition: [0.5, 0.25, 0.25],
+            source_interpolation: crate::SourceInterpolation::Linear,
+            partial_domain_policy: ternary_contours::CubicPartialDomainPolicy::OneSidedThenLinear,
+            state: InterpolatedResultState::Defined,
+            value: Some(1_234.5),
+            triangle_index: Some(7),
+            local_barycentric: Some([0.2, 0.3, 0.5]),
+            triangle_vertex_indices: Some([0, 11, 22]),
+            linear_part: Some(1_234.5),
+            excess_part: Some(0.0),
+            local_mode: Some(ternary_contours::LocalInterpolationMode::Linear),
+            stale_error: None,
+            stale: false,
+        };
+        let state = GridInspectionUi {
+            show_triangle_vertices: true,
+            ..GridInspectionUi::default()
+        };
+        let tsv = result_tsv(&[result], &state, true);
+        let mut lines = tsv.lines();
+        let header = lines.next().unwrap();
+        assert!(header.contains("vertex_0_row\tvertex_1_row\tvertex_2_row"));
+        let row = lines.next().unwrap().split('\t').collect::<Vec<_>>();
+        assert_eq!(&row[row.len() - 3..], ["1", "12", "23"]);
+        assert_eq!(displayed_source_row(0), 1);
+        assert_eq!(displayed_source_row(22), 23);
+    }
+
+    #[test]
+    fn interpolation_mode_uses_the_plot_background_and_keeps_results_across_modes() {
+        assert_eq!(
+            grid_inspection_background(),
+            egui::Color32::from_rgb(
+                PLOT_BACKGROUND_RGB[0],
+                PLOT_BACKGROUND_RGB[1],
+                PLOT_BACKGROUND_RGB[2],
+            )
+        );
+        let mut editor = DatasetEditorState::new(crate::default_regular_dataset());
+        let TabulatedGrid::Regular(grid) = &mut editor.draft.grids[0] else {
+            unreachable!("default dataset uses a regular grid");
+        };
+        for field in &mut grid.fields {
+            for (index, value) in field.values.iter_mut().enumerate() {
+                *value = TabulatedValue::calculated(1_000.0 + index as f64).unwrap();
+            }
+        }
+        let mut state = GridInspectionUi::default();
+        state.initialise(&editor);
+        assert_eq!(state.mode, GridInspectionMode::VertexSelection);
+        state.mode = GridInspectionMode::Interpolation;
+        let mut options = ProjectionOptions::default();
+        state.register_interpolation_query(&editor, &options, [0.4, 0.3, 0.3]);
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(
+            state.results[0].source_interpolation,
+            crate::SourceInterpolation::Linear
+        );
+        state.mode = GridInspectionMode::VertexSelection;
+        assert_eq!(state.results.len(), 1);
+        options.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+            method: ternary_contours::CubicAlphaMethod::Akima,
+            continuation: ternary_contours::BinaryExtrapolation::RawBarycentric,
+        };
+        state.recalculate_interpolation_results(&editor, &options);
+        assert_eq!(
+            state.results[0].source_interpolation,
+            options.source_interpolation
+        );
+        state.select_field(&editor, 1);
+        state.recalculate_interpolation_results(&editor, &options);
+        assert_eq!(state.results[0].field.phase_id, StablePhaseId(2));
     }
 }

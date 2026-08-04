@@ -817,35 +817,54 @@ impl LiquidusViewerApp {
         }
     }
     fn show_grid_inspection(&mut self, ctx: &egui::Context) {
-        let action = if let Some(editor) = self.editor.as_mut() {
-            let mut action = GridInspectionAction::None;
-            egui::SidePanel::left("grid_inspection_controls")
-                .resizable(true)
-                .default_width(300.0)
-                .show(ctx, |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        action = grid_inspection::show_controls(
-                            ctx,
-                            ui,
-                            editor,
-                            &mut self.grid_inspection_ui,
-                        );
+        let action = {
+            let (editor, grid_ui, options) = (
+                &mut self.editor,
+                &mut self.grid_inspection_ui,
+                &mut self.state.calculation_options,
+            );
+            if let Some(editor) = editor.as_mut() {
+                let mut action = GridInspectionAction::None;
+                egui::SidePanel::left("grid_inspection_controls")
+                    .resizable(true)
+                    .default_width(310.0)
+                    .show(ctx, |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            action =
+                                grid_inspection::show_controls(ctx, ui, editor, grid_ui, options);
+                        });
                     });
-                });
-            action
-        } else {
-            GridInspectionAction::None
+                action
+            } else {
+                GridInspectionAction::None
+            }
         };
-        if !matches!(action, GridInspectionAction::None) {
+        if matches!(
+            action,
+            GridInspectionAction::DraftEdited
+                | GridInspectionAction::Applied
+                | GridInspectionAction::Recalculate
+        ) {
             self.state.mark_document_dirty();
         }
         let recalculate = matches!(
             action,
             GridInspectionAction::Applied | GridInspectionAction::Recalculate
         );
+        egui::SidePanel::right("grid_inspection_results")
+            .resizable(true)
+            .default_width(370.0)
+            .show(ctx, |ui| {
+                grid_inspection::show_results(ctx, ui, &mut self.grid_inspection_ui);
+            });
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(editor) = self.editor.as_ref() {
-                grid_inspection::show_canvas(ui, editor, &mut self.grid_inspection_ui);
+                grid_inspection::show_canvas(
+                    ui,
+                    editor,
+                    &mut self.grid_inspection_ui,
+                    &self.state.calculation_options,
+                );
             } else {
                 ui.centered_and_justified(|ui| {
                     ui.label("Load a TCT dataset to inspect grid points.")
@@ -857,7 +876,6 @@ impl LiquidusViewerApp {
             self.schedule_recalculation();
         }
     }
-
     fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
         if let Some(dataset) = self.state.dataset.as_ref() {
@@ -1243,6 +1261,10 @@ impl eframe::App for LiquidusViewerApp {
             self.start_file_calculation();
         }
         if control_change.calculation_changed {
+            if let Some(editor) = self.editor.as_ref() {
+                self.grid_inspection_ui
+                    .recalculate_interpolation_results(editor, &self.state.calculation_options);
+            }
             self.schedule_recalculation();
         }
         if can_calculate && (recalculate || control_change.recalculate_now) {

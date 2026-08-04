@@ -93,6 +93,20 @@ initializes the first grid field, preferring its `T` field.
 undefined values do not participate in interpolation; numerical diagnostics
 preserve whether the source was non-existing, cut off, or missing.
 
+
+### Interpolation inspection
+
+Grid inspection has **Vertex selection** and **Interpolation** modes. The
+latter evaluates the selected `(grid, phase ID, property)` at arbitrary clicks
+inside source triangles using a cached prepared numerical field, not a
+GUI-specific formula. The right-side results pane records semantic A/B/C,
+method, typed state, value, unit, optional local barycentric coordinates,
+linear/excess contributions, triangle ID, and one-based source rows. The source
+rows are displayed as `vertex_0_row`, `vertex_1_row`, and `vertex_2_row`; their
+internal Rust indices are zero-based and remain aligned with local lambda0/1/2.
+Changing interpolation settings or field selectors recalculates the registered
+queries without re-running the full liquidus worker. Grid inspection uses the
+same configured plot background as Plot.
 ## Inspection and diagnostics
 
 Scroll over the plot to zoom; drag to pan; fit/reset only crop and scale the

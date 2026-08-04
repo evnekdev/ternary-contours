@@ -140,18 +140,29 @@ impl CubicAlphaTriangle {
 
     /// Evaluate the complete local field at barycentric coordinates.
     pub fn value(&self, barycentric: [f64; 3]) -> f64 {
+        let (linear, excess) = self.decomposition(barycentric);
+        linear + excess
+    }
+
+    /// Split a local evaluation into its affine vertex contribution and the
+    /// alpha-dependent edge correction.
+    ///
+    /// This is the same calculation used by [`Self::value`]. It is exposed
+    /// for numerical inspection tools so they do not need to reconstruct a
+    /// second, potentially divergent interpolation formula.
+    pub fn decomposition(&self, barycentric: [f64; 3]) -> (f64, f64) {
         let linear = self
             .vertex_values
             .into_iter()
             .zip(barycentric)
             .map(|(value, weight)| value * weight)
             .sum::<f64>();
-        linear
-            + self
-                .edge_intervals
-                .iter()
-                .map(|edge| self.evaluate_edge(*edge, barycentric).value)
-                .sum::<f64>()
+        let excess = self
+            .edge_intervals
+            .iter()
+            .map(|edge| self.evaluate_edge(*edge, barycentric).value)
+            .sum::<f64>();
+        (linear, excess)
     }
 
     /// Analytic reduced gradient for `x0=u`, `x1=v`, `x2=1-u-v`.

@@ -215,7 +215,7 @@ impl StablePhaseEvaluator for RuntimePhase {
     }
 }
 
-fn interpolate_tabulated(
+pub(crate) fn interpolate_tabulated(
     values: &[TabulatedValue],
     vertices: impl IntoIterator<Item = (usize, f64)>,
 ) -> Result<f64, StablePhaseUndefinedReason> {
@@ -232,7 +232,7 @@ fn interpolate_tabulated(
         })
 }
 
-fn undefined_reason(value: &TabulatedValue) -> StablePhaseUndefinedReason {
+pub(crate) fn undefined_reason(value: &TabulatedValue) -> StablePhaseUndefinedReason {
     match value.state {
         TabulatedValueState::Calculated => StablePhaseUndefinedReason::NonFiniteResult,
         TabulatedValueState::NonExisting => StablePhaseUndefinedReason::ClassifiedNonExisting,

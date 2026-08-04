@@ -1,4 +1,4 @@
-use crate::{RenderPathMode, SourceInterpolation, parse_level_spec};
+use crate::{ProjectionOptions, RenderPathMode, SourceInterpolation, parse_level_spec};
 use eframe::egui;
 use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy};
 
@@ -11,6 +11,93 @@ pub struct ControlChange {
     pub calculation_changed: bool,
     /// The explicit recovery command was requested.
     pub recalculate_now: bool,
+}
+/// Render the source interpolation controls against one shared configuration.
+///
+/// Plot and Grid inspection pass the same [`ProjectionOptions`] instance, so a
+/// committed setting has one numerical meaning in both views.
+pub fn show_source_interpolation_controls(
+    ui: &mut egui::Ui,
+    options: &mut ProjectionOptions,
+    cubic_supported: bool,
+    id_salt: &'static str,
+) -> bool {
+    let before = options.source_interpolation;
+    let before_policy = options.partial_domain_policy;
+    ui.label("Source interpolation");
+    let mut interpolation = before;
+    egui::ComboBox::from_id_salt(("source_interpolation", id_salt))
+        .selected_text(interpolation_name(interpolation))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut interpolation, SourceInterpolation::Linear, "Linear");
+            ui.add_enabled_ui(cubic_supported, |ui| {
+                let cubic_option = cubic_default_from(interpolation);
+                ui.selectable_value(&mut interpolation, cubic_option, "Cubic alpha");
+            });
+        });
+    if !cubic_supported {
+        ui.small("Cubic alpha is unavailable for this selected irregular source field.");
+    }
+    options.source_interpolation = interpolation;
+
+    if let SourceInterpolation::CubicAlpha {
+        mut method,
+        mut continuation,
+    } = options.source_interpolation
+    {
+        egui::ComboBox::from_id_salt(("cubic_slope_method", id_salt))
+            .selected_text(cubic_method_name(method))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut method, CubicAlphaMethod::Akima, "Akima");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Makima, "Makima");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Pchip, "PCHIP");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Steffen, "Steffen");
+            });
+        ui.label("Partial-domain cubic fallback");
+        let mut partial_policy = options.partial_domain_policy;
+        egui::ComboBox::from_id_salt(("cubic_partial_domain_policy", id_salt))
+            .selected_text(partial_domain_policy_name(partial_policy))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::Strict,
+                    "Strict cubic",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::OneSided,
+                    "One-sided cubic",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::OneSidedThenLinear,
+                    "One-sided cubic, then linear",
+                );
+                ui.selectable_value(
+                    &mut partial_policy,
+                    CubicPartialDomainPolicy::LinearNearDomain,
+                    "Linear near boundaries",
+                );
+            });
+        ui.label("Continuation");
+        egui::ComboBox::from_id_salt(("cubic_continuation", id_salt))
+            .selected_text(continuation_name(continuation))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut continuation,
+                    BinaryExtrapolation::RawBarycentric,
+                    "Raw barycentric",
+                );
+                ui.selectable_value(&mut continuation, BinaryExtrapolation::Muggianu, "Muggianu");
+                ui.selectable_value(&mut continuation, BinaryExtrapolation::Kohler, "Kohler");
+            });
+        options.source_interpolation = SourceInterpolation::CubicAlpha {
+            method,
+            continuation,
+        };
+        options.partial_domain_policy = partial_policy;
+    }
+    before != options.source_interpolation || before_policy != options.partial_domain_policy
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
@@ -105,107 +192,16 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
 
     ui.separator();
     ui.heading("Calculation");
-    ui.label("Source interpolation");
-    let old_interpolation = state.calculation_options.source_interpolation;
-    let mut interpolation = old_interpolation;
     let cubic_supported = cubic_source_supported(state);
-    egui::ComboBox::from_id_salt("source_interpolation")
-        .selected_text(interpolation_name(interpolation))
-        .show_ui(ui, |ui| {
-            ui.selectable_value(&mut interpolation, SourceInterpolation::Linear, "Linear");
-            let cubic_option = cubic_default_from(interpolation);
-            ui.add_enabled_ui(cubic_supported, |ui| {
-                ui.selectable_value(&mut interpolation, cubic_option, "Cubic alpha");
-            });
-        });
-    if !cubic_supported {
-        ui.small(
-            "Cubic alpha is unavailable while a participating field uses an irregular grid; use Linear Delaunay.",
-        );
-    }
-    if old_interpolation != interpolation {
-        state.calculation_options.source_interpolation = interpolation;
+    if show_source_interpolation_controls(
+        ui,
+        &mut state.calculation_options,
+        cubic_supported,
+        "plot",
+    ) {
         state.invalidate_projection();
         change.calculation_changed = true;
     }
-
-    if let SourceInterpolation::CubicAlpha {
-        mut method,
-        mut continuation,
-    } = state.calculation_options.source_interpolation
-    {
-        ui.label("Cubic slope estimation");
-        let old_method = method;
-        egui::ComboBox::from_id_salt("cubic_slope_method")
-            .selected_text(cubic_method_name(method))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut method, CubicAlphaMethod::Akima, "Akima");
-                ui.selectable_value(&mut method, CubicAlphaMethod::Makima, "Makima");
-                ui.selectable_value(&mut method, CubicAlphaMethod::Pchip, "PCHIP");
-                ui.selectable_value(&mut method, CubicAlphaMethod::Steffen, "Steffen");
-            });
-        ui.small("These are one-dimensional edge-slope estimators used by the ternary cubic-alpha model.");
-        ui.label("Partial-domain cubic fallback");
-        let old_partial_policy = state.calculation_options.partial_domain_policy;
-        let mut partial_policy = old_partial_policy;
-        egui::ComboBox::from_id_salt("cubic_partial_domain_policy")
-            .selected_text(partial_domain_policy_name(partial_policy))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut partial_policy,
-                    CubicPartialDomainPolicy::Strict,
-                    "Strict cubic",
-                );
-                ui.selectable_value(
-                    &mut partial_policy,
-                    CubicPartialDomainPolicy::OneSided,
-                    "One-sided cubic",
-                );
-                ui.selectable_value(
-                    &mut partial_policy,
-                    CubicPartialDomainPolicy::OneSidedThenLinear,
-                    "One-sided cubic, then linear",
-                );
-                ui.selectable_value(
-                    &mut partial_policy,
-                    CubicPartialDomainPolicy::LinearNearDomain,
-                    "Linear near domain boundaries",
-                );
-            });
-        ui.small("Undefined, non-existing, and cut-off samples stay outside numerical stencils.");
-        ui.label("Continuation outside the local derivative stencil");
-        let old_continuation = continuation;
-        egui::ComboBox::from_id_salt("cubic_continuation")
-            .selected_text(continuation_name(continuation))
-            .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut continuation,
-                    BinaryExtrapolation::RawBarycentric,
-                    "Raw barycentric",
-                );
-                ui.selectable_value(&mut continuation, BinaryExtrapolation::Muggianu, "Muggianu");
-                ui.selectable_value(&mut continuation, BinaryExtrapolation::Kohler, "Kohler");
-            });
-        if old_method != method || old_continuation != continuation {
-            state.calculation_options.source_interpolation = SourceInterpolation::CubicAlpha {
-                method,
-                continuation,
-            };
-            state.invalidate_projection();
-            change.calculation_changed = true;
-        }
-        if old_partial_policy != partial_policy {
-            state.calculation_options.partial_domain_policy = partial_policy;
-            state.invalidate_projection();
-            change.calculation_changed = true;
-        }
-    } else {
-        ui.add_enabled_ui(false, |ui| {
-            ui.label("Cubic slope estimation");
-            ui.label("Continuation outside the local derivative stencil");
-        });
-    }
-
     ui.horizontal(|ui| {
         ui.label("Sampling subdivisions");
         let response = ui.text_edit_singleline(&mut state.viewer_options.sampling_text);
@@ -579,4 +575,3 @@ mod tests {
         assert_eq!(options.extrapolation, BinaryExtrapolation::Kohler);
     }
 }
-

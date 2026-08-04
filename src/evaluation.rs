@@ -61,6 +61,50 @@ impl FieldSample {
     }
 }
 
+/// Definedness reported by a diagnostic interpolation query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InterpolationInspectionState {
+    /// The selected local source triangle produced a finite scalar value.
+    Defined,
+    /// One or more triangle corners are unavailable, so the field is outside
+    /// its safely interpolable source domain at this point.
+    UndefinedTriangle,
+}
+
+/// Actual local model selected for one diagnostic interpolation query.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LocalInterpolationMode {
+    /// Piecewise affine interpolation.
+    Linear,
+    /// Full cubic-alpha interpolation.
+    Cubic,
+    /// Cubic-alpha interpolation with one-sided derivative stencils.
+    OneSidedCubic,
+    /// A local affine fallback selected by the partial-domain policy.
+    LinearFallback,
+    /// The source triangle is unavailable for the field.
+    Undefined,
+}
+
+/// Structured result from the same prepared interpolation path used for normal
+/// field evaluation.
+///
+/// `composition` is semantic A/B/C; `local_barycentric` is relative to the
+/// source triangle listed by `triangle_index` and `triangle_vertex_indices`.
+/// Values and contributions are never NaN: unavailable triangles report
+/// `None` with [`InterpolationInspectionState::UndefinedTriangle`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InterpolationInspectionResult {
+    pub composition: [f64; 3],
+    pub triangle_index: usize,
+    pub local_barycentric: [f64; 3],
+    pub triangle_vertex_indices: Option<[usize; 3]>,
+    pub state: InterpolationInspectionState,
+    pub value: Option<f64>,
+    pub linear_part: Option<f64>,
+    pub excess_part: Option<f64>,
+    pub local_mode: LocalInterpolationMode,
+}
 /// Failure while preparing or evaluating an interpolated scalar field.
 #[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
@@ -331,6 +375,53 @@ impl<'a> InterpolatedTernaryField<'a> {
     }
 
     /// Return cubic construction diagnostics, or `None` for linear evaluation.
+    /// Evaluate through the prepared numerical model and retain the selected
+    /// source triangle, local mode, and affine/cubic decomposition.
+    pub fn inspect(
+        &self,
+        composition: [f64; 3],
+    ) -> Result<InterpolationInspectionResult, FieldEvaluationError> {
+        let location = self.field.grid().locate(composition)?;
+        self.inspect_at_location(&location)
+    }
+
+    /// Produce a structured diagnostic result at a previously located point.
+    pub fn inspect_at_location(
+        &self,
+        location: &LocatedTriangle,
+    ) -> Result<InterpolationInspectionResult, FieldEvaluationError> {
+        let triangle = self.validated_triangle(location)?;
+        let sample = self.evaluate_at_location(location)?;
+        let (linear_part, excess_part, local_mode) = match &self.interpolation {
+            PreparedInterpolation::Linear => (sample.value, 0.0, LocalInterpolationMode::Linear),
+            PreparedInterpolation::CubicAlpha(model) => {
+                let (linear, excess) = model
+                    .decomposition_in_triangle(triangle.id, location.barycentric)
+                    .ok_or(FieldEvaluationError::InvalidLocation {
+                        triangle: triangle.id,
+                    })?;
+                (linear, excess, LocalInterpolationMode::Cubic)
+            }
+        };
+        if !linear_part.is_finite() || !excess_part.is_finite() {
+            return Err(FieldEvaluationError::NonFiniteEvaluation);
+        }
+        Ok(InterpolationInspectionResult {
+            composition: composition_at_location(
+                self.field.grid(),
+                triangle,
+                location.barycentric,
+            )?,
+            triangle_index: triangle.id,
+            local_barycentric: location.barycentric,
+            triangle_vertex_indices: Some(triangle.vertices.map(|vertex| vertex.0)),
+            state: InterpolationInspectionState::Defined,
+            value: Some(sample.value),
+            linear_part: Some(linear_part),
+            excess_part: Some(excess_part),
+            local_mode,
+        })
+    }
     pub fn cubic_diagnostics(&self) -> Option<&CubicBuildDiagnostics> {
         match &self.interpolation {
             PreparedInterpolation::Linear => None,
@@ -475,6 +566,77 @@ impl InterpolatedPartialTernaryField {
             .map(|sample| sample.value))
     }
 
+    /// Inspect a partial-domain field at a semantic composition without
+    /// converting an unavailable local triangle into a numeric sentinel.
+    pub fn inspect(
+        &self,
+        composition: [f64; 3],
+    ) -> Result<InterpolationInspectionResult, FieldEvaluationError> {
+        let location = self.field.grid().locate(composition)?;
+        self.inspect_at_location(&location)
+    }
+
+    /// Produce a structured result for a previously located partial-domain
+    /// point. Undefined triangles preserve their location and source rows.
+    pub fn inspect_at_location(
+        &self,
+        location: &LocatedTriangle,
+    ) -> Result<InterpolationInspectionResult, FieldEvaluationError> {
+        let triangle = self.validated_triangle(location)?;
+        let composition =
+            composition_at_location(self.field.grid(), triangle, location.barycentric)?;
+        let base = InterpolationInspectionResult {
+            composition,
+            triangle_index: triangle.id,
+            local_barycentric: location.barycentric,
+            triangle_vertex_indices: Some(triangle.vertices.map(|vertex| vertex.0)),
+            state: InterpolationInspectionState::UndefinedTriangle,
+            value: None,
+            linear_part: None,
+            excess_part: None,
+            local_mode: LocalInterpolationMode::Undefined,
+        };
+        let Some(sample) = self.evaluate_at_location(location)? else {
+            return Ok(base);
+        };
+        let (linear_part, excess_part, local_mode) = match &self.interpolation {
+            PartialPreparedInterpolation::Linear => {
+                (sample.value, 0.0, LocalInterpolationMode::Linear)
+            }
+            PartialPreparedInterpolation::Cubic(model) => {
+                let (linear, excess) = model
+                    .decomposition_in_triangle(triangle.id, location.barycentric)
+                    .flatten()
+                    .ok_or(FieldEvaluationError::InvalidLocation {
+                        triangle: triangle.id,
+                    })?;
+                let mode = match model.triangle_mode(triangle.id) {
+                    Some(crate::field::CubicTriangleMode::Cubic) => LocalInterpolationMode::Cubic,
+                    Some(crate::field::CubicTriangleMode::OneSidedCubic) => {
+                        LocalInterpolationMode::OneSidedCubic
+                    }
+                    Some(crate::field::CubicTriangleMode::LinearFallback) => {
+                        LocalInterpolationMode::LinearFallback
+                    }
+                    Some(crate::field::CubicTriangleMode::Undefined) | None => {
+                        LocalInterpolationMode::Undefined
+                    }
+                };
+                (linear, excess, mode)
+            }
+        };
+        if !linear_part.is_finite() || !excess_part.is_finite() {
+            return Err(FieldEvaluationError::NonFiniteEvaluation);
+        }
+        Ok(InterpolationInspectionResult {
+            state: InterpolationInspectionState::Defined,
+            value: Some(sample.value),
+            linear_part: Some(linear_part),
+            excess_part: Some(excess_part),
+            local_mode,
+            ..base
+        })
+    }
     pub fn cubic_diagnostics(&self) -> Option<&CubicBuildDiagnostics> {
         match &self.interpolation {
             PartialPreparedInterpolation::Linear => None,
@@ -516,6 +678,27 @@ fn valid_barycentric(barycentric: [f64; 3]) -> bool {
         && (sum - 1.0).abs() <= crate::POINT_LOCATION_TOLERANCE
 }
 
+fn composition_at_location(
+    grid: RegularTernaryGrid,
+    triangle: GridTriangle,
+    barycentric: [f64; 3],
+) -> Result<[f64; 3], FieldEvaluationError> {
+    let mut composition = [0.0; 3];
+    for (vertex, weight) in triangle.vertices.into_iter().zip(barycentric) {
+        let point =
+            grid.composition(vertex)
+                .map_err(|_| FieldEvaluationError::InvalidLocation {
+                    triangle: triangle.id,
+                })?;
+        for component in 0..3 {
+            composition[component] += point[component] * weight;
+        }
+    }
+    if !composition.into_iter().all(f64::is_finite) {
+        return Err(FieldEvaluationError::NonFiniteEvaluation);
+    }
+    Ok(composition)
+}
 fn global_gradient(
     grid: RegularTernaryGrid,
     triangle: GridTriangle,
@@ -586,6 +769,99 @@ mod tests {
         }
     }
 
+    #[test]
+    fn linear_inspection_reports_the_located_canonical_triangle() {
+        let field = affine_field(4);
+        let evaluator = InterpolatedTernaryField::new(&field, FieldInterpolation::Linear).unwrap();
+        let point = [0.42, 0.17, 0.41];
+        let inspection = evaluator.inspect(point).unwrap();
+        let location = field.grid().locate(point).unwrap();
+        assert_eq!(inspection.state, InterpolationInspectionState::Defined);
+        assert_eq!(inspection.triangle_index, location.triangle.id);
+        assert_eq!(inspection.local_barycentric, location.barycentric);
+        assert_eq!(
+            inspection.triangle_vertex_indices,
+            Some(location.triangle.vertices.map(|vertex| vertex.0))
+        );
+        close(
+            inspection.value.unwrap(),
+            inspection.linear_part.unwrap() + inspection.excess_part.unwrap(),
+        );
+        assert_eq!(inspection.excess_part, Some(0.0));
+        assert!(
+            inspection
+                .triangle_vertex_indices
+                .unwrap()
+                .into_iter()
+                .all(|index| index < field.grid().vertex_count())
+        );
+    }
+
+    #[cfg(feature = "cubic-alpha")]
+    #[test]
+    fn cubic_inspection_decomposes_the_prepared_model_value() {
+        let field = RegularTernaryScalarField::from_fn(5, |[a, b, c]| {
+            2.0 * a.powi(3) - b.powi(2) + 0.5 * c + a * b
+        })
+        .unwrap();
+        let evaluator = InterpolatedTernaryField::new(
+            &field,
+            FieldInterpolation::CubicAlpha(CubicAlphaBuildOptions::default()),
+        )
+        .unwrap();
+        let inspection = evaluator.inspect([0.37, 0.24, 0.39]).unwrap();
+        assert_eq!(inspection.local_mode, LocalInterpolationMode::Cubic);
+        close(
+            inspection.value.unwrap(),
+            inspection.linear_part.unwrap() + inspection.excess_part.unwrap(),
+        );
+        close(
+            inspection.value.unwrap(),
+            evaluator.value([0.37, 0.24, 0.39]).unwrap(),
+        );
+    }
+
+    #[cfg(feature = "cubic-alpha")]
+    #[test]
+    fn partial_inspection_keeps_unavailable_triangles_typed_and_local() {
+        let grid = RegularTernaryGrid::new(4).unwrap();
+        let triangles = grid.elementary_triangles().unwrap();
+        let unavailable = triangles[0];
+        let defined = *triangles
+            .iter()
+            .find(|triangle| !triangle.vertices.contains(&unavailable.vertices[0]))
+            .unwrap();
+        let mut values = (0..grid.vertex_count())
+            .map(|index| Some(index as f64 + 1.0))
+            .collect::<Vec<_>>();
+        values[unavailable.vertices[0].0] = None;
+        let field = RegularTernaryPartialScalarField::new(4, values).unwrap();
+        let evaluator =
+            InterpolatedPartialTernaryField::new(field, FieldInterpolation::Linear).unwrap();
+        let centroid = |triangle: GridTriangle| {
+            let points = triangle
+                .vertices
+                .map(|vertex| grid.composition(vertex).unwrap());
+            [
+                (points[0][0] + points[1][0] + points[2][0]) / 3.0,
+                (points[0][1] + points[1][1] + points[2][1]) / 3.0,
+                (points[0][2] + points[1][2] + points[2][2]) / 3.0,
+            ]
+        };
+        let undefined = evaluator.inspect(centroid(unavailable)).unwrap();
+        assert_eq!(
+            undefined.state,
+            InterpolationInspectionState::UndefinedTriangle
+        );
+        assert_eq!(undefined.value, None);
+        assert_eq!(
+            undefined.triangle_vertex_indices,
+            Some(unavailable.vertices.map(|vertex| vertex.0))
+        );
+        let finite = evaluator.inspect(centroid(defined)).unwrap();
+        assert_eq!(finite.state, InterpolationInspectionState::Defined);
+        assert!(finite.value.is_some_and(f64::is_finite));
+    }
     #[test]
     fn prepared_batch_evaluation_preserves_order_and_reports_errors() {
         let field = affine_field(6);

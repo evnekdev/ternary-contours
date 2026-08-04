@@ -114,6 +114,7 @@ pub use error::{FieldError, GridEvaluationError};
 pub use evaluation::InterpolatedPartialTernaryField;
 pub use evaluation::{
     FieldEvaluationError, FieldInterpolation, FieldSample, InterpolatedTernaryField,
+    InterpolationInspectionResult, InterpolationInspectionState, LocalInterpolationMode,
 };
 pub use field::{CubicBuildDiagnostics, CubicGridField};
 #[cfg(feature = "cubic-alpha")]
@@ -181,4 +182,3 @@ pub use irregular::{
 };
 
 pub use synthetic::LiquidusFieldSpec;
-

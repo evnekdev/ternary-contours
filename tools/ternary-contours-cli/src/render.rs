@@ -42,6 +42,9 @@ pub enum RenderPathMode {
     Regularized,
     Overlay,
 }
+/// RGB canvas background shared by Plotters output and native inspection
+/// canvases. Keeping it in the renderer prevents a GUI-only colour convention.
+pub const PLOT_BACKGROUND_RGB: [u8; 3] = [255, 255, 255];
 
 #[derive(Clone, Debug)]
 pub struct RenderOptions {
@@ -313,7 +316,11 @@ fn render<DB: DrawingBackend>(
 where
     DB::ErrorType: 'static,
 {
-    root.fill(&WHITE)?;
+    root.fill(&RGBColor(
+        PLOT_BACKGROUND_RGB[0],
+        PLOT_BACKGROUND_RGB[1],
+        PLOT_BACKGROUND_RGB[2],
+    ))?;
     let title = options
         .title
         .as_deref()

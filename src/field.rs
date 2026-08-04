@@ -125,6 +125,17 @@ impl<'a> CubicGridField<'a> {
     pub fn value_in_triangle(&self, index: usize, barycentric: [f64; 3]) -> Option<f64> {
         self.models.get(index).map(|model| model.value(barycentric))
     }
+    /// Split a local cubic-alpha evaluation into affine and excess terms.
+    pub fn decomposition_in_triangle(
+        &self,
+        index: usize,
+        barycentric: [f64; 3],
+    ) -> Option<(f64, f64)> {
+        self.models
+            .get(index)
+            .map(|model| model.decomposition(barycentric))
+    }
+
     /// Evaluate the selected local field's reduced barycentric gradient.
     pub fn gradient_in_triangle(&self, index: usize, u: f64, v: f64) -> Option<[f64; 2]> {
         self.models
@@ -267,6 +278,22 @@ impl PartialCubicGridField {
                 PartialTriangleModel::Linear(values) => {
                     [values[0] - values[2], values[1] - values[2]]
                 }
+            })
+        })
+    }
+
+    /// Split a locally available partial-domain triangle evaluation into its
+    /// affine and cubic-alpha excess terms. An undefined triangle returns
+    /// `Some(None)`; an invalid triangle index returns `None`.
+    pub fn decomposition_in_triangle(
+        &self,
+        index: usize,
+        barycentric: [f64; 3],
+    ) -> Option<Option<(f64, f64)>> {
+        self.models.get(index).map(|model| {
+            model.as_ref().map(|model| match model {
+                PartialTriangleModel::Cubic(model) => model.decomposition(barycentric),
+                PartialTriangleModel::Linear(values) => (dot(*values, barycentric), 0.0),
             })
         })
     }

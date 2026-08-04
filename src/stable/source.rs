@@ -306,4 +306,3 @@ pub(crate) enum ScalarRole {
     Height,
     Secondary,
 }
-

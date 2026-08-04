@@ -66,6 +66,45 @@ selected points to keep large regular grids readable. Regular-grid edges are an
 optional inspection overlay. Irregular grids display their source points; no
 invented topology is shown when an edge mesh is unavailable.
 
+
+## Interpolation queries
+
+Choose **Interpolation** at the top of Grid inspection to evaluate the selected
+`(grid, phase ID, property)` field at an arbitrary point inside a source
+triangle. **Vertex selection** keeps the existing classified-point editing
+workflow; it never changes a point merely by hovering. The inspection canvas
+uses the same configured background as Plot.
+
+Clicking inside the simplex keeps the semantic `A`, `B`, `C` composition (the
+component names appear in the results header), locates the source triangle with
+the prepared numerical evaluator, and appends a row in the independently
+scrollable **Interpolated Results** pane. It does not snap to a vertex. Each
+row records the field identity, interpolation family and partial-domain policy,
+state, value, and property unit. Undefined triangles and classified boundaries
+remain typed `Missing`, `Non-existing`, `Cut-off`, or unavailable results; no
+result is represented as `NaN`.
+
+The source interpolation, cubic slope, continuation, and partial-domain
+fallback controls share the Plot calculation configuration. Changing a setting
+rebuilds only the selected cached source evaluator and recalculates registered
+queries; it does not start a full liquidus calculation. The optional local
+lambda columns are explicitly triangle-local (`lambda0`, `lambda1`,
+`lambda2`). For cubic alpha, **Linear part** plus **Excess part** equals the
+reported value; linear interpolation reports zero excess.
+
+Enable **Triangle index** and **Source rows** to inspect topology. Internally,
+`triangle_vertex_indices` are zero-based canonical indices into the selected
+grid composition/value arrays and are ordered exactly with the local lambdas:
+`lambda0` belongs to vertex 0, `lambda1` to vertex 1, and `lambda2` to vertex
+2. The UI and copied TSV intentionally display one-based source rows as
+`vertex_0_row`, `vertex_1_row`, and `vertex_2_row`, matching Excel row usage.
+Regular grids therefore use canonical regular-grid rows, while irregular grids
+preserve the stable loaded source-point rows.
+
+Use **Clear**, **Delete selected**, **Copy selected**, or **Copy all** to manage
+queries. Basic copies begin with `A`, `B`, `C`, and `InterpolatedValue`; full
+copies include the selected optional columns and a `State` column. Results stay
+visible while changing zoom or returning to Vertex selection.
 ## Excel TSV
 
 **Copy selected field TSV** emits `A`, `B`, `C`, and the selected qualified

@@ -23,9 +23,9 @@ pub use projection::{
     parse_level_spec,
 };
 pub use render::{
-    OutputFormat, RenderOptions, RenderPathMode, RenderedBitmap, TernaryRenderTransform,
-    composition_from_logical, composition_to_logical, render_to_bitmap, render_to_bitmap_with_raw,
-    render_to_path, render_to_path_with_raw, rgb_to_rgba,
+    OutputFormat, PLOT_BACKGROUND_RGB, RenderOptions, RenderPathMode, RenderedBitmap,
+    TernaryRenderTransform, composition_from_logical, composition_to_logical, render_to_bitmap,
+    render_to_bitmap_with_raw, render_to_path, render_to_path_with_raw, rgb_to_rgba,
 };
 pub use serialize::{
     NumericFormat, SerializeError, TctSerializeOptions, save_tct_atomic, serialize_tct,
