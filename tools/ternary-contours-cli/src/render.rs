@@ -6,8 +6,9 @@ use plotters::{
     prelude::*,
 };
 use plotters_ternary::{
-    MarkerShape, TernaryChartBuilder, TernaryLineSeries, TernaryPoint, TernaryPointSeries,
-    TernaryStableContourSeries,
+    MarkerShape, Normalization, TernaryCartesian, TernaryChart, TernaryChartBuilder,
+    TernaryGeometry, TernaryLineSeries, TernaryPoint, TernaryPointSeries,
+    TernaryStableContourSeries, Tolerance,
 };
 use ternary_contours::StablePhaseId;
 
@@ -83,12 +84,103 @@ impl Default for RenderOptions {
     }
 }
 
+/// Exact affine component-to-bitmap mapping captured from the Plotters chart.
+///
+/// The map is captured after caption, margins, and aspect fitting have been
+/// applied. Viewer overlays and hit testing consume this same map, so they can
+/// never drift from paths rendered by Plotters.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TernaryRenderTransform {
+    component_pixels: [[f64; 2]; 3],
+}
+
+impl TernaryRenderTransform {
+    pub const fn from_component_pixels(component_pixels: [[f64; 2]; 3]) -> Self {
+        Self { component_pixels }
+    }
+
+    pub const fn component_pixels(&self) -> [[f64; 2]; 3] {
+        self.component_pixels
+    }
+
+    /// Create an aspect-fitted transform for the direct egui Grid inspection canvas.
+    /// This uses the same semantic composition-to-logical projection as Plotters.
+    pub fn fit_triangle(width: u32, height: u32) -> Self {
+        const PADDING: f64 = 18.0;
+        let width = f64::from(width).max(1.0);
+        let height = f64::from(height).max(1.0);
+        let logical_height = plotters_ternary::EQUILATERAL_TRIANGLE_HEIGHT;
+        let side = (width - 2.0 * PADDING)
+            .max(1.0)
+            .min((height - 2.0 * PADDING).max(1.0) / logical_height);
+        let left = (width - side).mul_add(0.5, 0.0);
+        let bottom = (height + side * logical_height).mul_add(0.5, 0.0);
+        let pixels = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|composition| {
+            let logical = composition_to_logical(composition)
+                .expect("canonical pure component is a valid ternary composition");
+            [left + logical.x * side, bottom - logical.y * side]
+        });
+        Self::from_component_pixels(pixels)
+    }
+
+    pub fn composition_to_bitmap(&self, [a, b, c]: [f64; 3]) -> [f64; 2] {
+        let vertices = self.component_pixels;
+        [
+            a.mul_add(
+                vertices[0][0],
+                b.mul_add(vertices[1][0], c * vertices[2][0]),
+            ),
+            a.mul_add(
+                vertices[0][1],
+                b.mul_add(vertices[1][1], c * vertices[2][1]),
+            ),
+        ]
+    }
+
+    pub fn logical_to_bitmap(&self, logical: TernaryCartesian) -> Option<[f64; 2]> {
+        composition_from_logical(logical).map(|composition| self.composition_to_bitmap(composition))
+    }
+
+    pub fn bitmap_to_logical(&self, [x, y]: [f64; 2]) -> Option<TernaryCartesian> {
+        let [[ax, ay], [bx, by], [cx, cy]] = self.component_pixels;
+        let determinant = (by - cy).mul_add(ax - cx, -(bx - cx) * (ay - cy));
+        if determinant.abs() <= f64::EPSILON {
+            return None;
+        }
+        let a = ((by - cy) * (x - cx) - (bx - cx) * (y - cy)) / determinant;
+        let b = ((cy - ay) * (x - cx) - (cx - ax) * (y - cy)) / determinant;
+        let c = 1.0 - a - b;
+        composition_to_logical([a, b, c])
+    }
+}
+
+/// Canonical semantic composition-to-equilateral conversion shared by rendering,
+/// hit testing, diagnostics, and Grid inspection.
+pub fn composition_to_logical(composition: [f64; 3]) -> Option<TernaryCartesian> {
+    TernaryGeometry::default()
+        .project(
+            TernaryPoint::from(composition),
+            Normalization::RequireUnitSum,
+            Tolerance::default(),
+        )
+        .ok()
+}
+
+/// Canonical inverse of [`composition_to_logical`].
+pub fn composition_from_logical(point: TernaryCartesian) -> Option<[f64; 3]> {
+    TernaryGeometry::default()
+        .unproject(point, Tolerance::default())
+        .ok()
+        .map(TernaryPoint::as_array)
+}
+
 /// An opaque RGBA image produced by the shared Plotters renderer.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RenderedBitmap {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    pub transform: TernaryRenderTransform,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -132,7 +224,7 @@ pub fn render_to_path_with_raw(
     match format.unwrap_or(OutputFormat::from_path(path)?) {
         OutputFormat::Svg => {
             let root = SVGBackend::new(path, (options.width, options.height)).into_drawing_area();
-            render(&root, dataset, projection, raw_projection, options)
+            let _ = render(&root, dataset, projection, raw_projection, options)
                 .map_err(|error| RenderError::Draw(error.to_string()))?;
             root.present()
                 .map_err(|error| RenderError::Draw(error.to_string()))
@@ -140,7 +232,7 @@ pub fn render_to_path_with_raw(
         OutputFormat::Png => {
             let root =
                 BitMapBackend::new(path, (options.width, options.height)).into_drawing_area();
-            render(&root, dataset, projection, raw_projection, options)
+            let _ = render(&root, dataset, projection, raw_projection, options)
                 .map_err(|error| RenderError::Draw(error.to_string()))?;
             root.present()
                 .map_err(|error| RenderError::Draw(error.to_string()))
@@ -170,18 +262,20 @@ pub fn render_to_bitmap_with_raw(
 ) -> Result<RenderedBitmap, RenderError> {
     let rgb_len = rgb_len(options.width, options.height)?;
     let mut rgb = vec![0; rgb_len];
-    {
+    let transform = {
         let root = BitMapBackend::with_buffer(&mut rgb, (options.width, options.height))
             .into_drawing_area();
-        render(&root, dataset, projection, raw_projection, options)
+        let transform = render(&root, dataset, projection, raw_projection, options)
             .map_err(|error| RenderError::Draw(error.to_string()))?;
         root.present()
             .map_err(|error| RenderError::Draw(error.to_string()))?;
-    }
+        transform
+    };
     Ok(RenderedBitmap {
         width: options.width,
         height: options.height,
         rgba: rgb_to_rgba(&rgb),
+        transform,
     })
 }
 fn rgb_len(width: u32, height: u32) -> Result<usize, RenderError> {
@@ -215,7 +309,7 @@ fn render<DB: DrawingBackend>(
     projection: &LiquidusProjection,
     raw_projection: Option<&LiquidusProjection>,
     options: &RenderOptions,
-) -> Result<(), Box<dyn Error>>
+) -> Result<TernaryRenderTransform, Box<dyn Error>>
 where
     DB::ErrorType: 'static,
 {
@@ -229,20 +323,22 @@ where
         .caption(title, ("sans-serif", 24, FontStyle::Bold, &BLACK))
         .margin(30)
         .build()?;
+    let transform = chart_transform(&chart);
     let mut mesh = chart.configure_mesh();
-    if options.show_labels {
+    if options.show_labels && !options.show_corner_labels {
         mesh = mesh
             .axis_a_name(&dataset.components[0].name)
             .axis_b_name(&dataset.components[1].name)
             .axis_c_name(&dataset.components[2].name);
     } else {
+        // Component names at pure corners are clearer and avoid duplicate labels.
         mesh = mesh.hide_axis_names();
     }
     if options.show_corner_labels {
         mesh = mesh
-            .corner_a_name(corner_label(&dataset.components[0].name, "[1, 0, 0]"))
-            .corner_b_name(corner_label(&dataset.components[1].name, "[0, 1, 0]"))
-            .corner_c_name(corner_label(&dataset.components[2].name, "[0, 0, 1]"));
+            .corner_a_name(corner_label(&dataset.components[0].name))
+            .corner_b_name(corner_label(&dataset.components[1].name))
+            .corner_c_name(corner_label(&dataset.components[2].name));
     } else {
         mesh = mesh.hide_corner_names();
     }
@@ -371,11 +467,23 @@ where
             .border_style(BLACK)
             .draw()?;
     }
-    Ok(())
+    Ok(transform)
 }
 
-fn corner_label(name: &str, composition: &str) -> String {
-    format!("{name} {composition}")
+fn chart_transform<DB: DrawingBackend>(chart: &TernaryChart<'_, DB>) -> TernaryRenderTransform {
+    let component_pixels = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]].map(|composition| {
+        let logical = composition_to_logical(composition)
+            .expect("canonical pure component is a valid ternary composition");
+        let (x, y) = chart
+            .plotting_area()
+            .map_coordinate(&(logical.x, logical.y));
+        [f64::from(x), f64::from(y)]
+    });
+    TernaryRenderTransform::from_component_pixels(component_pixels)
+}
+
+fn corner_label(name: &str) -> String {
+    name.to_owned()
 }
 
 fn phase_style(phase: StablePhaseId, line_width: u32) -> ShapeStyle {
@@ -398,10 +506,31 @@ mod tests {
     use crate::{ProjectionOptions, calculate_projection, parse_str};
 
     #[test]
-    fn corner_labels_follow_semantic_composition_coordinates() {
-        assert_eq!(corner_label("CaO", "[1, 0, 0]"), "CaO [1, 0, 0]");
-        assert_eq!(corner_label("PbO", "[0, 1, 0]"), "PbO [0, 1, 0]");
-        assert_eq!(corner_label("ZnO", "[0, 0, 1]"), "ZnO [0, 0, 1]");
+    fn corner_labels_show_component_names_without_coordinate_vectors() {
+        assert_eq!(corner_label("CaO"), "CaO");
+        assert_eq!(corner_label("PbO"), "PbO");
+        assert_eq!(corner_label("ZnO"), "ZnO");
+    }
+
+    #[test]
+    fn component_transform_preserves_semantic_corner_mapping() {
+        let transform = TernaryRenderTransform::from_component_pixels([
+            [10.0, 90.0],
+            [110.0, 90.0],
+            [60.0, 10.0],
+        ]);
+        assert_eq!(
+            transform.composition_to_bitmap([1.0, 0.0, 0.0]),
+            [10.0, 90.0]
+        );
+        assert_eq!(
+            transform.composition_to_bitmap([0.0, 1.0, 0.0]),
+            [110.0, 90.0]
+        );
+        assert_eq!(
+            transform.composition_to_bitmap([0.0, 0.0, 1.0]),
+            [60.0, 10.0]
+        );
     }
 
     #[test]
@@ -446,6 +575,41 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel[..3] != [255, 255, 255])
         );
+        let logical = composition_to_logical([0.2, 0.3, 0.5]).unwrap();
+        let bitmap_point = bitmap.transform.logical_to_bitmap(logical).unwrap();
+        let recovered = bitmap.transform.bitmap_to_logical(bitmap_point).unwrap();
+        assert!((recovered.x - logical.x).abs() < 1.0e-9);
+        assert!((recovered.y - logical.y).abs() < 1.0e-9);
+    }
+
+    #[test]
+    fn exported_svg_excludes_barycentric_corner_vectors() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        let output = std::env::temp_dir().join(format!(
+            "ternary-contours-component-labels-{}.svg",
+            std::process::id()
+        ));
+        render_to_path(
+            &output,
+            &dataset,
+            &projection,
+            &RenderOptions {
+                width: 360,
+                height: 300,
+                ..RenderOptions::default()
+            },
+            Some(OutputFormat::Svg),
+        )
+        .unwrap();
+        let svg = std::fs::read_to_string(&output).unwrap();
+        let _ = std::fs::remove_file(&output);
+        assert!(!svg.contains("[1, 0, 0]"));
+        assert!(!svg.contains("[0, 1, 0]"));
+        assert!(!svg.contains("[0, 0, 1]"));
+        for component in &dataset.components {
+            assert!(svg.contains(&component.name));
+        }
     }
 
     #[test]

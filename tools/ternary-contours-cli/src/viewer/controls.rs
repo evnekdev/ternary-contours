@@ -1,10 +1,20 @@
-use crate::{RenderPathMode, parse_level_spec};
+use crate::{RenderPathMode, SourceInterpolation, parse_level_spec};
 use eframe::egui;
+use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod};
 
 use super::state::{PathDisplayMode, ViewerState, ViewerStatus};
 
-pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
-    let mut apply = false;
+/// UI changes classified by their invalidation cost.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ControlChange {
+    /// A committed numerical setting changed and should be recalculated.
+    pub calculation_changed: bool,
+    /// The explicit recovery command was requested.
+    pub recalculate_now: bool,
+}
+
+pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
+    let mut change = ControlChange::default();
     ui.heading("Input");
     ui.label(state.input_path.display().to_string());
     if let Some(dataset) = &state.dataset {
@@ -53,10 +63,31 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
             interior
         ));
     }
+
     ui.separator();
     ui.heading("Levels");
     ui.label("Comma list or start:stop:step");
-    ui.text_edit_singleline(&mut state.viewer_options.level_text);
+    let response = ui.text_edit_singleline(&mut state.viewer_options.level_text);
+    if edit_cancelled(ui, &response) {
+        state.viewer_options.level_text = state
+            .calculation_options
+            .levels
+            .iter()
+            .map(f64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        state.viewer_options.level_error = None;
+    } else if edit_finished(ui, &response) {
+        match preview_levels(&state.viewer_options.level_text) {
+            Ok(levels) => {
+                state.calculation_options.levels = levels;
+                state.viewer_options.level_error = None;
+                state.invalidate_projection();
+                change.calculation_changed = true;
+            }
+            Err(error) => state.viewer_options.level_error = Some(error),
+        }
+    }
     match preview_levels(&state.viewer_options.level_text) {
         Ok(levels) if levels.is_empty() => {
             ui.small("Default levels will be generated from the data.")
@@ -66,26 +97,111 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
             levels.len(),
             format_levels(&levels)
         )),
-        Err(message) => ui.colored_label(egui::Color32::RED, message),
+        Err(error) => ui.colored_label(egui::Color32::RED, error),
     };
+    if let Some(error) = &state.viewer_options.level_error {
+        ui.colored_label(egui::Color32::RED, error);
+    }
 
     ui.separator();
     ui.heading("Calculation");
-    let mut subdivisions = state
-        .calculation_options
-        .sampling_subdivisions
-        .unwrap_or(24);
-    if ui
-        .add(
-            egui::DragValue::new(&mut subdivisions)
-                .range(2..=2_000)
-                .prefix("sampling: "),
-        )
-        .changed()
-    {
-        state.calculation_options.sampling_subdivisions = Some(subdivisions);
-        state.invalidate_projection();
+    ui.label("Source interpolation");
+    let old_interpolation = state.calculation_options.source_interpolation;
+    let mut interpolation = old_interpolation;
+    let cubic_supported = cubic_source_supported(state);
+    egui::ComboBox::from_id_salt("source_interpolation")
+        .selected_text(interpolation_name(interpolation))
+        .show_ui(ui, |ui| {
+            ui.selectable_value(&mut interpolation, SourceInterpolation::Linear, "Linear");
+            let cubic_option = cubic_default_from(interpolation);
+            ui.add_enabled_ui(cubic_supported, |ui| {
+                ui.selectable_value(&mut interpolation, cubic_option, "Cubic alpha");
+            });
+        });
+    if !cubic_supported {
+        ui.small(
+            "Cubic alpha is unavailable while a participating field uses an irregular grid; use Linear Delaunay.",
+        );
     }
+    if old_interpolation != interpolation {
+        state.calculation_options.source_interpolation = interpolation;
+        state.invalidate_projection();
+        change.calculation_changed = true;
+    }
+
+    if let SourceInterpolation::CubicAlpha {
+        mut method,
+        mut continuation,
+    } = state.calculation_options.source_interpolation
+    {
+        ui.label("Cubic slope estimation");
+        let old_method = method;
+        egui::ComboBox::from_id_salt("cubic_slope_method")
+            .selected_text(cubic_method_name(method))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut method, CubicAlphaMethod::Akima, "Akima");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Makima, "Makima");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Pchip, "PCHIP");
+                ui.selectable_value(&mut method, CubicAlphaMethod::Steffen, "Steffen");
+            });
+        ui.small("These are one-dimensional edge-slope estimators used by the ternary cubic-alpha model.");
+        ui.label("Continuation outside the local derivative stencil");
+        let old_continuation = continuation;
+        egui::ComboBox::from_id_salt("cubic_continuation")
+            .selected_text(continuation_name(continuation))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(
+                    &mut continuation,
+                    BinaryExtrapolation::RawBarycentric,
+                    "Raw barycentric",
+                );
+                ui.selectable_value(&mut continuation, BinaryExtrapolation::Muggianu, "Muggianu");
+                ui.selectable_value(&mut continuation, BinaryExtrapolation::Kohler, "Kohler");
+            });
+        if old_method != method || old_continuation != continuation {
+            state.calculation_options.source_interpolation = SourceInterpolation::CubicAlpha {
+                method,
+                continuation,
+            };
+            state.invalidate_projection();
+            change.calculation_changed = true;
+        }
+    } else {
+        ui.add_enabled_ui(false, |ui| {
+            ui.label("Cubic slope estimation");
+            ui.label("Continuation outside the local derivative stencil");
+        });
+    }
+
+    ui.horizontal(|ui| {
+        ui.label("Sampling subdivisions");
+        let response = ui.text_edit_singleline(&mut state.viewer_options.sampling_text);
+        if edit_cancelled(ui, &response) {
+            state.viewer_options.sampling_text = state
+                .calculation_options
+                .sampling_subdivisions
+                .unwrap_or(24)
+                .to_string();
+            state.viewer_options.sampling_error = None;
+        } else if edit_finished(ui, &response) {
+            match parse_sampling(&state.viewer_options.sampling_text) {
+                Ok(subdivisions) => {
+                    state.calculation_options.sampling_subdivisions = Some(subdivisions);
+                    state.viewer_options.sampling_error = None;
+                    state.invalidate_projection();
+                    change.calculation_changed = true;
+                }
+                Err(error) => state.viewer_options.sampling_error = Some(error),
+            }
+        }
+    });
+    if let Some(error) = &state.viewer_options.sampling_error {
+        ui.colored_label(egui::Color32::RED, error);
+    }
+    ui.small(
+        "Sampling resolution refines envelope/path extraction. Linear interpolation remains piecewise planar between source vertices; use cubic alpha for a smoother source model.",
+    );
+
     if ui
         .checkbox(
             &mut state.calculation_options.regularize,
@@ -94,33 +210,59 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
         .changed()
     {
         state.invalidate_projection();
+        change.calculation_changed = true;
     }
     ui.add_enabled_ui(state.calculation_options.regularize, |ui| {
-        if ui
-            .add(
-                egui::DragValue::new(&mut state.viewer_options.regularization_spacing)
-                    .range(0.000_1..=1.0)
-                    .speed(0.001)
-                    .prefix("spacing: "),
-            )
-            .changed()
-        {
-            state.calculation_options.regularization_spacing =
-                Some(state.viewer_options.regularization_spacing);
-            state.invalidate_projection();
-        }
+        ui.horizontal(|ui| {
+            ui.label("Regularization spacing");
+            let response =
+                ui.text_edit_singleline(&mut state.viewer_options.regularization_spacing_text);
+            if edit_cancelled(ui, &response) {
+                state.viewer_options.regularization_spacing_text = state
+                    .calculation_options
+                    .regularization_spacing
+                    .unwrap_or(0.02)
+                    .to_string();
+                state.viewer_options.regularization_spacing_error = None;
+            } else if edit_finished(ui, &response) {
+                match parse_positive_spacing(&state.viewer_options.regularization_spacing_text) {
+                    Ok(spacing) => {
+                        state.viewer_options.regularization_spacing = spacing;
+                        state.calculation_options.regularization_spacing = Some(spacing);
+                        state.viewer_options.regularization_spacing_error = None;
+                        state.invalidate_projection();
+                        change.calculation_changed = true;
+                    }
+                    Err(error) => state.viewer_options.regularization_spacing_error = Some(error),
+                }
+            }
+        });
     });
+    if let Some(error) = &state.viewer_options.regularization_spacing_error {
+        ui.colored_label(egui::Color32::RED, error);
+    }
     if state.dirty.projection {
-        ui.colored_label(egui::Color32::YELLOW, "Calculation settings changed.");
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Recalculation will start automatically.",
+        );
     }
     if ui
         .add_enabled(
             !matches!(state.status, ViewerStatus::Calculating),
-            egui::Button::new("Apply / recalculate"),
+            egui::Button::new("Recalculate now"),
         )
         .clicked()
     {
-        apply = true;
+        if preview_levels(&state.viewer_options.level_text).is_ok()
+            && state.viewer_options.sampling_error.is_none()
+            && state.viewer_options.regularization_spacing_error.is_none()
+        {
+            change.recalculate_now = true;
+        } else {
+            state.viewer_options.level_error =
+                Some("Fix the highlighted calculation input before recalculating.".into());
+        }
     }
 
     ui.separator();
@@ -162,7 +304,7 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     render_changed |= ui
         .checkbox(
             &mut state.render_options.show_corner_labels,
-            "Corner composition labels",
+            "Component names at corners",
         )
         .changed();
     render_changed |= ui
@@ -215,58 +357,112 @@ pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> bool {
     });
 
     ui.collapsing("Diagnostics", |ui| {
-        let mut changed = false;
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_path_vertices,
-                "Path vertices",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_contour_endpoints,
-                "Contour endpoints",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_univariant_endpoints,
-                "Univariant endpoints",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_invariant_ids,
-                "Invariant node IDs",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_univariant_ids,
-                "Univariant IDs",
-            )
-            .changed();
-        changed |= ui
-            .checkbox(
-                &mut state.viewer_options.show_phase_pair_labels,
-                "Phase-pair labels",
-            )
-            .changed();
-        if changed {
-            state.mark_render_dirty();
-        }
-        ui.small("Sampling-grid edge diagnostics are unavailable for irregular source grids.");
+        ui.checkbox(
+            &mut state.viewer_options.show_path_vertices,
+            "Path vertices (raw yellow; regularized cyan)",
+        );
+        ui.checkbox(
+            &mut state.viewer_options.show_contour_endpoints,
+            "Contour endpoints",
+        );
+        ui.checkbox(
+            &mut state.viewer_options.show_univariant_endpoints,
+            "Univariant endpoints",
+        );
+        ui.checkbox(
+            &mut state.viewer_options.show_invariant_ids,
+            "Invariant node IDs",
+        );
+        ui.checkbox(
+            &mut state.viewer_options.show_univariant_ids,
+            "Univariant IDs",
+        );
+        ui.checkbox(
+            &mut state.viewer_options.show_phase_pair_labels,
+            "Phase-pair labels",
+        );
+        ui.small(
+            "Diagnostic visibility is view-only and never recalculates or redraws the bitmap.",
+        );
     });
-    apply
+    change
 }
 
-pub fn apply_calculation_options(state: &mut ViewerState) -> Result<(), String> {
-    let levels = preview_levels(&state.viewer_options.level_text)?;
-    state.calculation_options.levels = levels;
-    state.calculation_options.regularization_spacing =
-        Some(state.viewer_options.regularization_spacing);
-    state.invalidate_projection();
-    Ok(())
+fn cubic_default_from(interpolation: SourceInterpolation) -> SourceInterpolation {
+    match interpolation {
+        cubic @ SourceInterpolation::CubicAlpha { .. } => cubic,
+        SourceInterpolation::Linear => SourceInterpolation::CubicAlpha {
+            method: CubicAlphaMethod::Makima,
+            continuation: BinaryExtrapolation::Muggianu,
+        },
+    }
+}
+
+fn cubic_source_supported(state: &ViewerState) -> bool {
+    state.dataset.as_ref().is_none_or(|dataset| {
+        dataset.grids.iter().all(|grid| {
+            grid.fields()
+                .iter()
+                .filter(|field| field.property == "T")
+                .all(|_| matches!(grid, crate::TabulatedGrid::Regular(_)))
+        })
+    })
+}
+
+fn interpolation_name(interpolation: SourceInterpolation) -> &'static str {
+    match interpolation {
+        SourceInterpolation::Linear => "Linear",
+        SourceInterpolation::CubicAlpha { .. } => "Cubic alpha",
+    }
+}
+
+fn cubic_method_name(method: CubicAlphaMethod) -> &'static str {
+    match method {
+        CubicAlphaMethod::Akima => "Akima",
+        CubicAlphaMethod::Makima => "Makima",
+        CubicAlphaMethod::Pchip => "PCHIP",
+        CubicAlphaMethod::Steffen => "Steffen",
+        _ => "Unsupported",
+    }
+}
+
+fn continuation_name(continuation: BinaryExtrapolation) -> &'static str {
+    match continuation {
+        BinaryExtrapolation::RawBarycentric => "Raw barycentric",
+        BinaryExtrapolation::Muggianu => "Muggianu",
+        BinaryExtrapolation::Kohler => "Kohler",
+        _ => "Unsupported",
+    }
+}
+
+fn edit_finished(ui: &egui::Ui, response: &egui::Response) -> bool {
+    response.lost_focus()
+        || (response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)))
+}
+
+fn edit_cancelled(ui: &egui::Ui, response: &egui::Response) -> bool {
+    response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Escape))
+}
+
+fn parse_sampling(text: &str) -> Result<usize, String> {
+    let value = text
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| "sampling subdivisions must be a whole number".to_owned())?;
+    (2..=2_000)
+        .contains(&value)
+        .then_some(value)
+        .ok_or_else(|| "sampling subdivisions must be between 2 and 2000".into())
+}
+
+fn parse_positive_spacing(text: &str) -> Result<f64, String> {
+    let value = text
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "regularization spacing must be a finite positive number".to_owned())?;
+    (value.is_finite() && value > 0.0 && value <= 1.0)
+        .then_some(value)
+        .ok_or_else(|| "regularization spacing must be in (0, 1]".into())
 }
 
 fn preview_levels(text: &str) -> Result<Vec<f64>, String> {
@@ -286,7 +482,7 @@ fn format_levels(levels: &[f64]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     if levels.len() > 6 {
-        format!("{displayed}, \u{2026}")
+        format!("{displayed}, ?")
     } else {
         displayed
     }
@@ -318,5 +514,25 @@ mod tests {
             preview_levels("800:900:50").unwrap(),
             vec![800.0, 850.0, 900.0]
         );
+    }
+
+    #[test]
+    fn text_inputs_only_accept_valid_committed_values() {
+        assert_eq!(parse_sampling("30"), Ok(30));
+        assert!(parse_sampling("3.0").is_err());
+        assert!(parse_sampling("-3").is_err());
+        assert_eq!(parse_positive_spacing("0.025"), Ok(0.025));
+        assert!(parse_positive_spacing("0").is_err());
+    }
+
+    #[test]
+    fn cubic_continuation_is_separate_from_interpolation_family() {
+        let interpolation = SourceInterpolation::CubicAlpha {
+            method: CubicAlphaMethod::Makima,
+            continuation: BinaryExtrapolation::Kohler,
+        };
+        let options = interpolation.cubic_options().unwrap();
+        assert_eq!(options.method, CubicAlphaMethod::Makima);
+        assert_eq!(options.extrapolation, BinaryExtrapolation::Kohler);
     }
 }

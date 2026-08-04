@@ -1,9 +1,9 @@
-use plotters_ternary::{
-    EQUILATERAL_TRIANGLE_HEIGHT, Normalization, TernaryCartesian, TernaryGeometry, TernaryPoint,
-    Tolerance,
-};
+use plotters_ternary::TernaryCartesian;
 
-use crate::{LiquidusProjection, RenderOptions, TabulatedTernaryDataset};
+use crate::{
+    LiquidusProjection, RenderOptions, TabulatedTernaryDataset, TernaryRenderTransform,
+    composition_from_logical, composition_to_logical,
+};
 
 use super::state::PathDisplayMode;
 
@@ -49,6 +49,7 @@ struct LogicalNode {
 /// Centralized conversion between composition, logical equilateral space, bitmap, and screen.
 #[derive(Clone, Copy, Debug)]
 pub struct ViewerTransform {
+    bitmap_transform: TernaryRenderTransform,
     bitmap_width: f64,
     bitmap_height: f64,
     image_min: [f64; 2],
@@ -57,12 +58,14 @@ pub struct ViewerTransform {
 
 impl ViewerTransform {
     pub fn new(
+        bitmap_transform: TernaryRenderTransform,
         bitmap_width: u32,
         bitmap_height: u32,
         image_min: [f64; 2],
         image_size: [f64; 2],
     ) -> Self {
         Self {
+            bitmap_transform,
             bitmap_width: f64::from(bitmap_width),
             bitmap_height: f64::from(bitmap_height),
             image_min,
@@ -71,24 +74,18 @@ impl ViewerTransform {
     }
 
     pub fn composition_to_logical(&self, composition: [f64; 3]) -> Option<TernaryCartesian> {
-        TernaryGeometry::default()
-            .project(
-                TernaryPoint::from(composition),
-                Normalization::RequireUnitSum,
-                Tolerance::default(),
-            )
-            .ok()
+        composition_to_logical(composition)
     }
 
     pub fn logical_to_composition(&self, point: TernaryCartesian) -> Option<[f64; 3]> {
-        TernaryGeometry::default()
-            .unproject(point, Tolerance::default())
-            .ok()
-            .map(TernaryPoint::as_array)
+        composition_from_logical(point)
     }
 
     pub fn logical_to_screen(&self, point: TernaryCartesian) -> [f64; 2] {
-        let bitmap = self.logical_to_bitmap(point);
+        let bitmap = self
+            .bitmap_transform
+            .logical_to_bitmap(point)
+            .expect("hit geometry contains a valid ternary logical point");
         [
             self.image_min[0] + bitmap[0] * self.image_size[0] / self.bitmap_width,
             self.image_min[1] + bitmap[1] * self.image_size[1] / self.bitmap_height,
@@ -107,35 +104,7 @@ impl ViewerTransform {
             (screen[0] - self.image_min[0]) * self.bitmap_width / self.image_size[0],
             (screen[1] - self.image_min[1]) * self.bitmap_height / self.image_size[1],
         ];
-        self.bitmap_to_logical(bitmap)
-    }
-
-    fn logical_to_bitmap(&self, point: TernaryCartesian) -> [f64; 2] {
-        let (left, _top, side, base_y) = self.triangle_layout();
-        [left + point.x * side, base_y - point.y * side]
-    }
-
-    fn bitmap_to_logical(&self, point: [f64; 2]) -> Option<TernaryCartesian> {
-        let (left, _top, side, base_y) = self.triangle_layout();
-        if side <= 0.0 {
-            return None;
-        }
-        Some(TernaryCartesian::new(
-            (point[0] - left) / side,
-            (base_y - point[1]) / side,
-        ))
-    }
-
-    fn triangle_layout(&self) -> (f64, f64, f64, f64) {
-        const MARGIN: f64 = 30.0;
-        const TITLE_HEIGHT: f64 = 46.0;
-        let available_width = (self.bitmap_width - 2.0 * MARGIN).max(1.0);
-        let available_height = (self.bitmap_height - TITLE_HEIGHT - 2.0 * MARGIN).max(1.0);
-        let side = available_width.min(available_height / EQUILATERAL_TRIANGLE_HEIGHT);
-        let left = MARGIN + (available_width - side) * 0.5;
-        let top =
-            TITLE_HEIGHT + MARGIN + (available_height - side * EQUILATERAL_TRIANGLE_HEIGHT) * 0.5;
-        (left, top, side, top + side * EQUILATERAL_TRIANGLE_HEIGHT)
+        self.bitmap_transform.bitmap_to_logical(bitmap)
     }
 }
 
@@ -155,7 +124,13 @@ impl HitGeometry {
         options: &RenderOptions,
         path_display: PathDisplayMode,
     ) -> Self {
-        let transform = ViewerTransform::new(options.width, options.height, [0.0, 0.0], [1.0, 1.0]);
+        let transform = ViewerTransform::new(
+            TernaryRenderTransform::fit_triangle(options.width, options.height),
+            options.width,
+            options.height,
+            [0.0, 0.0],
+            [1.0, 1.0],
+        );
         let mut geometry = Self::default();
         if options.show_invariants || options.show_binary_invariants {
             for (node_index, node) in projection.stable_boundaries.nodes.iter().enumerate() {
@@ -400,7 +375,13 @@ mod tests {
 
     #[test]
     fn ternary_logical_screen_round_trip_is_stable() {
-        let transform = ViewerTransform::new(1_200, 950, [40.0, 20.0], [720.0, 570.0]);
+        let transform = ViewerTransform::new(
+            TernaryRenderTransform::fit_triangle(1_200, 950),
+            1_200,
+            950,
+            [40.0, 20.0],
+            [720.0, 570.0],
+        );
         let composition = [0.2, 0.3, 0.5];
         let logical = transform.composition_to_logical(composition).unwrap();
         let recovered = transform.logical_to_composition(logical).unwrap();
@@ -411,6 +392,85 @@ mod tests {
         let round_trip = transform.screen_to_logical(screen).unwrap();
         assert!((round_trip.x - logical.x).abs() < 1.0e-12);
         assert!((round_trip.y - logical.y).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn captured_render_transform_aligns_overlay_vertices_after_pan_zoom_and_resize() {
+        let captured = TernaryRenderTransform::from_component_pixels([
+            [91.0, 617.0],
+            [731.0, 617.0],
+            [411.0, 62.744_133_3],
+        ]);
+        for (image_min, image_size) in [
+            ([0.0, 0.0], [900.0, 700.0]),
+            ([147.25, -31.5], [1_350.0, 1_050.0]),
+            ([-88.0, 73.0], [480.0, 360.0]),
+        ] {
+            let transform = ViewerTransform::new(captured, 820, 700, image_min, image_size);
+            for composition in [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.2, 0.3, 0.5],
+            ] {
+                let logical = transform.composition_to_logical(composition).unwrap();
+                let screen = transform.logical_to_screen(logical);
+                let recovered = transform.screen_to_logical(screen).unwrap();
+                assert!((recovered.x - logical.x).abs() < 1.0e-9);
+                assert!((recovered.y - logical.y).abs() < 1.0e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_paths_follow_the_selected_raw_regularized_source() {
+        use crate::{ProjectionOptions, calculate_projection, parse_str};
+
+        let dataset = parse_str(include_str!("../../fixtures/interior-invariant.tct")).unwrap();
+        let raw = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        let regularized = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                regularize: true,
+                ..ProjectionOptions::default()
+            },
+        )
+        .unwrap();
+        let options = RenderOptions::default();
+        for (mode, projection, raw_projection, expected) in [
+            (PathDisplayMode::Raw, &raw, None, vec![NetworkSource::Raw]),
+            (
+                PathDisplayMode::Regularized,
+                &regularized,
+                None,
+                vec![NetworkSource::Regularized],
+            ),
+            (
+                PathDisplayMode::Overlay,
+                &regularized,
+                Some(&raw),
+                vec![NetworkSource::Raw, NetworkSource::Regularized],
+            ),
+        ] {
+            let geometry = HitGeometry::build(&dataset, projection, raw_projection, &options, mode);
+            let sources = geometry
+                .paths()
+                .filter_map(|(_, feature, _)| match feature {
+                    SelectedFeature::Univariant { source, .. } => Some(*source),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let mut unique_sources = Vec::new();
+            for source in sources {
+                if !unique_sources.contains(&source) {
+                    unique_sources.push(source);
+                }
+            }
+            assert_eq!(unique_sources.len(), expected.len());
+            for source in expected {
+                assert!(unique_sources.contains(&source));
+            }
+        }
     }
 
     #[test]
@@ -451,7 +511,13 @@ mod tests {
                 },
             }],
         };
-        let transform = ViewerTransform::new(1_200, 950, [0.0, 0.0], [1_200.0, 950.0]);
+        let transform = ViewerTransform::new(
+            TernaryRenderTransform::fit_triangle(1_200, 950),
+            1_200,
+            950,
+            [0.0, 0.0],
+            [1_200.0, 950.0],
+        );
         let screen = transform.logical_to_screen(point);
         assert_eq!(
             geometry.hit_test(&transform, screen, 12.0),
