@@ -2,9 +2,12 @@
 
 use core::fmt;
 
+#[cfg(feature = "cubic-alpha")]
+use crate::RegularTernaryPartialScalarField;
+
 use crate::{
     CubicAlphaBuildOptions, FieldError, GridTriangle, LocatedTriangle, PointLocationError,
-    RegularTernaryScalarField,
+    RegularTernaryGrid, RegularTernaryScalarField,
     field::{CubicBuildDiagnostics, CubicGridField},
     simplex::global_gradient_ab,
 };
@@ -235,7 +238,7 @@ impl<'a> InterpolatedTernaryField<'a> {
                     triangle: triangle.id,
                 })?,
         };
-        let gradient_ab = global_gradient(self.field, triangle, local_gradient)?;
+        let gradient_ab = global_gradient(self.field.grid(), triangle, local_gradient)?;
         if !value.is_finite() || !gradient_ab.into_iter().all(f64::is_finite) {
             return Err(FieldEvaluationError::NonFiniteEvaluation);
         }
@@ -285,7 +288,7 @@ impl<'a> InterpolatedTernaryField<'a> {
                     triangle: triangle.id,
                 })?,
         };
-        let gradient = global_gradient(self.field, triangle, local_gradient)?;
+        let gradient = global_gradient(self.field.grid(), triangle, local_gradient)?;
         if !value.is_finite() || !gradient.into_iter().all(f64::is_finite) {
             return Err(FieldEvaluationError::NonFiniteEvaluation);
         }
@@ -361,6 +364,150 @@ impl<'a> InterpolatedTernaryField<'a> {
     }
 }
 
+/// Prepared regular interpolation for fields with locally unavailable vertices.
+///
+/// A triangle containing an unavailable corner evaluates to `None`; complete
+/// triangles use cubic-alpha, one-sided cubic, or linear fallback models chosen
+/// during construction. No unavailable value enters a spline helper.
+#[cfg(feature = "cubic-alpha")]
+pub struct InterpolatedPartialTernaryField {
+    field: RegularTernaryPartialScalarField,
+    interpolation: PartialPreparedInterpolation,
+}
+
+#[cfg(feature = "cubic-alpha")]
+enum PartialPreparedInterpolation {
+    Linear,
+    Cubic(crate::field::PartialCubicGridField),
+}
+
+#[cfg(feature = "cubic-alpha")]
+impl InterpolatedPartialTernaryField {
+    pub fn new(
+        field: RegularTernaryPartialScalarField,
+        interpolation: FieldInterpolation,
+    ) -> Result<Self, FieldEvaluationError> {
+        let interpolation = match interpolation {
+            FieldInterpolation::Linear => PartialPreparedInterpolation::Linear,
+            FieldInterpolation::CubicAlpha(options) => PartialPreparedInterpolation::Cubic(
+                crate::field::PartialCubicGridField::new(field.clone(), options)
+                    .map_err(FieldEvaluationError::CubicConstruction)?,
+            ),
+        };
+        Ok(Self {
+            field,
+            interpolation,
+        })
+    }
+
+    pub const fn field(&self) -> &RegularTernaryPartialScalarField {
+        &self.field
+    }
+
+    pub fn evaluate(
+        &self,
+        composition: [f64; 3],
+    ) -> Result<Option<FieldSample>, FieldEvaluationError> {
+        let location = self.field.grid().locate(composition)?;
+        self.evaluate_at_location(&location)
+    }
+
+    pub fn evaluate_at_location(
+        &self,
+        location: &LocatedTriangle,
+    ) -> Result<Option<FieldSample>, FieldEvaluationError> {
+        let triangle = self.validated_triangle(location)?;
+        let values = triangle.vertices.map(|vertex| {
+            self.field
+                .value(vertex)
+                .expect("triangle vertices are valid")
+        });
+        if values.iter().any(Option::is_none) {
+            return Ok(None);
+        }
+        let values = values.map(|value| value.expect("defined partial triangle"));
+        let (value, local_gradient) = match &self.interpolation {
+            PartialPreparedInterpolation::Linear => (
+                values
+                    .into_iter()
+                    .zip(location.barycentric)
+                    .map(|(value, weight)| value * weight)
+                    .sum(),
+                [values[0] - values[2], values[1] - values[2]],
+            ),
+            PartialPreparedInterpolation::Cubic(model) => {
+                let value = model
+                    .value_in_triangle(triangle.id, location.barycentric)
+                    .flatten()
+                    .ok_or(FieldEvaluationError::InvalidLocation {
+                        triangle: triangle.id,
+                    })?;
+                let gradient = model
+                    .gradient_in_triangle(
+                        triangle.id,
+                        location.barycentric[0],
+                        location.barycentric[1],
+                    )
+                    .flatten()
+                    .ok_or(FieldEvaluationError::InvalidLocation {
+                        triangle: triangle.id,
+                    })?;
+                (value, gradient)
+            }
+        };
+        let gradient_ab = global_gradient(self.field.grid(), triangle, local_gradient)?;
+        if !value.is_finite() || !gradient_ab.into_iter().all(f64::is_finite) {
+            return Err(FieldEvaluationError::NonFiniteEvaluation);
+        }
+        Ok(Some(FieldSample {
+            value,
+            gradient_ab,
+            location: *location,
+        }))
+    }
+
+    pub fn value_at_location(
+        &self,
+        location: &LocatedTriangle,
+    ) -> Result<Option<f64>, FieldEvaluationError> {
+        Ok(self
+            .evaluate_at_location(location)?
+            .map(|sample| sample.value))
+    }
+
+    pub fn cubic_diagnostics(&self) -> Option<&CubicBuildDiagnostics> {
+        match &self.interpolation {
+            PartialPreparedInterpolation::Linear => None,
+            PartialPreparedInterpolation::Cubic(model) => Some(model.diagnostics()),
+        }
+    }
+
+    fn validated_triangle(
+        &self,
+        location: &LocatedTriangle,
+    ) -> Result<GridTriangle, FieldEvaluationError> {
+        if location.subdivisions() != self.field.subdivisions() {
+            return Err(FieldEvaluationError::IncompatibleLocation {
+                location_subdivisions: location.subdivisions(),
+                field_subdivisions: self.field.subdivisions(),
+            });
+        }
+        let triangle = self
+            .field
+            .grid()
+            .triangle(location.triangle.id)
+            .map_err(|_| FieldEvaluationError::InvalidLocation {
+                triangle: location.triangle.id,
+            })?;
+        if triangle != location.triangle || !valid_barycentric(location.barycentric) {
+            return Err(FieldEvaluationError::InvalidLocation {
+                triangle: location.triangle.id,
+            });
+        }
+        Ok(triangle)
+    }
+}
+
 fn valid_barycentric(barycentric: [f64; 3]) -> bool {
     let sum = barycentric.into_iter().sum::<f64>();
     barycentric
@@ -370,17 +517,16 @@ fn valid_barycentric(barycentric: [f64; 3]) -> bool {
 }
 
 fn global_gradient(
-    field: &RegularTernaryScalarField,
+    grid: RegularTernaryGrid,
     triangle: GridTriangle,
     local: [f64; 2],
 ) -> Result<[f64; 2], FieldEvaluationError> {
     let vertex = |index: usize| {
-        field
-            .grid()
-            .composition(triangle.vertices[index])
-            .map_err(|_| FieldEvaluationError::InvalidLocation {
+        grid.composition(triangle.vertices[index]).map_err(|_| {
+            FieldEvaluationError::InvalidLocation {
                 triangle: triangle.id,
-            })
+            }
+        })
     };
     let v0 = vertex(0)?;
     let v1 = vertex(1)?;
@@ -545,6 +691,7 @@ mod tests {
                 let options = CubicAlphaBuildOptions {
                     method,
                     boundary_policy: CubicBoundaryPolicy::LinearFallback,
+                    partial_domain_policy: Default::default(),
                     extrapolation,
                 };
                 let evaluator =
@@ -660,3 +807,4 @@ mod tests {
         );
     }
 }
+
