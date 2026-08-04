@@ -35,6 +35,11 @@ pub struct DataEditorUi {
     pub confirm_save: bool,
     pub message: Option<String>,
     pub saved_path: Option<PathBuf>,
+    pub phase_remove: Option<usize>,
+    pub property_remove: Option<usize>,
+    pub resolution_input: String,
+    pub resolution_pending: Option<usize>,
+    pub apply_declarations: bool,
 }
 
 impl Default for DataEditorUi {
@@ -56,6 +61,11 @@ impl Default for DataEditorUi {
             confirm_save: false,
             message: None,
             saved_path: None,
+            phase_remove: None,
+            property_remove: None,
+            resolution_input: String::new(),
+            resolution_pending: None,
+            apply_declarations: false,
         }
     }
 }
@@ -71,7 +81,11 @@ pub fn show(
     state.selected_grid = state
         .selected_grid
         .min(editor.draft.grids.len().saturating_sub(1));
-    declarations(ui, editor);
+    declarations(ui, editor, state);
+    if state.apply_declarations {
+        state.apply_declarations = false;
+        state.message = editor.apply_draft().err();
+    }
     ui.separator();
     grid_list(ui, editor, state);
     ui.separator();
@@ -93,52 +107,165 @@ pub fn show(
     action
 }
 
-fn declarations(ui: &mut egui::Ui, editor: &mut DatasetEditorState) {
+fn declarations(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut DataEditorUi) {
     ui.collapsing("Dataset declarations", |ui| {
         ui.horizontal(|ui| {
             ui.label("Title");
             let title = editor.draft.title.get_or_insert_with(String::new);
-            if ui.text_edit_singleline(title).changed() { editor.dirty = true; }
+            if ui.text_edit_singleline(title).changed() {
+                editor.dirty = true;
+            }
         });
         ui.horizontal(|ui| {
             for component in &mut editor.draft.components {
-                if ui.text_edit_singleline(&mut component.name).changed() { editor.dirty = true; }
-            }
-        });
-        ui.label("Phase IDs and property names are explicit. Changing a declaration does not remap existing grid fields.");
-        for phase in &mut editor.draft.phases {
-            ui.horizontal(|ui| {
-                ui.label("phase");
-                if ui.text_edit_singleline(&mut phase.name).changed() { editor.dirty = true; }
-                let mut id = phase.id.0;
-                if ui.add(egui::DragValue::new(&mut id).prefix("ID ")).changed() {
-                    phase.id.0 = id;
+                if ui.text_edit_singleline(&mut component.name).changed() {
                     editor.dirty = true;
                 }
+            }
+        });
+        ui.label("Phase order controls display order. Stable phase IDs are not renumbered.");
+        for index in 0..editor.draft.phases.len() {
+            let mut remove = false;
+            let mut up = false;
+            let mut down = false;
+            ui.horizontal(|ui| {
+                let phase = &mut editor.draft.phases[index];
+                ui.label(format!("position {}", index + 1));
+                ui.label(format!("ID {}", phase.id.0));
+                if ui.text_edit_singleline(&mut phase.name).changed() {
+                    editor.dirty = true;
+                }
+                up = ui.add_enabled(index > 0, egui::Button::new("Up")).clicked();
+                down = ui
+                    .add_enabled(
+                        index + 1 < editor.draft.phases.len(),
+                        egui::Button::new("Down"),
+                    )
+                    .clicked();
+                remove = ui.button("Remove").clicked();
+            });
+            if up {
+                state.message = editor.reorder_phase(index, -1).err();
+            } else if down {
+                state.message = editor.reorder_phase(index, 1).err();
+            } else if remove {
+                if editor.phase_field_references(index).is_empty() {
+                    state.message = editor.remove_phase(index).err();
+                } else {
+                    state.phase_remove = Some(index);
+                }
+            }
+        }
+        if let Some(index) = state.phase_remove {
+            let references = editor.phase_field_references(index);
+            ui.group(|ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Removing this phase will remove referenced grid fields:",
+                );
+                for reference in &references {
+                    ui.label(format!("- {reference}"));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm phase removal").clicked() {
+                        state.message = editor.remove_phase_confirmed(index).err();
+                        state.phase_remove = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        state.phase_remove = None;
+                    }
+                });
             });
         }
-        for property in &mut editor.draft.properties {
+        ui.separator();
+        ui.label("Property order controls display order. T is always required.");
+        for index in 0..editor.draft.properties.len() {
+            let mut remove = false;
+            let mut up = false;
+            let mut down = false;
             ui.horizontal(|ui| {
-                if ui.text_edit_singleline(&mut property.name).changed() { editor.dirty = true; }
-                if ui.checkbox(&mut property.required, "required").changed() { editor.dirty = true; }
-                if ui.text_edit_singleline(&mut property.unit).changed() { editor.dirty = true; }
+                let property = &mut editor.draft.properties[index];
+                let is_temperature = property.name == "T";
+                if is_temperature {
+                    ui.label("T");
+                } else if ui.text_edit_singleline(&mut property.name).changed() {
+                    editor.dirty = true;
+                }
+                if ui
+                    .add_enabled(
+                        !is_temperature,
+                        egui::Checkbox::new(&mut property.required, "required"),
+                    )
+                    .changed()
+                {
+                    editor.dirty = true;
+                }
+                if is_temperature {
+                    property.required = true;
+                }
+                if ui.text_edit_singleline(&mut property.unit).changed() {
+                    editor.dirty = true;
+                }
+                up = ui.add_enabled(index > 0, egui::Button::new("Up")).clicked();
+                down = ui
+                    .add_enabled(
+                        index + 1 < editor.draft.properties.len(),
+                        egui::Button::new("Down"),
+                    )
+                    .clicked();
+                remove = ui
+                    .add_enabled(!is_temperature, egui::Button::new("Remove"))
+                    .clicked();
+            });
+            if up {
+                state.message = editor.reorder_property(index, -1).err();
+            } else if down {
+                state.message = editor.reorder_property(index, 1).err();
+            } else if remove {
+                if editor.property_field_references(index).is_empty() {
+                    state.message = editor.remove_property(index).err();
+                } else {
+                    state.property_remove = Some(index);
+                }
+            }
+        }
+        if let Some(index) = state.property_remove {
+            let references = editor.property_field_references(index);
+            ui.group(|ui| {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Removing this property will remove referenced grid fields:",
+                );
+                for reference in &references {
+                    ui.label(format!("- {reference}"));
+                }
+                ui.horizontal(|ui| {
+                    if ui.button("Confirm property removal").clicked() {
+                        state.message = editor.remove_property_confirmed(index).err();
+                        state.property_remove = None;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        state.property_remove = None;
+                    }
+                });
             });
         }
         ui.horizontal(|ui| {
             if ui.button("Add phase declaration").clicked() {
-                let next = editor.draft.phases.iter().map(|phase| phase.id.0).max().unwrap_or(0).saturating_add(1);
-                editor.draft.phases.push(crate::PhaseDefinition { name: format!("phase_{next}"), id: ternary_contours::StablePhaseId(next), line: 0 });
-                editor.dirty = true;
+                state.message = editor.add_phase().err();
             }
             if ui.button("Add optional property").clicked() {
-                editor.draft.properties.push(crate::PropertyDefinition { name: "property".into(), required: false, unit: "1".into(), line: 0 });
-                editor.dirty = true;
+                state.message = editor.add_property().err();
             }
         });
-        ui.small("The existing validator requires one declaration named T marked required.");
+        ui.horizontal(|ui| {
+            if ui.button("Apply declarations").clicked() {
+                state.apply_declarations = true;
+            }
+        });
+        ui.small("T cannot be renamed, removed, or made optional.");
     });
 }
-
 fn grid_list(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut DataEditorUi) {
     ui.heading("Grids");
     for (index, grid) in editor.draft.grids.iter().enumerate() {
@@ -237,14 +364,22 @@ fn grid_list(ui: &mut egui::Ui, editor: &mut DatasetEditorState, state: &mut Dat
             editor.revert();
         }
         if ui
-            .add_enabled(editor.can_undo(), egui::Button::new("Undo"))
+            .add_enabled(
+                editor.can_undo() || editor.can_draft_undo(),
+                egui::Button::new("Undo"),
+            )
             .clicked()
+            && !editor.draft_undo()
         {
             editor.undo();
         }
         if ui
-            .add_enabled(editor.can_redo(), egui::Button::new("Redo"))
+            .add_enabled(
+                editor.can_redo() || editor.can_draft_redo(),
+                egui::Button::new("Redo"),
+            )
             .clicked()
+            && !editor.draft_redo()
         {
             editor.redo();
         }
@@ -270,15 +405,85 @@ fn regular_editor(
     editor: &mut DatasetEditorState,
     state: &mut DataEditorUi,
 ) -> DataEditorAction {
-    let TabulatedGrid::Regular(grid) = &editor.draft.grids[state.selected_grid] else {
+    let grid_index = state.selected_grid;
+    let (current_subdivisions, current_rows, has_values) = match editor.draft.grids.get(grid_index)
+    {
+        Some(TabulatedGrid::Regular(grid)) => (
+            grid.subdivisions,
+            grid.compositions.len(),
+            grid.fields
+                .iter()
+                .any(|field| field.values.iter().any(Option::is_some)),
+        ),
+        _ => return DataEditorAction::None,
+    };
+    if state.resolution_input.is_empty() {
+        state.resolution_input = current_subdivisions.to_string();
+    }
+    ui.heading("Regular-grid editor");
+    ui.horizontal(|ui| {
+        ui.label("Resolution");
+        ui.text_edit_singleline(&mut state.resolution_input);
+        if let Ok(subdivisions) = state.resolution_input.trim().parse::<usize>() {
+            match crate::regular_row_count(subdivisions) {
+                Ok(points) if (1..=200).contains(&subdivisions) => {
+                    ui.label(format!("Expected points: {points}"));
+                    if ui.button("Apply resolution").clicked()
+                        && subdivisions != current_subdivisions
+                    {
+                        if has_values {
+                            state.resolution_pending = Some(subdivisions);
+                        } else {
+                            state.message = editor
+                                .regenerate_regular_grid(grid_index, subdivisions)
+                                .err();
+                            state.resolution_input = subdivisions.to_string();
+                        }
+                    }
+                }
+                _ => {
+                    ui.colored_label(
+                        egui::Color32::RED,
+                        "Enter an integer subdivision count from 1 to 200.",
+                    );
+                }
+            }
+        } else {
+            ui.colored_label(
+                egui::Color32::RED,
+                "Subdivision count must be a whole number.",
+            );
+        }
+    });
+    ui.small(format!(
+        "Current grid: {current_rows} points; expected formula (n + 1)(n + 2) / 2. Safety limit: 200."
+    ));
+    if let Some(subdivisions) = state.resolution_pending {
+        let new_points = crate::regular_row_count(subdivisions).unwrap_or_default();
+        ui.group(|ui| {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                format!(
+                    "Changing subdivisions from {current_subdivisions} to {subdivisions} changes the grid from {current_rows} to {new_points} points. Existing scalar values cannot be retained automatically."
+                ),
+            );
+            ui.horizontal(|ui| {
+                if ui.button("Regenerate and clear values").clicked() {
+                    state.message = editor.regenerate_regular_grid(grid_index, subdivisions).err();
+                    if state.message.is_none() {
+                        state.resolution_input = subdivisions.to_string();
+                    }
+                    state.resolution_pending = None;
+                }
+                if ui.button("Cancel").clicked() {
+                    state.resolution_pending = None;
+                }
+            });
+        });
+    }
+    let TabulatedGrid::Regular(grid) = &editor.draft.grids[grid_index] else {
         return DataEditorAction::None;
     };
-    ui.heading("Regular-grid editor");
-    ui.label(format!(
-        "{} canonical rows for subdivisions {}",
-        grid.compositions.len(),
-        grid.subdivisions
-    ));
     field_choice(ui, editor, state);
     ui.horizontal(|ui| {
         if ui.button("Copy compositions").clicked() {
