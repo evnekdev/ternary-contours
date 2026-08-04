@@ -55,11 +55,14 @@ The Plot-side panel owns all current options:
 - Sampling resolution refines envelope/path extraction. With the default Linear
   source it does not make the source field higher order: that source remains
   piecewise planar between its tabulated vertices.
-- **Source interpolation** selects Linear or, for complete regular `T` fields,
-  Cubic alpha. Cubic alpha offers Akima, Makima, PCHIP, and Steffen edge-slope
-  estimation, plus Raw barycentric, Muggianu, or Kohler continuation. It is
-  disabled for irregular participating fields and reports classified undefined
-  source cells rather than interpolating across `NA`, `NE`, or `CO` gaps.
+- **Source interpolation** selects Linear or Cubic alpha for regular `T` fields.
+  Cubic alpha offers Akima, Makima, PCHIP, and Steffen edge-slope estimation,
+  plus Raw barycentric, Muggianu, or Kohler continuation. The **Partial-domain
+  cubic fallback** control defaults to *One-sided cubic, then linear*: missing,
+  non-existing, and cut-off vertices remain local domain boundaries, one-sided
+  finite stencils are used where possible, and only triangles containing an
+  unavailable corner become undefined. Strict cubic is available for audits.
+  Cubic remains disabled for irregular participating fields.
 - Layer visibility, labels, legend, line width, marker size, and raw versus
   regularized display redraw the shared bitmap without stable-boundary tracing.
 - Raw, regularized, and overlay modes cache the raw projection and, when

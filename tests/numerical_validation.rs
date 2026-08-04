@@ -231,6 +231,7 @@ mod regular_cubic {
                 let options = CubicAlphaBuildOptions {
                     method,
                     boundary_policy: CubicBoundaryPolicy::LinearFallback,
+                    partial_domain_policy: Default::default(),
                     extrapolation,
                 };
                 let evaluator =
@@ -339,6 +340,7 @@ mod regular_cubic {
             FieldInterpolation::CubicAlpha(CubicAlphaBuildOptions {
                 method: cubic.method,
                 boundary_policy: cubic.boundary_policy,
+                partial_domain_policy: Default::default(),
                 extrapolation: cubic.extrapolation,
             }),
         )

@@ -110,17 +110,23 @@ pub use contour::{
     IrregularCubicContourSourceDiagnostics,
 };
 pub use error::{FieldError, GridEvaluationError};
+#[cfg(feature = "cubic-alpha")]
+pub use evaluation::InterpolatedPartialTernaryField;
 pub use evaluation::{
     FieldEvaluationError, FieldInterpolation, FieldSample, InterpolatedTernaryField,
 };
 pub use field::{CubicBuildDiagnostics, CubicGridField};
+#[cfg(feature = "cubic-alpha")]
+pub use field::{CubicTriangleMode, PartialCubicGridField};
 pub use grid::{
     GridTriangle, GridVertexId, LatticeCoordinate, LocatedTriangle, POINT_LOCATION_TOLERANCE,
     PointBoundaryLocation, PointLocationError, RegularGridEdgeId, RegularSamplingTopology,
-    RegularTernaryGrid, RegularTernaryScalarField, TriangleEdgeRef,
+    RegularTernaryGrid, RegularTernaryPartialScalarField, RegularTernaryScalarField,
+    TriangleEdgeRef,
 };
 pub use interpolation::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
+    CubicPartialDomainPolicy,
 };
 #[cfg(feature = "cubic-alpha")]
 pub use metrics::RegularCubicEdgeContinuityMetrics;

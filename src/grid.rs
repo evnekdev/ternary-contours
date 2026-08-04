@@ -774,6 +774,79 @@ pub struct RegularTernaryScalarField {
     values: Vec<f64>,
 }
 
+/// A regular ternary scalar field whose unavailable vertices are represented by
+/// `None`. Defined values are still required to be finite. This type is used by
+/// partial-domain interpolation; it never converts unavailable samples to NaN.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegularTernaryPartialScalarField {
+    grid: RegularTernaryGrid,
+    values: Vec<Option<f64>>,
+}
+
+impl RegularTernaryPartialScalarField {
+    /// Construct a partial field in canonical regular-grid vertex order.
+    pub fn new(subdivisions: usize, values: Vec<Option<f64>>) -> Result<Self, FieldError> {
+        let grid = RegularTernaryGrid::new(subdivisions)?;
+        let expected = grid.vertex_count();
+        if values.len() != expected {
+            return Err(FieldError::IncorrectValueCount {
+                expected,
+                actual: values.len(),
+            });
+        }
+        if let Some((index, value)) = values.iter().enumerate().find_map(|(index, value)| {
+            value
+                .filter(|value| !value.is_finite())
+                .map(|value| (index, value))
+        }) {
+            return Err(FieldError::NonFiniteValue { index, value });
+        }
+        Ok(Self { grid, values })
+    }
+
+    pub const fn subdivisions(&self) -> usize {
+        self.grid.subdivisions()
+    }
+
+    pub const fn grid(&self) -> RegularTernaryGrid {
+        self.grid
+    }
+
+    pub fn values(&self) -> &[Option<f64>] {
+        &self.values
+    }
+
+    pub const fn vertex_count(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn value(&self, id: GridVertexId) -> Result<Option<f64>, FieldError> {
+        self.values
+            .get(id.0)
+            .copied()
+            .ok_or(FieldError::InvalidVertexIndex {
+                index: id.0,
+                vertex_count: self.values.len(),
+            })
+    }
+
+    pub fn composition(&self, id: GridVertexId) -> Result<[f64; 3], FieldError> {
+        self.grid.composition(id)
+    }
+
+    pub fn vertex_id(&self, coordinate: LatticeCoordinate) -> Result<GridVertexId, FieldError> {
+        self.grid.vertex_id(coordinate)
+    }
+
+    pub fn lattice_coordinate(&self, id: GridVertexId) -> Result<LatticeCoordinate, FieldError> {
+        self.grid.lattice_coordinate(id)
+    }
+
+    pub fn elementary_triangles(&self) -> Result<Vec<GridTriangle>, FieldError> {
+        self.grid.elementary_triangles()
+    }
+}
+
 #[cfg(feature = "cubic-alpha")]
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct GridEdgeKey {

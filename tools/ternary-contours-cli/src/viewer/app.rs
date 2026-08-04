@@ -884,7 +884,15 @@ impl LiquidusViewerApp {
                     ui.label(format!(
                         "Source interpolation: Cubic alpha ({method:?}; {continuation:?} continuation)"
                     ));
-                    ui.small("Cubic model: prepared only for complete regular source fields.");
+                    ui.small(format!(
+                        "Partial-domain cubic fallback: {:?}. Undefined samples remain local.",
+                        self.state.calculation_options.partial_domain_policy
+                    ));
+                    if let Some(projection) = self.state.raw_projection.as_ref() {
+                        for summary in &projection.diagnostics.partial_cubic_summaries {
+                            ui.small(summary);
+                        }
+                    }
                 }
             }
             ui.label("Semantic corner mapping:");
