@@ -167,3 +167,8 @@ explicit add/replace semantics, dataset-level undo/redo, deterministic save,
 and recalculation using the same projection worker. See
 [`docs/grid-data-entry.md`](../../../docs/grid-data-entry.md) for the complete
 Excel workflows.
+Starting the feature-enabled viewer without a file opens a new unsaved regular
+dataset on the Data tab:
+
+cargo run -p ternary-contours-cli --features viewer --
+cargo run -p ternary-contours-cli --features viewer -- view

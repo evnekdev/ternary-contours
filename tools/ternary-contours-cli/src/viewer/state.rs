@@ -173,6 +173,7 @@ fn calculate_request(
 #[derive(Clone, Debug)]
 pub struct ViewerState {
     pub input_path: PathBuf,
+    pub unsaved: bool,
     pub dataset: Option<TabulatedTernaryDataset>,
     pub raw_projection: Option<LiquidusProjection>,
     pub regularized_projection: Option<LiquidusProjection>,
@@ -201,6 +202,7 @@ impl ViewerState {
         Self {
             viewer_options,
             input_path,
+            unsaved: false,
             dataset: None,
             raw_projection: None,
             regularized_projection: None,
@@ -219,6 +221,22 @@ impl ViewerState {
         }
     }
 
+    pub fn new_unsaved(
+        calculation_options: ProjectionOptions,
+        render_options: RenderOptions,
+        dataset: TabulatedTernaryDataset,
+    ) -> Self {
+        let mut state = Self::new(
+            PathBuf::from("Untitled.tct"),
+            calculation_options,
+            render_options,
+        );
+        state.dataset = Some(dataset);
+        state.unsaved = true;
+        state.dirty.projection = false;
+        state.status = ViewerStatus::Idle;
+        state
+    }
     pub fn begin_request(&mut self) -> CalculationRequest {
         self.generation = self.generation.saturating_add(1);
         self.status = ViewerStatus::Calculating;

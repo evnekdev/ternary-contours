@@ -112,3 +112,13 @@ Preview diagnostics are copyable and include source row/column errors; apply,
 apply-and-recalculate, revert, undo/redo, save, and Save As are explicit.
 Calculation still uses the existing worker and retains the last valid plot on
 failure. See [`grid-data-entry.md`](grid-data-entry.md).
+## Starting without a file
+
+With no subcommand, or with view and no input path, the feature-enabled
+viewer opens on the Data tab with an Untitled ternary system regular grid:
+10 subdivisions, 66 canonical rows, and undefined Phase1.T, Phase2.T, and
+Phase3.T values. Canonical compositions can be copied immediately. The
+first Save action is Save As.
+
+cargo run -p ternary-contours-cli --features viewer --
+cargo run -p ternary-contours-cli --features viewer -- view

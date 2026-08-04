@@ -57,6 +57,25 @@ impl LiquidusViewerApp {
         app
     }
 
+    pub fn new_default(
+        calculation_options: ProjectionOptions,
+        render_options: RenderOptions,
+        dataset: crate::TabulatedTernaryDataset,
+    ) -> Self {
+        let editor = DatasetEditorState::new(dataset.clone());
+        Self {
+            state: ViewerState::new_unsaved(calculation_options, render_options, dataset),
+            worker: None,
+            texture: None,
+            hit_geometry: HitGeometry::default(),
+            zoom: 1.0,
+            pan: egui::Vec2::ZERO,
+            editor: Some(editor),
+            editor_ui: DataEditorUi::default(),
+            tab: ViewerTab::Data,
+            sync_editor_on_success: false,
+        }
+    }
     pub(crate) fn start_calculation(&mut self) {
         self.start_file_calculation();
     }
@@ -504,9 +523,14 @@ impl LiquidusViewerApp {
                 editor,
                 &mut self.editor_ui,
                 &self.state.input_path,
+                self.state.unsaved,
             );
             matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
         };
+        if let Some(path) = self.editor_ui.saved_path.take() {
+            self.state.input_path = path;
+            self.state.unsaved = false;
+        }
         if let Some(dataset) = dataset {
             self.start_dataset_calculation(dataset);
         }
@@ -626,7 +650,10 @@ impl eframe::App for LiquidusViewerApp {
                 ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
                 ui.separator();
                 reload = ui
-                    .add_enabled(can_calculate, egui::Button::new("Reload file"))
+                    .add_enabled(
+                        can_calculate && !self.state.unsaved,
+                        egui::Button::new("Reload file"),
+                    )
                     .clicked();
                 recalculate = ui
                     .add_enabled(can_calculate, egui::Button::new("Recalculate"))
