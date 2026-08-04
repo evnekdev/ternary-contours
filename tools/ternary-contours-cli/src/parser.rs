@@ -13,7 +13,8 @@ use crate::parse_tsv_row;
 use crate::model::{
     ComponentDefinition, CompositionColumns, FormatVersion, GridType, IrregularTabulatedGrid,
     PhaseDefinition, PropertyDefinition, RegularTabulatedGrid, RowOrder, SourceRange,
-    TabulatedField, TabulatedGrid, TabulatedTernaryDataset,
+    TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
+    parse_tabulated_value_token,
 };
 
 const COMPOSITION_TOLERANCE: f64 = 1.0e-8;
@@ -158,7 +159,7 @@ struct FieldColumn {
 
 struct ParsedRows {
     compositions: Vec<[f64; 3]>,
-    values: Vec<Vec<Option<f64>>>,
+    values: Vec<Vec<TabulatedValue>>,
     lines: Vec<usize>,
 }
 
@@ -743,16 +744,13 @@ fn parse_rows(
         };
         for (field_index, field) in fields.iter().enumerate() {
             let token = row[field.index].trim();
-            let value = if missing_tokens.iter().any(|missing| missing == token) {
-                None
-            } else {
-                if token.is_empty() {
-                    return Err(builder
-                        .error(*line, "blank cells are not allowed in TSV data")
-                        .with_column(&field.header));
-                }
-                Some(parse_number(token, *line, builder, &field.header)?)
-            };
+            let value =
+                parse_tabulated_value_token(token, missing_tokens, false).map_err(|message| {
+                    builder
+                        .error(*line, message)
+                        .with_column(&field.header)
+                        .token(token)
+                })?;
             values[field_index].push(value);
         }
         compositions.push(composition);
@@ -867,7 +865,7 @@ fn finalize_regular(
                 ));
             }
             let mut seen = vec![false; count];
-            let mut values = vec![vec![None; count]; fields.len()];
+            let mut values = vec![vec![TabulatedValue::missing(); count]; fields.len()];
             let mut lines = vec![0; count];
             for row in 0..count {
                 let index =
@@ -883,7 +881,7 @@ fn finalize_regular(
                 seen[index] = true;
                 lines[index] = rows.lines[row];
                 for (field, destination) in values.iter_mut().enumerate() {
-                    destination[index] = rows.values[field][row];
+                    destination[index] = rows.values[field][row].clone();
                 }
             }
             if seen.iter().any(|seen| !seen) {
@@ -1119,6 +1117,32 @@ mod tests {
         let crlf = parse_str(&MINIMAL.replace('\n', "\r\n")).unwrap();
         assert_eq!(lf, crlf);
         assert_eq!(lf.grids.len(), 1);
+    }
+
+    #[test]
+    fn parses_classified_state_tokens_without_losing_cutoff_notes() {
+        let dataset = parse_str(include_str!("../fixtures/classified-states.tct")).unwrap();
+        let values = &dataset.grids[0].fields()[0].values;
+        assert_eq!(values[0].state, crate::TabulatedValueState::Calculated);
+        assert_eq!(values[0].calculated_value(), Some(100.0));
+        assert_eq!(values[1].state, crate::TabulatedValueState::CutOff);
+        assert_eq!(values[1].note.as_deref(), Some("3000"));
+        assert_eq!(values[2].state, crate::TabulatedValueState::Missing);
+        assert_eq!(
+            dataset.grids[0].fields()[1].values[0].state,
+            crate::TabulatedValueState::NonExisting
+        );
+    }
+
+    #[test]
+    fn numeric_and_configured_missing_cells_remain_backward_compatible() {
+        let dataset = parse_str(MINIMAL).unwrap();
+        let values = &dataset.grids[0].fields()[0].values;
+        assert_eq!(values[0].calculated_value(), Some(100.0));
+        assert_eq!(
+            dataset.grids[0].fields()[2].values[2].state,
+            crate::TabulatedValueState::Missing
+        );
     }
 
     #[test]

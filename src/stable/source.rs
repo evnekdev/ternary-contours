@@ -24,6 +24,12 @@ pub enum StablePhaseUndefinedReason {
     OutsidePhaseDomain,
     NonFiniteResult,
     SourceEvaluationFailure,
+    /// The table explicitly classifies this phase as non-existing.
+    ClassifiedNonExisting,
+    /// The table explicitly records a high-temperature calculation cut-off.
+    ClassifiedCutOff,
+    /// The table has no calculated or classified scalar for this point.
+    MissingTabulatedInput,
 }
 
 /// Black-box phase evaluator supporting explicit partial-domain semantics.
