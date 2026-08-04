@@ -1,13 +1,50 @@
 use std::collections::BTreeMap;
 
 use ternary_contours::{
-    IrregularTernaryMesh, PathRegularizationOptions, PreparedStablePhaseEnsemble,
-    RegularTernaryGrid, StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity,
-    StableContourSet, StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator,
-    StablePhaseId, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
+    BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
+    FieldInterpolation, IrregularTernaryMesh, PathRegularizationOptions,
+    PreparedStablePhaseEnsemble, RegularTernaryGrid, RegularTernaryScalarField,
+    StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity, StableContourSet,
+    StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
+    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
 };
 
 use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
+
+/// Source interpolation family used consistently for every participating phase.
+///
+/// Cubic-alpha is a regular-grid model derived from one-dimensional edge slopes;
+/// its continuation policy controls ternary interior evaluation. It is rejected
+/// for fields containing classified undefined values so interpolation never
+/// bridges `NA`, `NE`, or `CO` source regions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SourceInterpolation {
+    /// Piecewise-affine source evaluation.
+    #[default]
+    Linear,
+    /// Cubic-alpha source evaluation with the selected edge-slope method and
+    /// ternary continuation policy.
+    CubicAlpha {
+        method: CubicAlphaMethod,
+        continuation: BinaryExtrapolation,
+    },
+}
+
+impl SourceInterpolation {
+    pub const fn cubic_options(self) -> Option<CubicAlphaBuildOptions> {
+        match self {
+            Self::Linear => None,
+            Self::CubicAlpha {
+                method,
+                continuation,
+            } => Some(CubicAlphaBuildOptions {
+                method,
+                boundary_policy: CubicBoundaryPolicy::LinearFallback,
+                extrapolation: continuation,
+            }),
+        }
+    }
+}
 
 /// Controls for a stable liquidus calculation.
 #[derive(Clone, Debug, Default)]
@@ -16,6 +53,7 @@ pub struct ProjectionOptions {
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
     pub regularization_spacing: Option<f64>,
+    pub source_interpolation: SourceInterpolation,
 }
 
 #[derive(Clone, Debug)]
@@ -74,6 +112,35 @@ pub enum ProjectionError {
     },
     #[error("stable boundary calculation failed: {0}")]
     Boundaries(#[from] ternary_contours::StableBoundaryError),
+    #[error(
+        "cubic-alpha cannot safely prepare grid `{grid}` field `{phase}.{property}`: calculated {calculated}, non-existing {non_existing}, cut-off {cut_off}, missing {missing}"
+    )]
+    CubicSourceIncomplete {
+        grid: String,
+        phase: String,
+        property: String,
+        calculated: usize,
+        non_existing: usize,
+        cut_off: usize,
+        missing: usize,
+    },
+    #[error(
+        "cubic-alpha source interpolation is unavailable for irregular grid `{grid}` field `{phase}.{property}` in this viewer build; use Linear Delaunay"
+    )]
+    CubicIrregularUnavailable {
+        grid: String,
+        phase: String,
+        property: String,
+    },
+    #[error(
+        "could not construct cubic-alpha source for grid `{grid}` field `{phase}.{property}`: {message}"
+    )]
+    CubicSourceConstruction {
+        grid: String,
+        phase: String,
+        property: String,
+        message: String,
+    },
 }
 
 enum RuntimeField {
@@ -89,6 +156,11 @@ enum RuntimeField {
 
 struct RuntimePhase {
     field: RuntimeField,
+}
+
+enum PhaseSourceModel {
+    Evaluator(RuntimePhase),
+    CubicRegular(RegularTernaryScalarField),
 }
 
 impl StablePhaseEvaluator for RuntimePhase {
@@ -165,7 +237,7 @@ pub fn calculate_projection(
     dataset: &TabulatedTernaryDataset,
     options: &ProjectionOptions,
 ) -> Result<LiquidusProjection, ProjectionError> {
-    let mut fields = BTreeMap::new();
+    let mut fields = BTreeMap::<StablePhaseId, PhaseSourceModel>::new();
     let mut regular_grid_count = 0;
     let mut irregular_grid_count = 0;
     let mut extrema = Vec::new();
@@ -185,15 +257,7 @@ pub fn calculate_projection(
                 .iter()
                 .filter_map(TabulatedValue::calculated_value)
                 .collect::<Vec<_>>();
-            let counts = field.values.iter().fold([0usize; 4], |mut counts, value| {
-                counts[match value.state {
-                    TabulatedValueState::Calculated => 0,
-                    TabulatedValueState::NonExisting => 1,
-                    TabulatedValueState::CutOff => 2,
-                    TabulatedValueState::Missing => 3,
-                }] += 1;
-                counts
-            });
+            let counts = tabulated_state_counts(&field.values);
             let coverage = format!(
                 "grid {} phase {}.{} (calculated {}, non-existing {}, cut-off {}, missing {})",
                 grid.name(),
@@ -209,25 +273,70 @@ pub fn calculate_projection(
             }
             source_coverage.push(coverage);
             extrema.extend(calculated);
-            let runtime = match grid {
-                TabulatedGrid::Regular(grid) => RuntimeField::Regular {
-                    grid: RegularTernaryGrid::new(grid.subdivisions)
-                        .expect("parser validated positive subdivisions"),
-                    values: field.values.clone(),
-                },
-                TabulatedGrid::Irregular(grid) => RuntimeField::Irregular {
-                    mesh: Box::new(
-                        IrregularTernaryMesh::new(grid.compositions.iter().copied()).map_err(
-                            |error| ProjectionError::IrregularMesh {
-                                phase: field.phase_id,
-                                message: error.to_string(),
-                            },
-                        )?,
-                    ),
-                    values: field.values.clone(),
-                },
+            let phase = dataset
+                .phases
+                .iter()
+                .find(|phase| phase.id == field.phase_id)
+                .map(|phase| phase.name.clone())
+                .unwrap_or_else(|| format!("Phase {}", field.phase_id.0));
+            let source = match (options.source_interpolation, grid) {
+                (SourceInterpolation::Linear, TabulatedGrid::Regular(grid)) => {
+                    PhaseSourceModel::Evaluator(RuntimePhase {
+                        field: RuntimeField::Regular {
+                            grid: RegularTernaryGrid::new(grid.subdivisions)
+                                .expect("parser validated positive subdivisions"),
+                            values: field.values.clone(),
+                        },
+                    })
+                }
+                (SourceInterpolation::Linear, TabulatedGrid::Irregular(grid)) => {
+                    PhaseSourceModel::Evaluator(RuntimePhase {
+                        field: RuntimeField::Irregular {
+                            mesh: Box::new(
+                                IrregularTernaryMesh::new(grid.compositions.iter().copied())
+                                    .map_err(|error| ProjectionError::IrregularMesh {
+                                        phase: field.phase_id,
+                                        message: error.to_string(),
+                                    })?,
+                            ),
+                            values: field.values.clone(),
+                        },
+                    })
+                }
+                (SourceInterpolation::CubicAlpha { .. }, TabulatedGrid::Regular(grid)) => {
+                    let values = field
+                        .values
+                        .iter()
+                        .map(TabulatedValue::calculated_value)
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or_else(|| ProjectionError::CubicSourceIncomplete {
+                            grid: grid.name.clone(),
+                            phase: phase.clone(),
+                            property: field.property.clone(),
+                            calculated: counts[0],
+                            non_existing: counts[1],
+                            cut_off: counts[2],
+                            missing: counts[3],
+                        })?;
+                    let cubic = RegularTernaryScalarField::new(grid.subdivisions, values).map_err(
+                        |error| ProjectionError::CubicSourceConstruction {
+                            grid: grid.name.clone(),
+                            phase,
+                            property: field.property.clone(),
+                            message: error.to_string(),
+                        },
+                    )?;
+                    PhaseSourceModel::CubicRegular(cubic)
+                }
+                (SourceInterpolation::CubicAlpha { .. }, TabulatedGrid::Irregular(grid)) => {
+                    return Err(ProjectionError::CubicIrregularUnavailable {
+                        grid: grid.name.clone(),
+                        phase,
+                        property: field.property.clone(),
+                    });
+                }
             };
-            fields.insert(field.phase_id, runtime);
+            fields.insert(field.phase_id, source);
         }
     }
     let minimum = extrema.iter().copied().reduce(f64::min).ok_or_else(|| {
@@ -246,25 +355,35 @@ pub fn calculate_projection(
         validate_levels(&options.levels)?;
         options.levels.clone()
     };
-    let evaluators = dataset
+    let source_models = dataset
         .phases
         .iter()
         .map(|phase| {
-            let field =
-                fields
-                    .remove(&phase.id)
-                    .ok_or_else(|| ProjectionError::MissingTemperature {
-                        phase: phase.name.clone(),
-                    })?;
-            Ok(RuntimePhase { field })
+            fields
+                .remove(&phase.id)
+                .ok_or_else(|| ProjectionError::MissingTemperature {
+                    phase: phase.name.clone(),
+                })
         })
         .collect::<Result<Vec<_>, ProjectionError>>()?;
     let sources = dataset
         .phases
         .iter()
-        .zip(&evaluators)
-        .map(|(phase, evaluator)| {
-            StablePhaseSource::new(phase.id, StableScalarSource::evaluator(evaluator))
+        .zip(&source_models)
+        .map(|(phase, model)| {
+            let source = match model {
+                PhaseSourceModel::Evaluator(evaluator) => StableScalarSource::evaluator(evaluator),
+                PhaseSourceModel::CubicRegular(field) => StableScalarSource::regular(
+                    field,
+                    FieldInterpolation::CubicAlpha(
+                        options
+                            .source_interpolation
+                            .cubic_options()
+                            .expect("cubic source model carries cubic options"),
+                    ),
+                ),
+            };
+            StablePhaseSource::new(phase.id, source)
         })
         .collect::<Vec<_>>();
     let sampling_subdivisions = options.sampling_subdivisions.unwrap_or_else(|| {
@@ -358,6 +477,18 @@ pub fn calculate_projection(
             temperature_range: [minimum, maximum],
         },
         diagnostics,
+    })
+}
+
+fn tabulated_state_counts(values: &[TabulatedValue]) -> [usize; 4] {
+    values.iter().fold([0usize; 4], |mut counts, value| {
+        counts[match value.state {
+            TabulatedValueState::Calculated => 0,
+            TabulatedValueState::NonExisting => 1,
+            TabulatedValueState::CutOff => 2,
+            TabulatedValueState::Missing => 3,
+        }] += 1;
+        counts
     })
 }
 
@@ -466,6 +597,48 @@ mod tests {
         ));
         assert!(message.contains("grid regular phase 1.T"));
         assert!(message.contains("non-existing 0, cut-off 0, missing 66"));
+    }
+
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn cubic_alpha_selection_reaches_every_regular_phase_source() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        let projection = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                source_interpolation: SourceInterpolation::CubicAlpha {
+                    method: CubicAlphaMethod::Makima,
+                    continuation: BinaryExtrapolation::Kohler,
+                },
+                ..ProjectionOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(projection.input_summary.phase_count, dataset.phases.len());
+        assert!(projection.diagnostics.stable_polygon_count > 0);
+    }
+
+    #[cfg(feature = "viewer")]
+    #[test]
+    fn cubic_alpha_refuses_partial_domains_without_filling_classified_cells() {
+        let dataset = parse_str(include_str!("../fixtures/partial-phase-domain.tct")).unwrap();
+        let error = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                source_interpolation: SourceInterpolation::CubicAlpha {
+                    method: CubicAlphaMethod::Akima,
+                    continuation: BinaryExtrapolation::Muggianu,
+                },
+                ..ProjectionOptions::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            ProjectionError::CubicSourceIncomplete { .. }
+                | ProjectionError::CubicIrregularUnavailable { .. }
+        ));
+        assert!(error.to_string().contains("grid"));
     }
 
     #[test]

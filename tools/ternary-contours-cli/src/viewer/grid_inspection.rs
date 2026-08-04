@@ -7,6 +7,7 @@ use ternary_contours::StablePhaseId;
 
 use crate::{
     DatasetEditorState, NumericFormat, TabulatedGrid, TabulatedValue, TabulatedValueState,
+    TernaryRenderTransform,
 };
 
 use super::hit_test::ViewerTransform;
@@ -14,6 +15,9 @@ use super::hit_test::ViewerTransform;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GridInspectionAction {
     None,
+    /// A point or field changed only in the draft dataset.
+    DraftEdited,
+    /// The draft was committed to the active dataset.
     Applied,
     Recalculate,
 }
@@ -297,7 +301,7 @@ pub fn show_controls(
                     .set_field_state_batch(state.selected_grid, field_index, &selected, value, None)
                     .err();
                 if state.message.is_none() {
-                    action = GridInspectionAction::Applied;
+                    action = GridInspectionAction::DraftEdited;
                 }
             }
         }
@@ -309,7 +313,7 @@ pub fn show_controls(
                 .clear_field_notes(state.selected_grid, field_index, &selected)
                 .err();
             if state.message.is_none() {
-                action = GridInspectionAction::Applied;
+                action = GridInspectionAction::DraftEdited;
             }
         }
     });
@@ -318,7 +322,7 @@ pub fn show_controls(
             state.message = editor.revert_field(state.selected_grid, field_index).err();
             if state.message.is_none() {
                 state.selected_rows.clear();
-                action = GridInspectionAction::Applied;
+                action = GridInspectionAction::DraftEdited;
             }
         }
         if ui
@@ -531,7 +535,7 @@ fn point_editor(
             .err();
         if state.message.is_none() {
             state.edit_row = None;
-            return GridInspectionAction::Applied;
+            return GridInspectionAction::DraftEdited;
         }
     }
     GridInspectionAction::None
@@ -551,9 +555,12 @@ pub fn show_canvas(ui: &mut egui::Ui, editor: &DatasetEditorState, state: &mut G
         return;
     }
     let response = ui.allocate_rect(rect, egui::Sense::click());
+    let bitmap_width = rect.width().max(1.0) as u32;
+    let bitmap_height = rect.height().max(1.0) as u32;
     let transform = ViewerTransform::new(
-        rect.width().max(1.0) as u32,
-        rect.height().max(1.0) as u32,
+        TernaryRenderTransform::fit_triangle(bitmap_width, bitmap_height),
+        bitmap_width,
+        bitmap_height,
         [f64::from(rect.min.x), f64::from(rect.min.y)],
         [f64::from(rect.width()), f64::from(rect.height())],
     );

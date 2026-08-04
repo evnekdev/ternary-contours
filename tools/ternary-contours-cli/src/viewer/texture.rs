@@ -1,11 +1,12 @@
 use eframe::egui;
 
-use crate::RenderedBitmap;
+use crate::{RenderedBitmap, TernaryRenderTransform};
 
 pub struct RenderedTexture {
     handle: egui::TextureHandle,
     pub width: u32,
     pub height: u32,
+    pub transform: TernaryRenderTransform,
 }
 
 impl RenderedTexture {
@@ -19,6 +20,7 @@ impl RenderedTexture {
             handle: ctx.load_texture("liquidus-projection", image, egui::TextureOptions::LINEAR),
             width: bitmap.width,
             height: bitmap.height,
+            transform: bitmap.transform,
         })
     }
 
@@ -26,6 +28,7 @@ impl RenderedTexture {
         validate_bitmap(&bitmap)?;
         self.width = bitmap.width;
         self.height = bitmap.height;
+        self.transform = bitmap.transform;
         self.handle.set(
             egui::ColorImage::from_rgba_unmultiplied(
                 [bitmap.width as usize, bitmap.height as usize],
@@ -68,6 +71,7 @@ mod tests {
                 width: 2,
                 height: 2,
                 rgba: vec![0; 3],
+                transform: TernaryRenderTransform::fit_triangle(2, 2),
             })
             .is_err()
         );

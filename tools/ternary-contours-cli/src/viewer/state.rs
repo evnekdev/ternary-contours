@@ -24,6 +24,8 @@ pub struct DirtyFlags {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ViewerStatus {
     Idle,
+    /// A committed calculation control changed and is being debounced.
+    RecalculationPending,
     Calculating,
     Ready,
     Failed(String),
@@ -40,7 +42,12 @@ pub enum PathDisplayMode {
 #[derive(Clone, Debug)]
 pub struct ViewerOptions {
     pub level_text: String,
+    pub level_error: Option<String>,
+    pub sampling_text: String,
+    pub sampling_error: Option<String>,
     pub regularization_spacing: f64,
+    pub regularization_spacing_text: String,
+    pub regularization_spacing_error: Option<String>,
     pub path_display: PathDisplayMode,
     pub show_path_vertices: bool,
     pub show_contour_endpoints: bool,
@@ -59,7 +66,12 @@ impl ViewerOptions {
                 .map(|level| level.to_string())
                 .collect::<Vec<_>>()
                 .join(", "),
+            level_error: None,
+            sampling_text: options.sampling_subdivisions.unwrap_or(24).to_string(),
+            sampling_error: None,
             regularization_spacing: options.regularization_spacing.unwrap_or(0.02),
+            regularization_spacing_text: options.regularization_spacing.unwrap_or(0.02).to_string(),
+            regularization_spacing_error: None,
             path_display: if options.regularize {
                 PathDisplayMode::Regularized
             } else {

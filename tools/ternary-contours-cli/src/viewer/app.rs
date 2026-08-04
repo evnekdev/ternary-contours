@@ -1,13 +1,15 @@
 use std::{
     path::PathBuf,
     sync::mpsc::{Receiver, TryRecvError},
+    time::{Duration, Instant},
 };
 
 use eframe::egui;
 
 use crate::{
-    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, TctSerializeOptions,
-    render_to_bitmap_with_raw, render_to_path_with_raw, save_tct_atomic, serialize_tct,
+    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, SourceInterpolation,
+    TctSerializeOptions, render_to_bitmap_with_raw, render_to_path_with_raw, save_tct_atomic,
+    serialize_tct,
 };
 
 use super::{
@@ -24,10 +26,34 @@ use super::{
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ViewerTab {
-    Plot,
     Data,
-    GridInspection,
     Diagnostics,
+    GridInspection,
+    Plot,
+}
+
+impl ViewerTab {
+    const ORDERED: [Self; 4] = [
+        Self::Data,
+        Self::Diagnostics,
+        Self::GridInspection,
+        Self::Plot,
+    ];
+
+    const fn next(self, backwards: bool) -> Self {
+        let index = match self {
+            Self::Data => 0,
+            Self::Diagnostics => 1,
+            Self::GridInspection => 2,
+            Self::Plot => 3,
+        };
+        let index = if backwards {
+            (index + Self::ORDERED.len() - 1) % Self::ORDERED.len()
+        } else {
+            (index + 1) % Self::ORDERED.len()
+        };
+        Self::ORDERED[index]
+    }
 }
 
 pub struct LiquidusViewerApp {
@@ -43,6 +69,8 @@ pub struct LiquidusViewerApp {
     tab: ViewerTab,
     sync_editor_on_success: bool,
     pending_request: Option<CalculationRequest>,
+    pending_recalculation: Option<Instant>,
+    show_plot_after_success: bool,
     open_confirmation: bool,
 }
 
@@ -62,9 +90,11 @@ impl LiquidusViewerApp {
             editor: None,
             editor_ui: DataEditorUi::default(),
             grid_inspection_ui: GridInspectionUi::default(),
-            tab: ViewerTab::Plot,
+            tab: ViewerTab::Data,
             sync_editor_on_success: false,
             pending_request: None,
+            pending_recalculation: None,
+            show_plot_after_success: true,
             open_confirmation: false,
         };
         // Initial command-line file startup shares the exact parser, structural
@@ -107,6 +137,8 @@ impl LiquidusViewerApp {
             tab: ViewerTab::Data,
             sync_editor_on_success: false,
             pending_request: None,
+            pending_recalculation: None,
+            show_plot_after_success: false,
             open_confirmation: false,
         }
     }
@@ -125,6 +157,7 @@ impl LiquidusViewerApp {
     fn queue_request(&mut self, request: CalculationRequest) {
         if self.worker.is_some() {
             self.pending_request = Some(request);
+            self.state.message = Some("Calculating; newer settings pending.".into());
         } else {
             self.launch_request(request);
         }
@@ -139,20 +172,36 @@ impl LiquidusViewerApp {
             }
         }
     }
-    fn apply_and_recalculate(&mut self) {
-        match controls::apply_calculation_options(&mut self.state) {
-            Ok(()) => {
-                if let Some(editor) = &self.editor {
-                    self.start_dataset_calculation(editor.active.clone());
-                } else {
-                    self.start_file_calculation();
-                }
-            }
-            Err(message) => {
-                self.state.status = ViewerStatus::Failed(message.clone());
-                self.state.message = Some(format!("Calculation failed: {message}"));
-            }
+    fn recalculate_now(&mut self) {
+        self.pending_recalculation = None;
+        if let Some(editor) = &self.editor {
+            self.start_dataset_calculation(editor.active.clone());
+        } else {
+            self.start_file_calculation();
         }
+    }
+
+    /// Coalesce committed calculation changes without ever applying an obsolete
+    /// worker result. Render-only and view-only changes never call this method.
+    fn schedule_recalculation(&mut self) {
+        self.pending_recalculation = Some(Instant::now() + Duration::from_millis(200));
+        self.state.status = ViewerStatus::RecalculationPending;
+        self.state.message = Some(if self.worker.is_some() {
+            "Calculating; newer settings pending.".into()
+        } else {
+            "Recalculation pending.".into()
+        });
+    }
+
+    fn launch_debounced_recalculation(&mut self, ctx: &egui::Context) {
+        let Some(deadline) = self.pending_recalculation else {
+            return;
+        };
+        if Instant::now() < deadline {
+            ctx.request_repaint_after(deadline.saturating_duration_since(Instant::now()));
+            return;
+        }
+        self.recalculate_now();
     }
 
     fn poll_worker(&mut self, ctx: &egui::Context) {
@@ -186,6 +235,13 @@ impl LiquidusViewerApp {
                     self.editor_ui = DataEditorUi::default();
                 }
                 self.sync_editor_on_success = false;
+                if accepted
+                    && matches!(self.state.status, ViewerStatus::Ready)
+                    && self.show_plot_after_success
+                {
+                    self.tab = ViewerTab::Plot;
+                    self.show_plot_after_success = false;
+                }
                 if !accepted && matches!(self.state.status, ViewerStatus::Calculating) {
                     self.state.status = ViewerStatus::Idle;
                 }
@@ -503,11 +559,22 @@ impl LiquidusViewerApp {
             if options.show_path_vertices {
                 for point in points {
                     let screen = transform.logical_to_screen(*point);
-                    painter.circle_filled(
-                        egui::pos2(screen[0] as f32, screen[1] as f32),
-                        2.0_f32,
-                        egui::Color32::from_rgb(242, 196, 60),
-                    );
+                    let position = egui::pos2(screen[0] as f32, screen[1] as f32);
+                    match feature {
+                        SelectedFeature::Univariant {
+                            source: NetworkSource::Regularized,
+                            ..
+                        } => painter.rect_filled(
+                            egui::Rect::from_center_size(position, egui::vec2(4.0, 4.0)),
+                            0.0,
+                            egui::Color32::from_rgb(79, 209, 197),
+                        ),
+                        _ => painter.circle_filled(
+                            position,
+                            2.0_f32,
+                            egui::Color32::from_rgb(242, 196, 60),
+                        ),
+                    };
                 }
             }
             let show_endpoints = match feature {
@@ -646,8 +713,10 @@ impl LiquidusViewerApp {
         self.zoom = 1.0;
         self.pan = egui::Vec2::ZERO;
         self.open_confirmation = false;
+        self.tab = ViewerTab::Data;
+        self.show_plot_after_success = true;
         self.start_dataset_calculation(dataset);
-        self.state.message = Some("Dataset loaded; calculating the new document?".into());
+        self.state.message = Some("Dataset loaded; calculating the new document.".into());
         let title = path
             .file_name()
             .and_then(|name| name.to_str())
@@ -742,8 +811,9 @@ impl LiquidusViewerApp {
             }
             matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
         };
-        if let Some(dataset) = dataset {
-            self.start_dataset_calculation(dataset);
+        if dataset.is_some() {
+            self.state.invalidate_projection();
+            self.schedule_recalculation();
         }
     }
     fn show_grid_inspection(&mut self, ctx: &egui::Context) {
@@ -766,13 +836,13 @@ impl LiquidusViewerApp {
         } else {
             GridInspectionAction::None
         };
-        if matches!(
-            action,
-            GridInspectionAction::Applied | GridInspectionAction::Recalculate
-        ) {
+        if !matches!(action, GridInspectionAction::None) {
             self.state.mark_document_dirty();
         }
-        let recalculate = matches!(action, GridInspectionAction::Recalculate);
+        let recalculate = matches!(
+            action,
+            GridInspectionAction::Applied | GridInspectionAction::Recalculate
+        );
         egui::CentralPanel::default().show(ctx, |ui| {
             if let Some(editor) = self.editor.as_ref() {
                 grid_inspection::show_canvas(ui, editor, &mut self.grid_inspection_ui);
@@ -782,13 +852,74 @@ impl LiquidusViewerApp {
                 });
             }
         });
-        if recalculate && let Some(editor) = &self.editor {
-            self.start_dataset_calculation(editor.active.clone());
+        if recalculate {
+            self.state.invalidate_projection();
+            self.schedule_recalculation();
         }
     }
 
     fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
         ui.heading("Diagnostics");
+        if let Some(dataset) = self.state.dataset.as_ref() {
+            ui.separator();
+            ui.heading("Active numerical configuration");
+            let sampling = self
+                .state
+                .calculation_options
+                .sampling_subdivisions
+                .unwrap_or(24);
+            let sampling_points = (sampling + 1) * (sampling + 2) / 2;
+            ui.label(format!(
+                "Sampling grid: n = {sampling} ({sampling_points} evaluation vertices)"
+            ));
+            match self.state.calculation_options.source_interpolation {
+                SourceInterpolation::Linear => {
+                    ui.label("Source interpolation: Linear (piecewise planar)");
+                    ui.small("Cubic model: not selected.");
+                }
+                SourceInterpolation::CubicAlpha {
+                    method,
+                    continuation,
+                } => {
+                    ui.label(format!(
+                        "Source interpolation: Cubic alpha ({method:?}; {continuation:?} continuation)"
+                    ));
+                    ui.small("Cubic model: prepared only for complete regular source fields.");
+                }
+            }
+            ui.label("Semantic corner mapping:");
+            ui.small(format!(
+                "A = {}; B = {}; C = {}",
+                dataset.components[0].name, dataset.components[1].name, dataset.components[2].name
+            ));
+            ui.label("Temperature-source coverage:");
+            for grid in &dataset.grids {
+                for field in grid.fields().iter().filter(|field| field.property == "T") {
+                    let phase_name = dataset
+                        .phases
+                        .iter()
+                        .find(|phase| phase.id == field.phase_id)
+                        .map(|phase| phase.name.as_str())
+                        .unwrap_or("unknown phase");
+                    let mut calculated = 0;
+                    let mut non_existing = 0;
+                    let mut cut_off = 0;
+                    let mut missing = 0;
+                    for value in &field.values {
+                        match value.state {
+                            crate::TabulatedValueState::Calculated => calculated += 1,
+                            crate::TabulatedValueState::NonExisting => non_existing += 1,
+                            crate::TabulatedValueState::CutOff => cut_off += 1,
+                            crate::TabulatedValueState::Missing => missing += 1,
+                        }
+                    }
+                    ui.small(format!(
+                        "{} / {phase_name}.T: calculated {calculated}, non-existing {non_existing}, cut-off {cut_off}, missing {missing}",
+                        grid.name()
+                    ));
+                }
+            }
+        }
         if let Some(message) = &self.state.message {
             ui.colored_label(egui::Color32::RED, message);
             if self.state.raw_projection.is_some() {
@@ -879,6 +1010,7 @@ impl LiquidusViewerApp {
         let image_rect =
             egui::Rect::from_center_size(viewport.center() + self.pan, base * fit * self.zoom);
         let transform = ViewerTransform::new(
+            texture.transform,
             bitmap_width,
             bitmap_height,
             [f64::from(image_rect.min.x), f64::from(image_rect.min.y)],
@@ -959,20 +1091,20 @@ impl eframe::App for LiquidusViewerApp {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Liquidus inspection viewer");
                 ui.separator();
-                ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
                 ui.selectable_value(&mut self.tab, ViewerTab::Data, "Data");
-                ui.selectable_value(&mut self.tab, ViewerTab::GridInspection, "Grid inspection");
                 ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
+                ui.selectable_value(&mut self.tab, ViewerTab::GridInspection, "Grid inspection");
+                ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
                 ui.separator();
                 open_requested = ui.button("Open").clicked();
                 save_requested = ui.button("Save").clicked();
                 save_as_requested = ui.button("Save As").clicked();
                 let document_label = if self.state.unsaved {
-                    "Unsaved".to_owned()
+                    "Untitled - unsaved".to_owned()
                 } else if self.state.document_dirty
                     || self.editor.as_ref().is_some_and(|editor| editor.dirty)
                 {
-                    format!("{} ? modified", self.state.input_path.display())
+                    format!("{} - modified", self.state.input_path.display())
                 } else {
                     self.state.input_path.display().to_string()
                 };
@@ -1000,7 +1132,7 @@ impl eframe::App for LiquidusViewerApp {
             });
         });
 
-        let mut apply_from_controls = false;
+        let mut control_change = controls::ControlChange::default();
         match self.tab {
             ViewerTab::Plot => {
                 egui::SidePanel::left("viewer_controls")
@@ -1008,7 +1140,7 @@ impl eframe::App for LiquidusViewerApp {
                     .default_width(270.0)
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
-                            apply_from_controls = controls::show(ui, &mut self.state);
+                            control_change = controls::show(ui, &mut self.state);
                             self.show_selection_details(ui);
                         });
                     });
@@ -1029,11 +1161,16 @@ impl eframe::App for LiquidusViewerApp {
                 input.modifiers.command && input.key_pressed(egui::Key::O),
                 input.modifiers.command && input.key_pressed(egui::Key::S),
                 input.modifiers.command && input.modifiers.shift && input.key_pressed(egui::Key::S),
+                input.modifiers.command && input.key_pressed(egui::Key::Tab),
+                input.modifiers.shift,
             )
         });
         open_requested |= shortcuts.0;
         save_requested |= shortcuts.1 && !shortcuts.2;
         save_as_requested |= shortcuts.2;
+        if shortcuts.3 {
+            self.tab = self.tab.next(shortcuts.4);
+        }
         if save_requested || save_as_requested {
             self.save_document(ctx, save_as_requested);
         }
@@ -1078,6 +1215,7 @@ impl eframe::App for LiquidusViewerApp {
             } else {
                 match &self.state.status {
                     ViewerStatus::Idle => ui.label("Ready to calculate."),
+                    ViewerStatus::RecalculationPending => ui.label("Recalculation pending."),
                     ViewerStatus::Calculating => {
                         ui.label("Calculation in progress; numerical controls are disabled.")
                     }
@@ -1096,9 +1234,13 @@ impl eframe::App for LiquidusViewerApp {
         if can_calculate && reload {
             self.start_file_calculation();
         }
-        if can_calculate && (recalculate || apply_from_controls) {
-            self.apply_and_recalculate();
+        if control_change.calculation_changed {
+            self.schedule_recalculation();
         }
+        if can_calculate && (recalculate || control_change.recalculate_now) {
+            self.recalculate_now();
+        }
+        self.launch_debounced_recalculation(ctx);
     }
 }
 
@@ -1159,5 +1301,51 @@ mod tests {
         );
         assert_eq!(app.editor.as_ref().unwrap().draft, before);
         assert!(app.has_unsaved_changes());
+    }
+
+    #[test]
+    fn tabs_follow_the_document_first_navigation_order() {
+        assert_eq!(
+            ViewerTab::ORDERED,
+            [
+                ViewerTab::Data,
+                ViewerTab::Diagnostics,
+                ViewerTab::GridInspection,
+                ViewerTab::Plot,
+            ]
+        );
+        assert_eq!(ViewerTab::Data.next(false), ViewerTab::Diagnostics);
+        assert_eq!(
+            ViewerTab::Diagnostics.next(false),
+            ViewerTab::GridInspection
+        );
+        assert_eq!(ViewerTab::GridInspection.next(false), ViewerTab::Plot);
+        assert_eq!(ViewerTab::Plot.next(false), ViewerTab::Data);
+        assert_eq!(ViewerTab::Data.next(true), ViewerTab::Plot);
+    }
+
+    #[test]
+    fn new_document_starts_on_data_without_a_calculation_request() {
+        let app = LiquidusViewerApp::new_default(
+            ProjectionOptions::default(),
+            RenderOptions::default(),
+            crate::default_regular_dataset(),
+        );
+        assert_eq!(app.tab, ViewerTab::Data);
+        assert!(app.worker.is_none());
+        assert!(app.pending_recalculation.is_none());
+    }
+
+    #[test]
+    fn committed_calculation_changes_are_debounced() {
+        let mut app = LiquidusViewerApp::new_default(
+            ProjectionOptions::default(),
+            RenderOptions::default(),
+            crate::default_regular_dataset(),
+        );
+        app.schedule_recalculation();
+        assert!(app.pending_recalculation.is_some());
+        assert_eq!(app.state.status, ViewerStatus::RecalculationPending);
+        assert!(app.worker.is_none());
     }
 }
