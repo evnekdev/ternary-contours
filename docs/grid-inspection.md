@@ -3,7 +3,9 @@
 The feature-gated native viewer includes a **Grid inspection** tab for editing
 one `(grid, phase, property)` field at a time. It uses the same editable draft,
 TCT serializer, dataset validation, calculation worker, and renderer as the
-Data and Plot tabs.
+Data and Plot tabs. Top-level navigation is consistently **Data**,
+**Diagnostics**, **Grid inspection**, then **Plot**; editing a field remains in
+the draft while switching modes.
 
 ## Open an existing document
 
