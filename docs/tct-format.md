@@ -19,6 +19,23 @@ The supported global declarations are `title = value`,
 TSV cell is an error; only declared missing tokens represent undefined optional
 values.
 
+Scalar cells also support classified point states used by grid inspection:
+
+```text
+1250.0    Calculated (finite scalar)
+NE        NonExisting (phase absent or too remote)
+CO        CutOff (explicit high-temperature limit)
+CO:3000   CutOff with retained limit/note
+NA        Missing (not calculated or classified)
+```
+
+`NE`, `CO`, and `NA` are reserved, case-insensitive state tokens. A configured
+missing token continues to map to `Missing`. `NE:<note>`, `CO:<note>`, and
+`NA:<note>` preserve a short note in the neutral dataset. Only a finite numeric
+cell contributes a defined evaluator value; the other states are undefined with
+reason-specific diagnostics and are never converted to zero, NaN, or infinity.
+
+
 The following sections occur once each:
 
 ```text
@@ -113,8 +130,10 @@ are used.
 
 ## Missing data and diagnostics
 
-A declared missing token represents an undefined optional value. Required fields
-(including T) may not be missing. Other non-numeric tokens, non-finite values,
+`Missing`, `NonExisting`, and `CutOff` cells are distinct undefined scalar
+states. A required T field must still be declared for every phase, but individual
+T samples may be classified undefined; calculation reports coverage and state
+counts instead of inventing values. Other non-numeric tokens, non-finite values,
 and blank cells are errors. Diagnostics carry source path, line, section/grid,
 and column information where applicable, and include expected syntax for format
 and table-shape failures. The default CLI output is concise; use `--verbose` to

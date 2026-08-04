@@ -11,6 +11,20 @@ TSV preview -> TabulatedTernaryDataset -> existing TCT validation
 The editor has no .xlsx, COM, formula, or thermodynamic-calculation support.
 It accepts literal tab-separated ranges from Excel or another spreadsheet.
 
+## Classified scalar tokens
+
+Paste and copy keep point classification rather than treating undefined cells as
+numbers. Numeric cells become **Calculated**; `NE` becomes **Non-existing**;
+`CO` or `CO:<limit>` becomes **Cut-off**; and `NA` (or a blank only when the
+explicit blank-as-missing option is enabled) becomes **Missing**. The three
+undefined states remain separate in saved TCT and copied TSV. Only calculated
+finite values participate in liquidus interpolation.
+
+Use the **Grid inspection** tab for point-by-point marker editing, batch state
+changes, state counts, and selected-field TSV copy. See
+[`grid-inspection.md`](grid-inspection.md) for the full workflow.
+
+
 ## Generate canonical regular compositions
 
 Use the headless command whenever a viewer is not available:
