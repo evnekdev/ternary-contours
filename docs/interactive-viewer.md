@@ -104,8 +104,11 @@ method, typed state, value, unit, optional local barycentric coordinates,
 linear/excess contributions, triangle ID, and one-based source rows. The source
 rows are displayed as `vertex_0_row`, `vertex_1_row`, and `vertex_2_row`; their
 internal Rust indices are zero-based and remain aligned with local lambda0/1/2.
-Changing interpolation settings or field selectors recalculates the registered
-queries without re-running the full liquidus worker. Grid inspection uses the
+Changing interpolation settings, field selectors, or committed source values
+recalculates every registered query without re-running the full liquidus
+worker. Query IDs, A/B/C coordinates, row order, and canvas markers stay fixed;
+only located triangles, local lambdas, values, and provenance are replaced.
+Grid inspection uses the
 same configured plot background as Plot.
 ## Inspection and diagnostics
 
@@ -137,8 +140,15 @@ is deliberately kept in Diagnostics instead of the export.
 
 ## Export and limits
 
-Export uses the same static Plotters configuration as the view and writes
-`<input>.viewer.svg` or `<input>.viewer.png` beside the source TCT file.
+Export uses the same static Plotters configuration as the view. **Export SVG**,
+**Export PNG**, and **Export lines CSV** each open a native Save dialog with an
+appropriate file filter; cancelling changes nothing. Image filenames suggest
+`<input>-projection.svg` or `.png`, and line CSV suggests `<input>-lines.csv`.
+The last export directory is used first, followed by the document directory,
+the last Open/Save directory, then the working directory. The status area
+reports the final path or a full output error.
+
+Line CSV is UTF-8, RFC-compatible, CRLF-delimited for Excel, and contains one
 
 Zoom/pan is intentionally a viewer-only bitmap transform rather than an
 arbitrary Plotters viewport. It preserves the renderer and numerical pipeline,

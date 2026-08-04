@@ -1,5 +1,5 @@
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver},
     thread,
     time::SystemTime,
@@ -214,6 +214,7 @@ pub struct ViewerState {
     pub last_successful_reload: Option<SystemTime>,
     pub last_dialog_directory: Option<PathBuf>,
     pub message: Option<String>,
+    pub last_export_directory: Option<PathBuf>,
     pending_loaded_calculation: bool,
     generation: u64,
 }
@@ -251,6 +252,7 @@ impl ViewerState {
             last_successful_reload: None,
             last_dialog_directory: None,
             message: None,
+            last_export_directory: None,
             pending_loaded_calculation: false,
             generation: 0,
         }
@@ -273,6 +275,13 @@ impl ViewerState {
         state.status = ViewerStatus::Idle;
         state
     }
+    pub fn mark_exported(&mut self, path: &Path) {
+        self.last_export_directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(PathBuf::from);
+    }
+
     pub fn mark_saved(&mut self, path: PathBuf) {
         self.input_path = path.clone();
         self.unsaved = false;

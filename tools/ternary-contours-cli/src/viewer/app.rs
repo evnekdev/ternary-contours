@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::PathBuf,
     sync::mpsc::{Receiver, TryRecvError},
     time::{Duration, Instant},
@@ -7,9 +8,10 @@ use std::{
 use eframe::egui;
 
 use crate::{
-    DatasetEditorState, OutputFormat, ProjectionOptions, RenderOptions, SourceInterpolation,
-    TctSerializeOptions, render_to_bitmap_with_raw, render_to_path_with_raw, save_tct_atomic,
-    serialize_tct,
+    DatasetEditorState, OutputFormat, ProjectionCsvLayerFilter, ProjectionCsvOptions,
+    ProjectionOptions, RenderOptions, SourceInterpolation, TctSerializeOptions,
+    projection_csv_records, render_to_bitmap_with_raw, render_to_path_with_raw, save_tct_atomic,
+    serialize_projection_csv, serialize_tct,
 };
 
 use super::{
@@ -56,6 +58,48 @@ impl ViewerTab {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectionExport {
+    Svg,
+    Png,
+    LinesCsv,
+}
+impl ProjectionExport {
+    const fn title(self) -> &'static str {
+        match self {
+            Self::Svg => "Export Scalable Vector Graphics",
+            Self::Png => "Export PNG image",
+            Self::LinesCsv => "Export calculated lines CSV",
+        }
+    }
+    const fn filter_name(self) -> &'static str {
+        match self {
+            Self::Svg => "Scalable Vector Graphics",
+            Self::Png => "PNG image",
+            Self::LinesCsv => "Comma-separated values",
+        }
+    }
+    const fn extension(self) -> &'static str {
+        match self {
+            Self::Svg => "svg",
+            Self::Png => "png",
+            Self::LinesCsv => "csv",
+        }
+    }
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Svg | Self::Png => "projection",
+            Self::LinesCsv => "lines",
+        }
+    }
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Svg => "SVG",
+            Self::Png => "PNG",
+            Self::LinesCsv => "lines CSV",
+        }
+    }
+}
 pub struct LiquidusViewerApp {
     pub(crate) state: ViewerState,
     worker: Option<Receiver<WorkerResult>>,
@@ -72,6 +116,7 @@ pub struct LiquidusViewerApp {
     pending_recalculation: Option<Instant>,
     show_plot_after_success: bool,
     open_confirmation: bool,
+    csv_export_filter: ProjectionCsvLayerFilter,
 }
 
 impl LiquidusViewerApp {
@@ -96,6 +141,7 @@ impl LiquidusViewerApp {
             pending_recalculation: None,
             show_plot_after_success: true,
             open_confirmation: false,
+            csv_export_filter: ProjectionCsvLayerFilter::default(),
         };
         // Initial command-line file startup shares the exact parser, structural
         // validation, editor construction, and Grid inspection initialization
@@ -140,6 +186,7 @@ impl LiquidusViewerApp {
             pending_recalculation: None,
             show_plot_after_success: false,
             open_confirmation: false,
+            csv_export_filter: ProjectionCsvLayerFilter::default(),
         }
     }
     fn start_file_calculation(&mut self) {
@@ -346,27 +393,70 @@ impl LiquidusViewerApp {
             }
         }
     }
+    fn choose_export_path(&mut self, export: ProjectionExport) -> Option<PathBuf> {
+        let editor = self.editor.as_ref()?;
+        let document = (!self.state.unsaved).then_some(self.state.input_path.as_path());
+        let directory = super::save::default_export_directory(
+            self.state.last_export_directory.as_deref(),
+            document,
+            self.state.last_dialog_directory.as_deref(),
+        );
+        let filename = super::save::default_projection_filename(
+            document,
+            editor.draft.title.as_deref(),
+            export.suffix(),
+            export.extension(),
+        );
+        let selected = rfd::FileDialog::new()
+            .set_title(export.title())
+            .add_filter(export.filter_name(), &[export.extension()])
+            .set_directory(directory)
+            .set_file_name(&filename)
+            .save_file();
+        let selected = selected?;
+        match super::save::ensure_extension(selected.clone(), export.extension()) {
+            Ok(path) => Some(path),
+            Err(error) => {
+                self.state.status = ViewerStatus::Failed(error.clone());
+                self.state.message = Some(format!(
+                    "Export {} failed:\n{}\n{error}",
+                    export.label(),
+                    selected.display()
+                ));
+                None
+            }
+        }
+    }
+
     fn export_current(&mut self, format: OutputFormat) {
+        let export = match format {
+            OutputFormat::Svg => ProjectionExport::Svg,
+            OutputFormat::Png => ProjectionExport::Png,
+        };
+        if self.state.dataset.is_none() || self.state.active_projection().is_none() {
+            self.state.status = ViewerStatus::Failed("nothing has been calculated yet".into());
+            self.state.message = Some("There is no calculated projection to export.".into());
+            return;
+        }
+        let Some(output) = self.choose_export_path(export) else {
+            return;
+        };
         let result = {
-            let Some(dataset) = self.state.dataset.as_ref() else {
-                self.state.status = ViewerStatus::Failed("nothing has been calculated yet".into());
-                return;
-            };
-            let Some(projection) = self.state.active_projection() else {
-                self.state.status = ViewerStatus::Failed("nothing has been calculated yet".into());
-                return;
-            };
+            let dataset = self
+                .state
+                .dataset
+                .as_ref()
+                .expect("projection export checked that a dataset is present");
+            let projection = self
+                .state
+                .active_projection()
+                .expect("projection export checked that a projection is present");
             let raw_projection = matches!(
-                self.state.viewer_options.path_display,
-                PathDisplayMode::Overlay
+                self.state.render_options.path_mode,
+                crate::RenderPathMode::Overlay
             )
             .then_some(self.state.raw_projection.as_ref())
             .flatten();
-            let extension = match format {
-                OutputFormat::Svg => "viewer.svg",
-                OutputFormat::Png => "viewer.png",
-            };
-            let output = self.state.input_path.with_extension(extension);
             render_to_path_with_raw(
                 &output,
                 dataset,
@@ -375,16 +465,101 @@ impl LiquidusViewerApp {
                 &self.state.render_options,
                 Some(format),
             )
-            .map(|()| output)
+            .map_err(|error| error.to_string())
         };
         match result {
-            Ok(_output) => self.state.status = ViewerStatus::Ready,
+            Ok(()) => {
+                self.state.mark_exported(&output);
+                self.state.status = ViewerStatus::Ready;
+                self.state.message = Some(format!(
+                    "Exported {}:\n{}",
+                    export.label(),
+                    output.display()
+                ));
+            }
+            Err(error) => self.set_export_error(export, &output, &error),
+        }
+    }
+
+    fn set_export_error(
+        &mut self,
+        export: ProjectionExport,
+        output: &std::path::Path,
+        error: &str,
+    ) {
+        self.state.status = ViewerStatus::Failed(format!("export failed: {error}"));
+        self.state.message = Some(format!(
+            "Export {} failed:\n{}\n{error}",
+            export.label(),
+            output.display()
+        ));
+    }
+
+    fn projection_csv_text(&self) -> Result<String, String> {
+        let dataset = self
+            .state
+            .dataset
+            .as_ref()
+            .ok_or_else(|| "There are no calculated lines to export.".to_owned())?;
+        let projection = self
+            .state
+            .regularized_projection
+            .as_ref()
+            .or(self.state.raw_projection.as_ref());
+        let records = projection_csv_records(
+            dataset,
+            projection,
+            self.state.raw_projection.as_ref(),
+            &self.state.render_options,
+            ProjectionCsvOptions {
+                layers: self.csv_export_filter,
+                path_mode: self.state.render_options.path_mode,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        serialize_projection_csv(&records).map_err(|error| error.to_string())
+    }
+
+    fn export_lines_csv(&mut self) {
+        let text = match self.projection_csv_text() {
+            Ok(text) => text,
             Err(error) => {
-                self.state.status = ViewerStatus::Failed(format!("export failed: {error}"))
+                self.state.status = ViewerStatus::Failed(error.clone());
+                self.state.message = Some(error);
+                return;
+            }
+        };
+        let Some(output) = self.choose_export_path(ProjectionExport::LinesCsv) else {
+            return;
+        };
+        match fs::write(&output, text) {
+            Ok(()) => {
+                self.state.mark_exported(&output);
+                self.state.status = ViewerStatus::Ready;
+                self.state.message = Some(format!(
+                    "Exported {}:\n{}",
+                    ProjectionExport::LinesCsv.label(),
+                    output.display()
+                ));
+            }
+            Err(error) => {
+                self.set_export_error(ProjectionExport::LinesCsv, &output, &error.to_string())
             }
         }
     }
 
+    fn copy_lines_csv(&mut self, ctx: &egui::Context) {
+        match self.projection_csv_text() {
+            Ok(text) => {
+                ctx.copy_text(text);
+                self.state.message = Some("Copied calculated lines CSV to the clipboard.".into());
+            }
+            Err(error) => {
+                self.state.status = ViewerStatus::Failed(error.clone());
+                self.state.message = Some(error);
+            }
+        }
+    }
     fn show_selection_details(&self, ui: &mut egui::Ui) {
         ui.separator();
         ui.heading("Selection");
@@ -795,7 +970,7 @@ impl LiquidusViewerApp {
         true
     }
     fn show_data(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
-        let dataset = {
+        let (dataset, recalculate_queries) = {
             let Some(editor) = self.editor.as_mut() else {
                 ui.centered_and_justified(|ui| {
                     ui.label("Load a valid TCT dataset before editing data.")
@@ -809,8 +984,18 @@ impl LiquidusViewerApp {
             ) {
                 self.state.mark_document_dirty();
             }
-            matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone())
+            (
+                matches!(action, DataEditorAction::Recalculate).then(|| editor.active.clone()),
+                matches!(
+                    action,
+                    DataEditorAction::Applied | DataEditorAction::Recalculate
+                ),
+            )
         };
+        if recalculate_queries && let Some(editor) = self.editor.as_ref() {
+            self.grid_inspection_ui
+                .recalculate_interpolation_results(editor, &self.state.calculation_options);
+        }
         if dataset.is_some() {
             self.state.invalidate_projection();
             self.schedule_recalculation();
@@ -1152,6 +1337,42 @@ impl eframe::App for LiquidusViewerApp {
                 if ui.button("Export PNG").clicked() {
                     self.export_current(OutputFormat::Png);
                 }
+                ui.separator();
+                egui::ComboBox::from_id_salt("projection_csv_layer_filter")
+                    .selected_text(self.csv_export_filter.label())
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.csv_export_filter,
+                            ProjectionCsvLayerFilter::VisibleCalculatedLayers,
+                            ProjectionCsvLayerFilter::VisibleCalculatedLayers.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.csv_export_filter,
+                            ProjectionCsvLayerFilter::AllCalculatedLayers,
+                            ProjectionCsvLayerFilter::AllCalculatedLayers.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.csv_export_filter,
+                            ProjectionCsvLayerFilter::StableIsothermsOnly,
+                            ProjectionCsvLayerFilter::StableIsothermsOnly.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.csv_export_filter,
+                            ProjectionCsvLayerFilter::StableUnivariantsOnly,
+                            ProjectionCsvLayerFilter::StableUnivariantsOnly.label(),
+                        );
+                        ui.selectable_value(
+                            &mut self.csv_export_filter,
+                            ProjectionCsvLayerFilter::InvariantsOnly,
+                            ProjectionCsvLayerFilter::InvariantsOnly.label(),
+                        );
+                    });
+                if ui.button("Export lines CSV").clicked() {
+                    self.export_lines_csv();
+                }
+                if ui.button("Copy lines CSV").clicked() {
+                    self.copy_lines_csv(ctx);
+                }
                 if ui.button("Fit").clicked() || ui.button("Reset view").clicked() {
                     fit = true;
                 }
@@ -1377,5 +1598,23 @@ mod tests {
         assert!(app.pending_recalculation.is_some());
         assert_eq!(app.state.status, ViewerStatus::RecalculationPending);
         assert!(app.worker.is_none());
+    }
+    #[test]
+    fn export_kinds_use_the_native_dialog_extensions_and_suggested_suffixes() {
+        assert_eq!(ProjectionExport::Svg.extension(), "svg");
+        assert_eq!(ProjectionExport::Png.extension(), "png");
+        assert_eq!(ProjectionExport::LinesCsv.extension(), "csv");
+        assert_eq!(ProjectionExport::Svg.suffix(), "projection");
+        assert_eq!(ProjectionExport::Png.suffix(), "projection");
+        assert_eq!(ProjectionExport::LinesCsv.suffix(), "lines");
+        assert_eq!(
+            super::super::save::default_projection_filename(
+                Some(std::path::Path::new("CaO-PbO-ZnO.tct")),
+                None,
+                ProjectionExport::Svg.suffix(),
+                ProjectionExport::Svg.extension(),
+            ),
+            "CaO-PbO-ZnO-projection.svg"
+        );
     }
 }

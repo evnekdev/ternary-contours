@@ -65,6 +65,7 @@ pub struct GridInspectionUi {
     pub show_containing_triangle: bool,
     pub results: Vec<InterpolatedResult>,
     pub selected_result: Option<usize>,
+    next_query_id: u64,
     pub show_local_barycentric: bool,
     pub show_contributions: bool,
     pub show_triangle_index: bool,
@@ -98,6 +99,7 @@ impl Default for GridInspectionUi {
             show_containing_triangle: true,
             results: Vec::new(),
             selected_result: None,
+            next_query_id: 1,
             show_local_barycentric: false,
             show_contributions: false,
             show_triangle_index: false,
@@ -226,9 +228,16 @@ impl GridInspectionUi {
             .results
             .last()
             .map_or(1, |result| result.index.saturating_add(1));
-        let result =
-            self.inspection_cache
-                .evaluate(&editor.draft, &identity, options, composition, index);
+        let id = self.next_query_id;
+        self.next_query_id = self.next_query_id.saturating_add(1);
+        let result = self.inspection_cache.evaluate(
+            &editor.draft,
+            &identity,
+            options,
+            composition,
+            index,
+            id,
+        );
         self.results.push(result);
         self.selected_result = Some(self.results.len() - 1);
     }
@@ -241,27 +250,51 @@ impl GridInspectionUi {
         let Some(identity) = self.field_identity() else {
             return;
         };
-        for result in &mut self.results {
+        let Some(first) = self
+            .results
+            .first()
+            .map(|result| (result.composition, result.index, result.id))
+        else {
+            return;
+        };
+        let first_updated = self.inspection_cache.evaluate(
+            &editor.draft,
+            &identity,
+            options,
+            first.0,
+            first.1,
+            first.2,
+        );
+        if let Some(error) = self.inspection_cache.preparation_error() {
+            for result in &mut self.results {
+                result.stale = true;
+                result.stale_error = Some(error.to_owned());
+            }
+            self.message = Some(format!(
+                "Interpolator preparation failed. {} previous result(s) are still displayed and marked stale: {error}",
+                self.results.len()
+            ));
+            return;
+        }
+        self.results[0] = first_updated;
+        for result in self.results.iter_mut().skip(1) {
             let composition = result.composition;
-            let updated = self.inspection_cache.evaluate(
+            let index = result.index;
+            let id = result.id;
+            *result = self.inspection_cache.evaluate(
                 &editor.draft,
                 &identity,
                 options,
                 composition,
-                result.index,
+                index,
+                id,
             );
-            if let InterpolatedResultState::Error(message) = &updated.state {
-                result.stale = true;
-                result.stale_error = Some(message.clone());
-            } else {
-                *result = updated;
-            }
         }
+        self.message = None;
         self.selected_result = self
             .selected_result
             .filter(|index| *index < self.results.len());
     }
-
     fn reset_interpolation_state(&mut self) {
         self.results.clear();
         self.selected_result = None;
@@ -906,6 +939,13 @@ pub fn show_canvas(
 pub fn show_results(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut GridInspectionUi) {
     ui.heading("Interpolated Results");
     ui.small("Source rows are displayed 1-based; Rust/grid indices remain 0-based internally.");
+    let copy_allowed = !state.results.iter().any(|result| result.stale);
+    if !copy_allowed {
+        ui.colored_label(
+            egui::Color32::YELLOW,
+            "Recalculate successfully before copying stale interpolation results.",
+        );
+    }
     ui.horizontal_wrapped(|ui| {
         if ui.button("Clear").clicked() {
             state.results.clear();
@@ -927,7 +967,7 @@ pub fn show_results(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut GridInsp
         }
         if ui
             .add_enabled(
-                state.selected_result.is_some(),
+                state.selected_result.is_some() && copy_allowed,
                 egui::Button::new("Copy selected"),
             )
             .clicked()
@@ -936,7 +976,10 @@ pub fn show_results(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut GridInsp
         {
             ctx.copy_text(result_tsv(std::slice::from_ref(result), state, false));
         }
-        if ui.button("Copy all").clicked() {
+        if ui
+            .add_enabled(copy_allowed, egui::Button::new("Copy all"))
+            .clicked()
+        {
             ctx.copy_text(result_tsv(&state.results, state, true));
         }
     });
@@ -947,6 +990,7 @@ pub fn show_results(ctx: &egui::Context, ui: &mut egui::Ui, state: &mut GridInsp
         ui.checkbox(&mut state.show_triangle_vertices, "Source rows");
     });
     if ctx.input(|input| input.modifiers.command && input.key_pressed(egui::Key::C))
+        && copy_allowed
         && state.results_table_has_focus
         && let Some(index) = state.selected_result
         && let Some(result) = state.results.get(index)
@@ -1388,6 +1432,7 @@ mod tests {
     #[test]
     fn interpolation_tsv_uses_unambiguous_one_based_source_rows() {
         let result = InterpolatedResult {
+            id: 1,
             index: 1,
             field: InspectionFieldIdentity {
                 grid_index: 0,
@@ -1470,5 +1515,72 @@ mod tests {
         state.select_field(&editor, 1);
         state.recalculate_interpolation_results(&editor, &options);
         assert_eq!(state.results[0].field.phase_id, StablePhaseId(2));
+    }
+    #[test]
+    fn registered_queries_keep_ids_coordinates_order_and_marker_positions_on_recalculation() {
+        let mut editor = DatasetEditorState::new(crate::default_regular_dataset());
+        let TabulatedGrid::Regular(grid) = &mut editor.draft.grids[0] else {
+            unreachable!("default dataset uses a regular grid");
+        };
+        for field in &mut grid.fields {
+            for (row, value) in field.values.iter_mut().enumerate() {
+                *value = TabulatedValue::calculated(1_000.0 + row as f64).unwrap();
+            }
+        }
+        let mut state = GridInspectionUi::default();
+        state.initialise(&editor);
+        let options = ProjectionOptions::default();
+        state.register_interpolation_query(&editor, &options, [0.5, 0.3, 0.2]);
+        state.register_interpolation_query(&editor, &options, [0.3, 0.2, 0.5]);
+        let queries = state
+            .results
+            .iter()
+            .map(|result| (result.id, result.composition))
+            .collect::<Vec<_>>();
+        let mut changed = options;
+        changed.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+            method: ternary_contours::CubicAlphaMethod::Makima,
+            continuation: ternary_contours::BinaryExtrapolation::Kohler,
+        };
+        state.recalculate_interpolation_results(&editor, &changed);
+        assert_eq!(state.results.len(), 2);
+        assert_eq!(
+            state
+                .results
+                .iter()
+                .map(|result| (result.id, result.composition))
+                .collect::<Vec<_>>(),
+            queries
+        );
+        assert!(
+            state
+                .results
+                .iter()
+                .all(|result| result.source_interpolation == changed.source_interpolation)
+        );
+        assert!(state.results.iter().all(|result| !result.stale));
+    }
+    #[test]
+    fn global_interpolator_failure_marks_previous_queries_stale_without_erasing_them() {
+        let dataset =
+            crate::parse_str(include_str!("../../fixtures/irregular-phase-grids.tct")).unwrap();
+        let editor = DatasetEditorState::new(dataset);
+        let mut state = GridInspectionUi::default();
+        state.initialise(&editor);
+        let linear = ProjectionOptions::default();
+        state.register_interpolation_query(&editor, &linear, [0.2, 0.3, 0.5]);
+        let before = state.results[0].clone();
+        let mut unavailable = linear;
+        unavailable.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+            method: ternary_contours::CubicAlphaMethod::Akima,
+            continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+        };
+        state.recalculate_interpolation_results(&editor, &unavailable);
+        assert_eq!(state.results.len(), 1);
+        assert_eq!(state.results[0].id, before.id);
+        assert_eq!(state.results[0].composition, before.composition);
+        assert_eq!(state.results[0].value, before.value);
+        assert!(state.results[0].stale);
+        assert!(state.results[0].stale_error.is_some());
     }
 }

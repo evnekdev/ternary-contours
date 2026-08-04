@@ -22,6 +22,26 @@ pub fn default_dialog_directory(
     env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Export dialogs prefer the last successful export, then the current
+/// document, then the last Open/Save directory, and finally the working
+/// directory. This avoids surprising repository-relative output paths.
+pub fn default_export_directory(
+    last_export_directory: Option<&Path>,
+    document_path: Option<&Path>,
+    last_dialog_directory: Option<&Path>,
+) -> PathBuf {
+    last_export_directory
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            document_path
+                .and_then(Path::parent)
+                .filter(|path| !path.as_os_str().is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| default_dialog_directory(last_dialog_directory, None))
+}
+
 /// Convert a dataset title into a deterministic, portable filename stem.
 pub fn sanitize_title(title: Option<&str>) -> Option<String> {
     let title = title?.trim();
@@ -61,19 +81,45 @@ pub fn default_filename(
     "untitled-ternary-system.tct".into()
 }
 
+/// Generate a deterministic projection-export filename for a native dialog.
+pub fn default_projection_filename(
+    existing_document: Option<&Path>,
+    title: Option<&str>,
+    suffix: &str,
+    extension: &str,
+) -> String {
+    if let Some(stem) = existing_document
+        .and_then(Path::file_stem)
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+    {
+        return format!("{stem}-{suffix}.{extension}");
+    }
+    if let Some(title) = sanitize_title(title) {
+        return format!("{title}-{suffix}.{extension}");
+    }
+    format!("ternary-{suffix}.{extension}")
+}
+
 /// Whether a save request needs to show Save As instead of writing directly.
 pub const fn save_requires_dialog(unsaved: bool, save_as: bool) -> bool {
     unsaved || save_as
 }
-/// Add `.tct` when omitted and reject incompatible extensions.
-pub fn ensure_tct_extension(path: PathBuf) -> Result<PathBuf, String> {
+
+/// Add the expected extension when omitted and reject incompatible extensions.
+pub fn ensure_extension(path: PathBuf, expected_extension: &str) -> Result<PathBuf, String> {
     match path.extension().and_then(|extension| extension.to_str()) {
-        None => Ok(path.with_extension("tct")),
-        Some(extension) if extension.eq_ignore_ascii_case("tct") => Ok(path),
+        None => Ok(path.with_extension(expected_extension)),
+        Some(extension) if extension.eq_ignore_ascii_case(expected_extension) => Ok(path),
         Some(extension) => Err(format!(
-            "incompatible file extension .{extension}; choose a .tct file"
+            "incompatible file extension .{extension}; choose a .{expected_extension} file"
         )),
     }
+}
+
+/// Add .tct when omitted and reject incompatible extensions.
+pub fn ensure_tct_extension(path: PathBuf) -> Result<PathBuf, String> {
+    ensure_extension(path, "tct")
 }
 
 #[cfg(test)]
@@ -138,5 +184,39 @@ mod tests {
             Ok(PathBuf::from("data.TCT"))
         );
         assert!(ensure_tct_extension(PathBuf::from("data.csv")).is_err());
+    }
+
+    #[test]
+    fn export_directory_filename_and_extension_follow_the_document_policy() {
+        assert_eq!(
+            default_export_directory(
+                Some(Path::new("D:/exports")),
+                Some(Path::new("D:/document/data.tct")),
+                Some(Path::new("D:/saved")),
+            ),
+            PathBuf::from("D:/exports")
+        );
+        assert_eq!(
+            default_export_directory(None, Some(Path::new("D:/document/data.tct")), None),
+            PathBuf::from("D:/document")
+        );
+        assert_eq!(
+            default_projection_filename(
+                Some(Path::new("CaO-PbO-ZnO.tct")),
+                Some("Other"),
+                "projection",
+                "svg",
+            ),
+            "CaO-PbO-ZnO-projection.svg"
+        );
+        assert_eq!(
+            default_projection_filename(None, None, "lines", "csv"),
+            "ternary-lines.csv"
+        );
+        assert_eq!(
+            ensure_extension(PathBuf::from("image"), "png"),
+            Ok(PathBuf::from("image.png"))
+        );
+        assert!(ensure_extension(PathBuf::from("image.svg"), "png").is_err());
     }
 }

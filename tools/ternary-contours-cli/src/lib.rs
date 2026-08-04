@@ -8,6 +8,7 @@ pub mod editor;
 pub mod model;
 pub mod parser;
 pub mod projection;
+pub mod projection_csv;
 pub mod render;
 pub mod serialize;
 pub mod table;
@@ -21,6 +22,10 @@ pub use parser::{TctError, parse_path, parse_str};
 pub use projection::{
     LiquidusProjection, ProjectionOptions, SourceInterpolation, calculate_projection,
     parse_level_spec,
+};
+pub use projection_csv::{
+    ProjectionCsvError, ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,
+    ProjectionLineType, ProjectionPathSource, projection_csv_records, serialize_projection_csv,
 };
 pub use render::{
     OutputFormat, PLOT_BACKGROUND_RGB, RenderOptions, RenderPathMode, RenderedBitmap,

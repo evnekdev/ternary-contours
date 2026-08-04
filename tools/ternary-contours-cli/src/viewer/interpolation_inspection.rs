@@ -65,6 +65,7 @@ impl InterpolatedResultState {
 #[derive(Clone, Debug)]
 pub struct InterpolatedResult {
     pub index: usize,
+    pub id: u64,
     pub field: InspectionFieldIdentity,
     pub grid_name: String,
     pub phase_name: String,
@@ -132,6 +133,14 @@ impl FieldInspectionCache {
         self.key = None;
         self.prepared = None;
     }
+    pub fn preparation_error(&self) -> Option<&str> {
+        match self.prepared.as_ref() {
+            Some(PreparedInspectionField::Unavailable(message)) => Some(message),
+            Some(PreparedInspectionField::Regular(_))
+            | Some(PreparedInspectionField::Irregular { .. })
+            | None => None,
+        }
+    }
 
     pub fn evaluate(
         &mut self,
@@ -140,6 +149,7 @@ impl FieldInspectionCache {
         options: &ProjectionOptions,
         composition: [f64; 3],
         index: usize,
+        id: u64,
     ) -> InterpolatedResult {
         let Some((grid, field)) = dataset.grids.get(identity.grid_index).and_then(|grid| {
             grid.fields()
@@ -154,6 +164,7 @@ impl FieldInspectionCache {
                 identity,
                 composition,
                 index,
+                id,
                 "selected field no longer exists",
             );
         };
@@ -171,6 +182,7 @@ impl FieldInspectionCache {
         let (grid_name, phase_name, unit, component_names) = metadata(dataset, grid, field);
         let mut result = InterpolatedResult {
             index,
+            id,
             field: identity.clone(),
             grid_name,
             phase_name,
@@ -193,7 +205,6 @@ impl FieldInspectionCache {
         match self.prepared.as_ref().expect("cache prepared with key") {
             PreparedInspectionField::Regular(evaluator) => match evaluator.inspect(composition) {
                 Ok(inspection) => {
-                    result.composition = inspection.composition;
                     result.triangle_index = Some(inspection.triangle_index);
                     result.local_barycentric = Some(inspection.local_barycentric);
                     result.triangle_vertex_indices = inspection.triangle_vertex_indices;
@@ -212,11 +223,6 @@ impl FieldInspectionCache {
             },
             PreparedInspectionField::Irregular { mesh, values } => match mesh.locate(composition) {
                 Ok(location) => {
-                    result.composition = composition_from_location(
-                        mesh,
-                        location.triangle.vertices.map(|vertex| vertex.0),
-                        location.barycentric,
-                    );
                     result.triangle_index = Some(location.triangle.id.0);
                     result.local_barycentric = Some(location.barycentric);
                     result.triangle_vertex_indices =
@@ -363,31 +369,16 @@ fn metadata(
     )
 }
 
-fn composition_from_location(
-    mesh: &IrregularTernaryMesh,
-    vertices: [usize; 3],
-    barycentric: [f64; 3],
-) -> [f64; 3] {
-    let mut composition = [0.0; 3];
-    for (index, weight) in vertices.into_iter().zip(barycentric) {
-        let point = mesh
-            .composition(ternary_contours::IrregularVertexId(index))
-            .expect("located mesh vertices are valid");
-        for component in 0..3 {
-            composition[component] += point[component] * weight;
-        }
-    }
-    composition
-}
-
 fn error_result(
     dataset: &TabulatedTernaryDataset,
     identity: &InspectionFieldIdentity,
     composition: [f64; 3],
     index: usize,
+    id: u64,
     message: &str,
 ) -> InterpolatedResult {
     InterpolatedResult {
+        id,
         index,
         field: identity.clone(),
         grid_name: dataset
@@ -439,8 +430,22 @@ mod tests {
         };
         let point = [0.63, 0.17, 0.20];
         let mut cache = FieldInspectionCache::default();
-        let first = cache.evaluate(&dataset, &identity, &ProjectionOptions::default(), point, 1);
-        let second = cache.evaluate(&dataset, &identity, &ProjectionOptions::default(), point, 1);
+        let first = cache.evaluate(
+            &dataset,
+            &identity,
+            &ProjectionOptions::default(),
+            point,
+            1,
+            1,
+        );
+        let second = cache.evaluate(
+            &dataset,
+            &identity,
+            &ProjectionOptions::default(),
+            point,
+            1,
+            1,
+        );
         let grid = ternary_contours::RegularTernaryGrid::new(10).unwrap();
         let location = grid.locate(point).unwrap();
         let expected = location.triangle.vertices.map(|vertex| vertex.0);
@@ -468,8 +473,22 @@ mod tests {
         };
         let point = [0.20, 0.30, 0.50];
         let mut cache = FieldInspectionCache::default();
-        let first = cache.evaluate(&dataset, &identity, &ProjectionOptions::default(), point, 1);
-        let second = cache.evaluate(&dataset, &identity, &ProjectionOptions::default(), point, 1);
+        let first = cache.evaluate(
+            &dataset,
+            &identity,
+            &ProjectionOptions::default(),
+            point,
+            1,
+            1,
+        );
+        let second = cache.evaluate(
+            &dataset,
+            &identity,
+            &ProjectionOptions::default(),
+            point,
+            1,
+            1,
+        );
         assert_eq!(first.state, InterpolatedResultState::Defined);
         assert_eq!(
             first.triangle_vertex_indices,

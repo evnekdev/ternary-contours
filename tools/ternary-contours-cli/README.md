@@ -107,8 +107,13 @@ reparsed and validated by the same TCT pipeline as the headless commands. A
 malformed reload retains the last valid projection and texture while showing the
 diagnostic in the status area.
 
-Use the toolbar to reload, export SVG/PNG beside the input as
-`<input>.viewer.svg` or `<input>.viewer.png`, and fit/reset the bitmap view.
+Use the toolbar to reload, export SVG/PNG through a native Save dialog, or
+export the calculated line geometry as CSV. Image dialogs suggest
+`<input>-projection.svg` and `<input>-projection.png`; line CSV suggests
+`<input>-lines.csv`. The last export directory is remembered for the viewer
+session. CSV follows the current raw/regularized/overlay path mode and selected
+layer filter, with semantic `A,B,C,T,line_type` columns plus stable path IDs
+and provenance. **Copy lines CSV** uses the same finite-only exporter.
 Scroll to zoom and drag to pan. Those operations crop and scale the shared
 bitmap; they do not modify ternary coordinates. Raw, regularized, and overlay
 modes draw the paths from the cached numerical projections with distinct styles.
