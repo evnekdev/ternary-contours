@@ -1,14 +1,12 @@
 //! Native viewer controls for focused tabular data entry.
 
-use std::path::{Path, PathBuf};
-
 use eframe::egui;
 
 use crate::{
     CompositionNormalization, DatasetEditorState, FieldColumnMapping, FieldKey, FieldReplacement,
     HeaderMode, IrregularPasteMapping, NumericFormat, PastePreview, RegularCompositionPasteMode,
-    RegularPasteMapping, TabulatedGrid, TctSerializeOptions, compositions_tsv,
-    preview_irregular_paste, preview_regular_paste, save_tct_atomic, serialize_tct,
+    RegularPasteMapping, TabulatedGrid, compositions_tsv, preview_irregular_paste,
+    preview_regular_paste,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,11 +28,8 @@ pub struct DataEditorUi {
     pub has_header: bool,
     pub irregular_columns: [usize; 3],
     pub irregular_name: String,
-    pub save_as: String,
     pub confirm_remove: bool,
-    pub confirm_save: bool,
     pub message: Option<String>,
-    pub saved_path: Option<PathBuf>,
     pub phase_remove: Option<usize>,
     pub property_remove: Option<usize>,
     pub resolution_input: String,
@@ -56,11 +51,8 @@ impl Default for DataEditorUi {
             has_header: true,
             irregular_columns: [0, 1, 2],
             irregular_name: "irregular_data".into(),
-            save_as: String::new(),
             confirm_remove: false,
-            confirm_save: false,
             message: None,
-            saved_path: None,
             phase_remove: None,
             property_remove: None,
             resolution_input: String::new(),
@@ -75,8 +67,6 @@ pub fn show(
     ui: &mut egui::Ui,
     editor: &mut DatasetEditorState,
     state: &mut DataEditorUi,
-    input_path: &Path,
-    unsaved: bool,
 ) -> DataEditorAction {
     state.selected_grid = state
         .selected_grid
@@ -103,7 +93,6 @@ pub fn show(
     ui.separator();
     preview_panel(ctx, ui, editor);
     ui.separator();
-    save_panel(ui, editor, state, input_path, unsaved);
     action
 }
 
@@ -1006,57 +995,4 @@ fn preview_panel(ctx: &egui::Context, ui: &mut egui::Ui, editor: &DatasetEditorS
             ui.small(format!("{omitted} additional errors omitted"));
         }
     });
-}
-
-fn save_panel(
-    ui: &mut egui::Ui,
-    editor: &DatasetEditorState,
-    state: &mut DataEditorUi,
-    input_path: &Path,
-    unsaved: bool,
-) {
-    ui.heading("Save and export");
-    ui.horizontal(|ui| {
-        if ui.button("Save").clicked() {
-            if unsaved {
-                state.save_as.clear();
-            } else {
-                state.save_as = input_path.display().to_string();
-            }
-            state.confirm_save = true;
-        }
-        ui.text_edit_singleline(&mut state.save_as);
-        if ui.button("Save As").clicked() {
-            state.confirm_save = true;
-        }
-    });
-    if state.confirm_save {
-        ui.horizontal(|ui| {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Write active dataset through a temporary file?",
-            );
-            if ui.button("Confirm save").clicked() {
-                let result = serialize_tct(&editor.active, &TctSerializeOptions::default())
-                    .map_err(|error| error.to_string())
-                    .and_then(|text| {
-                        save_tct_atomic(&state.save_as, &text).map_err(|error| error.to_string())
-                    });
-                if result.is_ok() {
-                    state.saved_path = Some(PathBuf::from(&state.save_as));
-                }
-                state.message = Some(match result {
-                    Ok(()) => format!("Saved {}", state.save_as),
-                    Err(error) => format!("save failed: {error}"),
-                });
-                state.confirm_save = false;
-            }
-            if ui.button("Cancel").clicked() {
-                state.confirm_save = false;
-            }
-        });
-    }
-    if let Some(message) = &state.message {
-        ui.small(message);
-    }
 }

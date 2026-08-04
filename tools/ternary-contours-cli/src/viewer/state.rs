@@ -184,6 +184,8 @@ pub struct ViewerState {
     pub status: ViewerStatus,
     pub selection: Option<SelectedFeature>,
     pub last_successful_reload: Option<SystemTime>,
+    pub last_dialog_directory: Option<PathBuf>,
+    pub message: Option<String>,
     generation: u64,
 }
 
@@ -217,6 +219,8 @@ impl ViewerState {
             status: ViewerStatus::Idle,
             selection: None,
             last_successful_reload: None,
+            last_dialog_directory: None,
+            message: None,
             generation: 0,
         }
     }
@@ -236,6 +240,14 @@ impl ViewerState {
         state.dirty.projection = false;
         state.status = ViewerStatus::Idle;
         state
+    }
+    pub fn mark_saved(&mut self, path: PathBuf) {
+        self.input_path = path.clone();
+        self.unsaved = false;
+        self.last_dialog_directory = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(PathBuf::from);
     }
     pub fn begin_request(&mut self) -> CalculationRequest {
         self.generation = self.generation.saturating_add(1);
@@ -333,6 +345,19 @@ mod tests {
         )
     }
 
+    #[test]
+    fn mark_saved_updates_path_and_directory_without_touching_projection() {
+        let mut state = ViewerState::new_unsaved(
+            ProjectionOptions::default(),
+            RenderOptions::default(),
+            crate::default_regular_dataset(),
+        );
+        state.mark_saved(PathBuf::from("D:/saved/data.tct"));
+        assert!(!state.unsaved);
+        assert_eq!(state.input_path, PathBuf::from("D:/saved/data.tct"));
+        assert_eq!(state.last_dialog_directory, Some(PathBuf::from("D:/saved")));
+        assert!(state.raw_projection.is_none());
+    }
     #[test]
     fn dirty_flags_separate_projection_from_render_changes() {
         let mut state = state();

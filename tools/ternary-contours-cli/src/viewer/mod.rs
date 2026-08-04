@@ -4,6 +4,7 @@ mod app;
 mod controls;
 mod data_editor;
 mod hit_test;
+mod save;
 mod state;
 mod texture;
 
@@ -13,6 +14,10 @@ use crate::{ProjectionOptions, RenderOptions, default_regular_dataset};
 
 pub use app::LiquidusViewerApp;
 pub use hit_test::{SelectedFeature, ViewerTransform};
+pub use save::{
+    default_dialog_directory, default_filename, ensure_tct_extension, sanitize_title,
+    save_requires_dialog,
+};
 pub use state::{CalculationInput, DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
 
 pub fn launch(
