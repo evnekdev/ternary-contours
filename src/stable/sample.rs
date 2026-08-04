@@ -1,3 +1,5 @@
+#[cfg(feature = "cubic-alpha")]
+use crate::InterpolatedPartialTernaryField;
 use crate::{
     FieldEvaluationError, GridVertexId, InterpolatedTernaryField, LocatedTriangle,
     RegularTernaryGrid,
@@ -16,6 +18,8 @@ use super::{
 
 pub(crate) enum PreparedSourceEvaluator<'a> {
     Regular(InterpolatedTernaryField<'a>),
+    #[cfg(feature = "cubic-alpha")]
+    PartialRegular(InterpolatedPartialTernaryField),
     Evaluator(&'a dyn super::StablePhaseEvaluator),
     #[cfg(feature = "irregular-delaunay")]
     Irregular(InterpolatedIrregularTernaryField<'a>),
@@ -196,6 +200,15 @@ fn prepare_layer<'a>(
             .map_err(|error| {
                 preparation_error(phase, role, StableSourceEvaluationError::Irregular(error))
             })?,
+        #[cfg(feature = "cubic-alpha")]
+        super::StableScalarSource::PartialRegular {
+            field,
+            interpolation,
+        } => InterpolatedPartialTernaryField::new((*field).clone(), interpolation)
+            .map(PreparedSourceEvaluator::PartialRegular)
+            .map_err(|error| {
+                preparation_error(phase, role, StableSourceEvaluationError::Regular(error))
+            })?,
         super::StableScalarSource::Evaluator { evaluator } => {
             PreparedSourceEvaluator::Evaluator(evaluator)
         }
@@ -331,6 +344,29 @@ pub(crate) fn evaluate_sources_at_point(
                     secondary.as_deref_mut(),
                 )?;
             }
+            #[cfg(feature = "cubic-alpha")]
+            SourceGeometryKey::PartialRegular(_, _) => {
+                let first = &layers[group.layers[0]];
+                let grid = match &first.evaluator {
+                    PreparedSourceEvaluator::PartialRegular(evaluator) => evaluator.field().grid(),
+                    _ => unreachable!("geometry group and evaluator kind must agree"),
+                };
+                let location = grid.locate(composition).map_err(|error| {
+                    evaluation_error(
+                        first,
+                        composition,
+                        StableSourceEvaluationError::Regular(error.into()),
+                    )
+                })?;
+                evaluate_partial_regular_group(
+                    layers,
+                    group,
+                    &location,
+                    composition,
+                    heights,
+                    secondary.as_deref_mut(),
+                )?;
+            }
             #[cfg(feature = "irregular-delaunay")]
             SourceGeometryKey::Irregular(mesh) => {
                 let location = match mesh.locate_with_hint(composition, _hint.irregular) {
@@ -378,6 +414,43 @@ pub(crate) fn evaluate_sources_at_point(
     Ok(())
 }
 
+#[cfg(feature = "cubic-alpha")]
+fn evaluate_partial_regular_group(
+    layers: &[PreparedSourceLayer<'_>],
+    group: &SourceGeometryGroup<'_>,
+    location: &LocatedTriangle,
+    composition: [f64; 3],
+    heights: &mut [Option<f64>],
+    mut secondary: Option<&mut [Option<f64>]>,
+) -> Result<(), StableContourError> {
+    for &layer_index in &group.layers {
+        let layer = &layers[layer_index];
+        let evaluator = match &layer.evaluator {
+            PreparedSourceEvaluator::PartialRegular(evaluator) => evaluator,
+            _ => unreachable!("geometry group and evaluator kind must agree"),
+        };
+        let value = evaluator.evaluate_at_location(location).map_err(|error| {
+            evaluation_error(
+                layer,
+                composition,
+                StableSourceEvaluationError::Regular(error),
+            )
+        })?;
+        if let Some(sample) = value {
+            store_value(
+                layer,
+                sample.value,
+                composition,
+                heights,
+                secondary.as_deref_mut(),
+            )?;
+        } else {
+            store_undefined(layer, heights, secondary.as_deref_mut());
+        }
+    }
+    Ok(())
+}
+
 fn evaluate_regular_group(
     layers: &[PreparedSourceLayer<'_>],
     group: &SourceGeometryGroup<'_>,
@@ -418,6 +491,8 @@ fn evaluate_irregular_group(
         let evaluator = match &layer.evaluator {
             PreparedSourceEvaluator::Irregular(evaluator) => evaluator,
             PreparedSourceEvaluator::Regular(_) => unreachable!(),
+            #[cfg(feature = "cubic-alpha")]
+            PreparedSourceEvaluator::PartialRegular(_) => unreachable!(),
             PreparedSourceEvaluator::Evaluator(_) => unreachable!(),
         };
         let value = evaluator.value_at_location(location).map_err(|error| {
@@ -522,6 +597,34 @@ pub(crate) fn evaluate_layer_at_point(
             })?;
             StablePhaseEvaluation::Defined { value }
         }
+        #[cfg(feature = "cubic-alpha")]
+        PreparedSourceEvaluator::PartialRegular(evaluator) => {
+            let location = evaluator
+                .field()
+                .grid()
+                .locate(composition)
+                .map_err(|error| {
+                    evaluation_error(
+                        layer,
+                        composition,
+                        StableSourceEvaluationError::Regular(error.into()),
+                    )
+                })?;
+            match evaluator.evaluate_at_location(&location).map_err(|error| {
+                evaluation_error(
+                    layer,
+                    composition,
+                    StableSourceEvaluationError::Regular(error),
+                )
+            })? {
+                Some(sample) => StablePhaseEvaluation::Defined {
+                    value: sample.value,
+                },
+                None => StablePhaseEvaluation::Undefined {
+                    reason: super::StablePhaseUndefinedReason::OutsidePhaseDomain,
+                },
+            }
+        }
         #[cfg(feature = "irregular-delaunay")]
         PreparedSourceEvaluator::Irregular(evaluator) => {
             let location = match evaluator.field().mesh().locate(composition) {
@@ -576,3 +679,4 @@ pub(crate) const fn role_quantity(role: ScalarRole) -> StableContourQuantity {
 pub(crate) fn dot(values: [f64; 3], barycentric: [f64; 3]) -> f64 {
     values[0] * barycentric[0] + values[1] * barycentric[1] + values[2] * barycentric[2]
 }
+
