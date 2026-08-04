@@ -86,6 +86,7 @@ impl<'a> ContourCubicField<'a> {
             CubicAlphaBuildOptions {
                 method: options.method,
                 boundary_policy: options.boundary_policy,
+                partial_domain_policy: Default::default(),
                 extrapolation: options.extrapolation,
             },
         )?;
@@ -137,3 +138,4 @@ impl<'a> ContourCubicField<'a> {
         })
     }
 }
+
