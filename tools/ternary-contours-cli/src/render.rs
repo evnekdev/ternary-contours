@@ -345,6 +345,26 @@ where
         )?;
     }
     if options.show_legend && options.show_isotherms {
+        let drawn_phases = projection
+            .stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| level.paths.iter().map(|path| path.phase))
+            .collect::<std::collections::BTreeSet<_>>();
+        for phase in &dataset.phases {
+            if drawn_phases.contains(&phase.id) {
+                continue;
+            }
+            let style = phase_style(phase.id, options.line_width);
+            let annotation = chart.draw_series(
+                TernaryPointSeries::new(Vec::<TernaryPoint>::new())
+                    .size(1)
+                    .style(style),
+            )?;
+            annotation
+                .label(phase.name.clone())
+                .legend(move |(x, y)| PathElement::new([(x, y), (x + 24, y)], style));
+        }
         chart
             .configure_series_labels()
             .background_style(WHITE.mix(0.82))

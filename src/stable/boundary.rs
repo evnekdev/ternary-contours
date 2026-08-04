@@ -903,10 +903,11 @@ impl<'a> BinaryScanner<'a> {
             if pair[0].stable_phases.len() > 1 || pair[1].stable_phases.len() > 1 {
                 continue;
             }
-            if let Some(node) =
-                self.refine_transition(&pair[0], &pair[1], left_phase, right_phase)?
-            {
-                invariants.push(node);
+            match self.refine_transition(&pair[0], &pair[1], left_phase, right_phase) {
+                Ok(Some(node)) => invariants.push(node),
+                Ok(None) => {}
+                Err(StableBoundaryError::NoOverlappingStablePhaseDomains { .. }) => {}
+                Err(error) => return Err(error),
             }
         }
 
@@ -2599,7 +2600,7 @@ pub(crate) fn build_stable_boundary_network(
         if pending[pending_index].consumed {
             continue;
         }
-        let mut path = trace_one_univariant(
+        match trace_one_univariant(
             pending_index,
             &mut pending,
             &pending_lookup,
@@ -2611,9 +2612,26 @@ pub(crate) fn build_stable_boundary_network(
             &mut marks,
             options,
             &mut diagnostics,
-        )?;
-        path.id = StableUnivariantId(univariants.len());
-        univariants.push(path);
+        ) {
+            Ok(mut path) => {
+                path.id = StableUnivariantId(univariants.len());
+                univariants.push(path);
+            }
+            Err(StableBoundaryError::MalformedGraphConnectivity { message })
+                if message.contains("terminates away from an invariant node") =>
+            {
+                // A partial source domain can end a pair equality before a stable
+                // invariant. It is not a complete boundary-connected univariant;
+                // discard that pair pending ends rather than rejecting all contours.
+                let phases = pending[pending_index].key.phases;
+                for end in &mut pending {
+                    if end.key.phases == phases {
+                        end.consumed = true;
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
     }
     let unresolved = pending.iter().filter(|end| !end.consumed).count();
     if unresolved != 0 {
