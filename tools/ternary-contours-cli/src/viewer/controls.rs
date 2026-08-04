@@ -579,3 +579,4 @@ mod tests {
         assert_eq!(options.extrapolation, BinaryExtrapolation::Kohler);
     }
 }
+
