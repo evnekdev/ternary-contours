@@ -17,7 +17,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     verbose: bool,
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -46,7 +46,7 @@ enum Command {
     },
     /// Open the optional native liquidus inspection viewer.
     View {
-        input: PathBuf,
+        input: Option<PathBuf>,
         #[command(flatten)]
         options: PlotOptions,
     },
@@ -115,7 +115,7 @@ impl From<TemplateStyleArg> for IrregularTemplateStyle {
     }
 }
 /// Options shared by static plotting and the interactive viewer.
-#[derive(Args, Clone)]
+#[derive(Args, Clone, Default)]
 struct PlotOptions {
     #[arg(long)]
     levels: Option<String>,
@@ -215,19 +215,20 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
     match cli.command {
-        Command::Inspect { input } => inspect(input),
-        Command::Validate {
+        Some(Command::Inspect { input }) => inspect(input),
+        Some(Command::Validate {
             input,
             warnings_as_errors,
-        } => validate(input, warnings_as_errors),
-        Command::Plot {
+        }) => validate(input, warnings_as_errors),
+        Some(Command::Plot {
             input,
             output,
             options,
-        } => plot(input, output, options),
-        Command::Compositions(args) => compositions(args),
-        Command::Template { kind } => template(kind),
-        Command::View { input, options } => view(input, options),
+        }) => plot(input, output, options),
+        Some(Command::Compositions(args)) => compositions(args),
+        Some(Command::Template { kind }) => template(kind),
+        Some(Command::View { input, options }) => view(input, options),
+        None => view(None, PlotOptions::default()),
     }
 }
 
@@ -374,7 +375,7 @@ fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<d
     Ok(())
 }
 #[cfg(feature = "viewer")]
-fn view(input: PathBuf, options: PlotOptions) -> Result<(), Box<dyn Error>> {
+fn view(input: Option<PathBuf>, options: PlotOptions) -> Result<(), Box<dyn Error>> {
     ternary_contours_cli::viewer::launch(
         input,
         options.projection_options()?,
@@ -383,6 +384,71 @@ fn view(input: PathBuf, options: PlotOptions) -> Result<(), Box<dyn Error>> {
 }
 
 #[cfg(not(feature = "viewer"))]
-fn view(_input: PathBuf, _options: PlotOptions) -> Result<(), Box<dyn Error>> {
+fn view(_input: Option<PathBuf>, _options: PlotOptions) -> Result<(), Box<dyn Error>> {
     Err("the `view` command requires the optional `viewer` feature; rerun with `cargo run -p ternary-contours-cli --features viewer -- view <input.tct>`".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_argument_routes_to_default_view_request() {
+        let cli = Cli::try_parse_from(["ternary-contours-cli"]).unwrap();
+        assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn view_input_is_optional_but_file_backed_view_remains_supported() {
+        let no_file = Cli::try_parse_from(["ternary-contours-cli", "view"]).unwrap();
+        assert!(matches!(
+            no_file.command,
+            Some(Command::View { input: None, .. })
+        ));
+        let with_file =
+            Cli::try_parse_from(["ternary-contours-cli", "view", "existing.tct"]).unwrap();
+        assert!(matches!(
+            with_file.command,
+            Some(Command::View { input: Some(path), .. }) if path == std::path::Path::new("existing.tct")
+        ));
+    }
+
+    #[test]
+    fn headless_subcommands_remain_compatible() {
+        for args in [
+            vec!["ternary-contours-cli", "inspect", "file.tct"],
+            vec!["ternary-contours-cli", "validate", "file.tct"],
+            vec![
+                "ternary-contours-cli",
+                "plot",
+                "file.tct",
+                "--output",
+                "plot.svg",
+            ],
+            vec![
+                "ternary-contours-cli",
+                "compositions",
+                "--subdivisions",
+                "2",
+                "--components",
+                "A,B,C",
+            ],
+            vec![
+                "ternary-contours-cli",
+                "template",
+                "regular",
+                "--subdivisions",
+                "2",
+                "--components",
+                "A,B,C",
+                "--fields",
+                "Phase1.T",
+            ],
+        ] {
+            assert!(
+                Cli::try_parse_from(args.clone()).is_ok(),
+                "failed to parse {args:?}"
+            );
+        }
+    }
 }

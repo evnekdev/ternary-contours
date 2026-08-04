@@ -9,21 +9,24 @@ mod texture;
 
 use std::{error::Error, path::PathBuf};
 
-use crate::{ProjectionOptions, RenderOptions};
+use crate::{ProjectionOptions, RenderOptions, default_regular_dataset};
 
 pub use app::LiquidusViewerApp;
 pub use hit_test::{SelectedFeature, ViewerTransform};
 pub use state::{CalculationInput, DirtyFlags, PathDisplayMode, ViewerState, ViewerStatus};
 
 pub fn launch(
-    input_path: PathBuf,
+    input_path: Option<PathBuf>,
     calculation_options: ProjectionOptions,
     render_options: RenderOptions,
 ) -> Result<(), Box<dyn Error>> {
-    let title = render_options
-        .title
-        .clone()
-        .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
+    let title = render_options.title.clone().unwrap_or_else(|| {
+        if input_path.is_none() {
+            "Untitled — unsaved".into()
+        } else {
+            "Ternary contours liquidus viewer".into()
+        }
+    });
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([render_options.width as f32, render_options.height as f32])
@@ -35,11 +38,16 @@ pub fn launch(
         &title,
         native_options,
         Box::new(move |_| {
-            Ok(Box::new(LiquidusViewerApp::new(
-                input_path,
-                calculation_options,
-                render_options,
-            )))
+            Ok(Box::new(match input_path {
+                Some(input_path) => {
+                    LiquidusViewerApp::new(input_path, calculation_options, render_options)
+                }
+                None => LiquidusViewerApp::new_default(
+                    calculation_options,
+                    render_options,
+                    default_regular_dataset(),
+                ),
+            }))
         }),
     )?;
     Ok(())

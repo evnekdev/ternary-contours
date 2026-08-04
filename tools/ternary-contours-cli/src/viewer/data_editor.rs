@@ -1,6 +1,6 @@
 //! Native viewer controls for focused tabular data entry.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use eframe::egui;
 
@@ -34,6 +34,7 @@ pub struct DataEditorUi {
     pub confirm_remove: bool,
     pub confirm_save: bool,
     pub message: Option<String>,
+    pub saved_path: Option<PathBuf>,
 }
 
 impl Default for DataEditorUi {
@@ -54,6 +55,7 @@ impl Default for DataEditorUi {
             confirm_remove: false,
             confirm_save: false,
             message: None,
+            saved_path: None,
         }
     }
 }
@@ -64,6 +66,7 @@ pub fn show(
     editor: &mut DatasetEditorState,
     state: &mut DataEditorUi,
     input_path: &Path,
+    unsaved: bool,
 ) -> DataEditorAction {
     state.selected_grid = state
         .selected_grid
@@ -86,7 +89,7 @@ pub fn show(
     ui.separator();
     preview_panel(ctx, ui, editor);
     ui.separator();
-    save_panel(ui, editor, state, input_path);
+    save_panel(ui, editor, state, input_path, unsaved);
     action
 }
 
@@ -805,11 +808,16 @@ fn save_panel(
     editor: &DatasetEditorState,
     state: &mut DataEditorUi,
     input_path: &Path,
+    unsaved: bool,
 ) {
     ui.heading("Save and export");
     ui.horizontal(|ui| {
         if ui.button("Save").clicked() {
-            state.save_as = input_path.display().to_string();
+            if unsaved {
+                state.save_as.clear();
+            } else {
+                state.save_as = input_path.display().to_string();
+            }
             state.confirm_save = true;
         }
         ui.text_edit_singleline(&mut state.save_as);
@@ -829,6 +837,9 @@ fn save_panel(
                     .and_then(|text| {
                         save_tct_atomic(&state.save_as, &text).map_err(|error| error.to_string())
                     });
+                if result.is_ok() {
+                    state.saved_path = Some(PathBuf::from(&state.save_as));
+                }
                 state.message = Some(match result {
                     Ok(()) => format!("Saved {}", state.save_as),
                     Err(error) => format!("save failed: {error}"),

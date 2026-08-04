@@ -710,7 +710,7 @@ fn parse_rows(
     headers: &[String],
     fields: &[FieldColumn],
     component_indexes: [Option<usize>; 3],
-    properties: &[PropertyDefinition],
+    _properties: &[PropertyDefinition],
     missing_tokens: &[String],
 ) -> Result<ParsedRows, TctError> {
     let mut compositions = Vec::with_capacity(builder.rows.len());
@@ -743,19 +743,7 @@ fn parse_rows(
         };
         for (field_index, field) in fields.iter().enumerate() {
             let token = row[field.index].trim();
-            let property = properties
-                .iter()
-                .find(|property| property.name == field.property)
-                .expect("field property validated");
             let value = if missing_tokens.iter().any(|missing| missing == token) {
-                if property.required {
-                    return Err(builder
-                        .error(
-                            *line,
-                            format!("required property `{}` is missing", property.name),
-                        )
-                        .with_column(&field.header));
-                }
                 None
             } else {
                 if token.is_empty() {
