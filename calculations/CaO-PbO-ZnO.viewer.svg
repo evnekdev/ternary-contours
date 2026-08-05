@@ -1,0 +1,72 @@
+<svg width="1200" height="950" viewBox="0 0 1200 950" xmlns="http://www.w3.org/2000/svg">
+<rect x="0" y="0" width="1200" height="950" opacity="1" fill="#FFFFFF" stroke="none"/>
+<text x="600" y="5" dy="0.76em" text-anchor="middle" font-family="sans-serif" font-size="19.35483870967742" opacity="1" fill="#000000" font-weight="bold">
+CaO-PbO-ZnO liquidus
+</text>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="152,833 1046,833 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="202,747 996,747 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="251,661 947,661 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="301,575 897,575 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="351,489 847,489 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="400,403 798,403 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="450,317 748,317 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="500,231 698,231 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="549,145 649,145 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="549,145 996,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="500,231 897,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="450,317 798,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="400,403 698,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="351,489 599,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="301,575 500,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="251,661 400,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="202,747 301,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="152,833 202,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="649,145 202,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="698,231 301,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="748,317 400,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="798,403 500,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="847,489 599,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="897,575 698,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="947,661 798,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="996,747 897,919 "/>
+<polyline fill="none" opacity="1" stroke="#B9BEC6" stroke-width="1" points="1046,833 996,919 "/>
+<polygon opacity="1" fill="#000000" points="101,920 1098,920 1094,918 105,918 "/>
+<polygon opacity="1" fill="#000000" points="1098,920 599,57 599,61 1094,918 "/>
+<polygon opacity="1" fill="#000000" points="599,57 101,920 105,918 599,61 "/>
+<text x="599" y="43" dy="-0.5ex" text-anchor="middle" font-family="sans-serif" font-size="22.580645161290324" opacity="1" fill="#000000" font-weight="bold">
+CaO
+</text>
+<text x="89" y="927" dy="0.76em" text-anchor="end" font-family="sans-serif" font-size="22.580645161290324" opacity="1" fill="#000000" font-weight="bold">
+PbO
+</text>
+<text x="1110" y="927" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="22.580645161290324" opacity="1" fill="#000000" font-weight="bold">
+ZnO
+</text>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="176,793 228,793 277,789 324,787 337,785 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="232,919 270,866 297,833 329,795 337,785 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="216,723 283,717 322,711 377,706 428,700 470,695 535,687 562,684 642,672 655,672 715,661 745,656 752,655 834,639 863,634 869,634 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="478,919 492,906 525,876 558,848 575,833 627,797 694,747 697,746 701,743 771,702 827,661 843,653 859,641 869,634 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="228,702 272,698 335,689 365,686 441,677 458,675 548,663 550,663 560,661 641,649 658,646 732,633 768,627 821,617 879,607 914,605 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="580,919 593,909 617,888 660,854 684,833 730,803 793,755 799,751 803,747 871,703 914,661 937,646 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="240,681 262,679 347,667 354,667 394,661 445,653 456,652 537,640 565,635 628,625 674,618 718,610 784,599 809,594 895,579 899,579 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="702,919 768,868 806,833 836,813 881,775 903,758 912,747 968,698 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="252,660 341,644 363,641 432,630 472,624 523,616 581,607 614,602 690,590 705,587 774,575 795,571 800,571 885,555 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="843,919 879,889 935,833 943,827 964,803 1004,761 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="376,446 419,435 490,420 507,416 578,403 597,399 602,398 687,384 710,384 784,380 "/>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="447,322 452,321 468,317 539,299 562,295 629,284 668,283 727,282 "/>
+<polygon opacity="1" fill="#E87D1C" points="921,609 929,617 921,625 913,617 "/>
+<rect x="1022" y="460" width="70" height="59" opacity="0.82" fill="#FFFFFF" stroke="none"/>
+<rect x="1022" y="460" width="70" height="59" opacity="1" fill="none" stroke="#000000"/>
+<text x="1062" y="470" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">
+Lime
+</text>
+<text x="1062" y="485" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">
+ZnO
+</text>
+<text x="1062" y="500" dy="0.76em" text-anchor="start" font-family="sans-serif" font-size="9.67741935483871" opacity="1" fill="#000000">
+PbO
+</text>
+<polyline fill="none" opacity="1" stroke="#D62728" stroke-width="3" points="1032,474 1056,474 "/>
+<polyline fill="none" opacity="1" stroke="#2CA02C" stroke-width="3" points="1032,489 1056,489 "/>
+<polyline fill="none" opacity="1" stroke="#9467BD" stroke-width="3" points="1032,504 1056,504 "/>
+</svg>

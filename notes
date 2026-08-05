@@ -1,0 +1,23 @@
+# Notes
+
+ ## Window resizing problems persist.
+  - Dragging the open window leads to glitches, random size changes, over-stretching.
+  - When in full mode, double clicking on the frame make the window shift down and become even wider (does not fit the screen, stretches over both screens).
+  
+ ## Redesign of the GUI
+  I want the GUI of the program look like a more conventional. Please use Qt for Rust instead of egui.
+  
+  - I want a traditional main menu with the following items:
+    - "File" (New, Open, Save, Save As, Export (PNG, SVG, CSV), Settings, Quit). Feel free to add, if needed.
+	- "Grid" (I will need your help here, probably duplicates of the corresponding view commands)
+	- "View" (tick marks for "Plot" and "Grid").
+	- "About" (fill in the corresponding info there)
+	
+  - There has to be two main tabs in the main window: "Data" and "Viewer".
+  - In "Data", there are two subwindows, the left one is a standard tree view representing a file structure. See the description later.
+  - In "Viewer", everything that is now under "Plot", "Grid inspection" and interpolation, united together. Grid inspection and line plottings should be two layers in the same viewer, where you can toggle them on and off. The table with interpolated values should be below because the entries are wide and don't fit for a right-oriented pane.
+  - Make sure the graphics in the Viewer is better - right now it is not good. You can try using vector graphics directly in Qt, if it is possible. This has to be a separate investigation/milestone if needed. The view should not look like a bad quality image.
+  - For all changes in fields, instead of "apply" buttons, make sure the changes are applied when a value is entered and "Enter" is hit. 
+  - The left subframe of "Data" contains a tree view of objects in a project. It can have nodes like "Title", "A corner", "B corner", "C corner", then "Phases", "Properties" (Temperature is always there), then "Grids". Each grid must have a list of phase ids + names as children + the functionality to add/modify/remove. The type of new grid can be chosen when adding it - regular or irregular. Use different icons for them. On the right, show a grid viewer. Clicking on a grid, makes the right part of "Data" tab show a full blown cell editor to the right. Compositions + properties should be all in one table; recalculated values are pasted in the same table; for regular grids, make compositions immutable (greyed out, selectable and copyable, but not replaceable). For irregular grids, everything is modifiable.
+  - "Diagnostics" can be just a string at the bottom footer (like status in MS Word).
+  
