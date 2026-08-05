@@ -87,6 +87,7 @@ TcqtStatus tcqt_set_irregular_composition(std::uint32_t grid_index, std::uint32_
 TcqtStatus tcqt_undo();
 TcqtStatus tcqt_redo();
 TcqtStatus tcqt_set_viewer_calculation_options(const TcqtViewerCalculationOptions* options);
+TcqtStatus tcqt_set_numerical_trace(std::uint32_t level, const char* destination);
 TcqtStatus tcqt_viewer_calculation_options(TcqtViewerCalculationOptions* output);
 TcqtStatus tcqt_viewer_calculation_state(TcqtViewerCalculationState* output);
 TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t expected_options_revision, std::uint64_t request_id);

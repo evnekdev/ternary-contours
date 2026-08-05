@@ -1,6 +1,11 @@
 use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy};
+#[cfg(feature = "trace")]
+use ternary_contours::{
+    NumericalTraceConfig, NumericalTraceEventKind, NumericalTraceLevel, TraceBinaryBoundary,
+};
 use ternary_contours_cli::{
     IrregularTemplateStyle, NumericFormat, OutputFormat, ProjectionOptions, RenderOptions,
     TabulatedGrid, calculate_projection, compositions_tsv, irregular_template, parse_components,
@@ -43,6 +48,12 @@ enum Command {
     Template {
         #[command(subcommand)]
         kind: TemplateCommand,
+    },
+    /// Produce an opt-in numerical projection trace (requires `--features trace`).
+    TraceProjection(TraceProjectionArgs),
+    /// Analyze a numerical trace JSON Lines file (requires `--features trace`).
+    AnalyzeTrace {
+        input: PathBuf,
     },
     /// Open the optional native liquidus inspection viewer.
     View {
@@ -179,6 +190,94 @@ impl PlotOptions {
     }
 }
 
+#[derive(Args)]
+struct TraceProjectionArgs {
+    input: PathBuf,
+    #[arg(short, long)]
+    output: PathBuf,
+    #[arg(long, value_enum, default_value_t = TraceLevelArg::Decisions)]
+    level: TraceLevelArg,
+    #[arg(long, default_value_t = 500_000)]
+    max_events: usize,
+    #[arg(long, value_enum)]
+    boundary: Option<TraceBoundaryArg>,
+    #[arg(long)]
+    phase: Option<u32>,
+    #[arg(long)]
+    phase_pair: Option<String>,
+    #[arg(long)]
+    triangle: Option<usize>,
+    #[arg(long)]
+    event: Option<String>,
+    #[arg(long)]
+    levels: Option<String>,
+    #[arg(long)]
+    sampling_subdivisions: Option<usize>,
+    #[arg(long)]
+    regularize: bool,
+    #[arg(long)]
+    regularization_spacing: Option<f64>,
+    #[arg(long, value_enum, default_value_t = SourceInterpolationArg::Linear)]
+    source_interpolation: SourceInterpolationArg,
+    #[arg(long, value_enum, default_value_t = CubicMethodArg::Steffen)]
+    cubic_method: CubicMethodArg,
+    #[arg(long, value_enum, default_value_t = PartialDomainArg::OneSidedThenLinear)]
+    partial_domain_policy: PartialDomainArg,
+    #[arg(long, value_enum, default_value_t = ContinuationArg::Muggianu)]
+    continuation: ContinuationArg,
+    #[arg(long)]
+    automatic_range: bool,
+    #[arg(long)]
+    tmin: Option<f64>,
+    #[arg(long)]
+    tmax: Option<f64>,
+    #[arg(long)]
+    step: Option<f64>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TraceLevelArg {
+    Off,
+    Summary,
+    Decisions,
+    Iterations,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum TraceBoundaryArg {
+    Ab,
+    Bc,
+    Ca,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum SourceInterpolationArg {
+    Linear,
+    CubicAlpha,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum CubicMethodArg {
+    Akima,
+    Makima,
+    Pchip,
+    Steffen,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum PartialDomainArg {
+    StrictCubic,
+    OneSidedCubic,
+    OneSidedThenLinear,
+    LinearNearBoundaries,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ContinuationArg {
+    RawBarycentric,
+    Muggianu,
+    Kohler,
+}
 #[derive(Clone, Copy, ValueEnum)]
 enum FormatArg {
     Svg,
@@ -227,6 +326,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         }) => plot(input, output, options),
         Some(Command::Compositions(args)) => compositions(args),
         Some(Command::Template { kind }) => template(kind),
+        Some(Command::TraceProjection(args)) => trace_projection(args),
+        Some(Command::AnalyzeTrace { input }) => analyze_trace_command(input),
         Some(Command::View { input, options }) => view(input, options),
         None => view(None, PlotOptions::default()),
     }
@@ -373,6 +474,230 @@ fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<d
         print!("{content}");
     }
     Ok(())
+}
+#[cfg(feature = "trace")]
+fn trace_projection(args: TraceProjectionArgs) -> Result<(), Box<dyn Error>> {
+    let input_content_hash = trace_input_hash(&args.input)?;
+    let dataset = parse_path(&args.input)?;
+    let options = trace_projection_options(&args)?;
+    let mut sink = ternary_contours_cli::JsonLinesTraceSink::create(
+        &args.output,
+        NumericalTraceConfig {
+            level: args.level.into(),
+            maximum_events: args.max_events,
+            event_filter: args.event.as_deref().map(parse_trace_event).transpose()?,
+            boundary_filter: args.boundary.map(Into::into),
+            phase_filter: args.phase,
+            phase_pair_filter: args
+                .phase_pair
+                .as_deref()
+                .map(parse_phase_pair)
+                .transpose()?,
+            triangle_filter: args.triangle,
+            composition_region: None,
+        },
+    )?;
+    let context = ternary_contours_cli::NumericalTraceRunContext {
+        input_identifier: Some(args.input.display().to_string()),
+        input_content_hash: Some(input_content_hash),
+        ..ternary_contours_cli::NumericalTraceRunContext::default()
+    };
+    let projection = ternary_contours_cli::calculate_projection_with_trace_context(
+        &dataset, &options, &mut sink, &context,
+    );
+    let status = sink.finish();
+    match projection {
+        Ok(projection) => {
+            println!(
+                "Trace written to {}\nEvents: {}\nTruncated: {}\nProjection: {} invariants, {} univariants, {} isotherm paths",
+                status.path.display(),
+                status.events_written,
+                if status.truncated { "yes" } else { "no" },
+                projection.diagnostics.invariant_count,
+                projection.diagnostics.univariant_count,
+                projection.diagnostics.contour_path_count,
+            );
+            if let Some(error) = status.first_error {
+                return Err(format!(
+                    "projection succeeded but trace output failed for {}: {error}",
+                    status.path.display()
+                )
+                .into());
+            }
+            Ok(())
+        }
+        Err(error) => {
+            if let Some(output_error) = status.first_error {
+                eprintln!(
+                    "trace output also failed for {}: {output_error}",
+                    status.path.display()
+                );
+            }
+            Err(error.into())
+        }
+    }
+}
+
+#[cfg(not(feature = "trace"))]
+fn trace_projection(_args: TraceProjectionArgs) -> Result<(), Box<dyn Error>> {
+    Err("trace-projection requires `--features trace`".into())
+}
+
+#[cfg(feature = "trace")]
+fn analyze_trace_command(input: PathBuf) -> Result<(), Box<dyn Error>> {
+    let analysis = ternary_contours_cli::analyze_trace(&input)
+        .map_err(|error| format!("could not analyze {}: {error}", input.display()))?;
+    println!(
+        "Schema: {:?}\nEvents: {}",
+        analysis.schema_versions, analysis.event_count
+    );
+    println!(
+        "Binary transitions/scans: {}",
+        analysis.binary_boundaries_started
+    );
+    println!(
+        "Confirmed invariants: {} binary, {} ternary",
+        analysis.binary_invariants, analysis.interior_invariants
+    );
+    println!("Completed univariants: {}", analysis.univariants_completed);
+    println!("Completed contour paths: {}", analysis.contours_completed);
+    for warning in &analysis.warnings {
+        println!("warning: {warning}");
+    }
+    if analysis.is_consistent() {
+        Ok(())
+    } else {
+        Err("trace has structural warnings or is incomplete".into())
+    }
+}
+
+#[cfg(not(feature = "trace"))]
+fn analyze_trace_command(_input: PathBuf) -> Result<(), Box<dyn Error>> {
+    Err("analyze-trace requires `--features trace`".into())
+}
+
+#[cfg(feature = "trace")]
+fn trace_input_hash(path: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    let bytes = std::fs::read(path)?;
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    Ok(format!("fnv1a64:{hash:016x}"))
+}
+
+#[cfg(feature = "trace")]
+fn trace_projection_options(
+    args: &TraceProjectionArgs,
+) -> Result<ProjectionOptions, Box<dyn Error>> {
+    if args.levels.is_some() && (args.tmin.is_some() || args.tmax.is_some()) {
+        return Err("--levels cannot be combined with --tmin/--tmax".into());
+    }
+    let mut options = ProjectionOptions {
+        levels: args
+            .levels
+            .as_deref()
+            .map(parse_level_spec)
+            .transpose()?
+            .unwrap_or_default(),
+        sampling_subdivisions: args.sampling_subdivisions,
+        regularize: args.regularize,
+        regularization_spacing: args.regularization_spacing,
+        source_interpolation: match args.source_interpolation {
+            SourceInterpolationArg::Linear => ternary_contours_cli::SourceInterpolation::Linear,
+            SourceInterpolationArg::CubicAlpha => {
+                ternary_contours_cli::SourceInterpolation::CubicAlpha {
+                    method: args.cubic_method.into(),
+                    continuation: args.continuation.into(),
+                }
+            }
+        },
+        partial_domain_policy: args.partial_domain_policy.into(),
+        ..ProjectionOptions::default()
+    };
+    if let (Some(minimum), Some(maximum)) = (args.tmin, args.tmax) {
+        let step = args.step.unwrap_or(100.0);
+        options.levels = ternary_contours_cli::automatic_iso_levels(minimum, maximum, step)?;
+    } else if args.tmin.is_some() || args.tmax.is_some() {
+        return Err("--tmin and --tmax must be supplied together".into());
+    } else if args.automatic_range {
+        options.automatic_level_step = Some(args.step.unwrap_or(100.0));
+    } else if args.step.is_some() {
+        return Err("--step requires --automatic-range or --tmin with --tmax".into());
+    }
+    Ok(options)
+}
+
+#[cfg(feature = "trace")]
+fn parse_phase_pair(input: &str) -> Result<[u32; 2], Box<dyn Error>> {
+    let mut values = input.split(',').map(str::trim).map(str::parse::<u32>);
+    let first = values.next().ok_or("--phase-pair must be ID,ID")??;
+    let second = values.next().ok_or("--phase-pair must be ID,ID")??;
+    if values.next().is_some() || first == second {
+        return Err("--phase-pair must contain two distinct integer IDs".into());
+    }
+    Ok([first.min(second), first.max(second)])
+}
+
+#[cfg(feature = "trace")]
+fn parse_trace_event(input: &str) -> Result<NumericalTraceEventKind, Box<dyn Error>> {
+    serde_json::from_str(&format!("\"{}\"", input.trim().to_ascii_lowercase())).map_err(|_| {
+        format!("unsupported trace event `{input}`; use a documented snake_case event name").into()
+    })
+}
+
+#[cfg(feature = "trace")]
+impl From<TraceLevelArg> for NumericalTraceLevel {
+    fn from(value: TraceLevelArg) -> Self {
+        match value {
+            TraceLevelArg::Off => Self::Off,
+            TraceLevelArg::Summary => Self::Summary,
+            TraceLevelArg::Decisions => Self::Decisions,
+            TraceLevelArg::Iterations => Self::Iterations,
+        }
+    }
+}
+
+#[cfg(feature = "trace")]
+impl From<TraceBoundaryArg> for TraceBinaryBoundary {
+    fn from(value: TraceBoundaryArg) -> Self {
+        match value {
+            TraceBoundaryArg::Ab => Self::Ab,
+            TraceBoundaryArg::Bc => Self::Bc,
+            TraceBoundaryArg::Ca => Self::Ca,
+        }
+    }
+}
+
+impl From<CubicMethodArg> for CubicAlphaMethod {
+    fn from(value: CubicMethodArg) -> Self {
+        match value {
+            CubicMethodArg::Akima => Self::Akima,
+            CubicMethodArg::Makima => Self::Makima,
+            CubicMethodArg::Pchip => Self::Pchip,
+            CubicMethodArg::Steffen => Self::Steffen,
+        }
+    }
+}
+
+impl From<PartialDomainArg> for CubicPartialDomainPolicy {
+    fn from(value: PartialDomainArg) -> Self {
+        match value {
+            PartialDomainArg::StrictCubic => Self::Strict,
+            PartialDomainArg::OneSidedCubic => Self::OneSided,
+            PartialDomainArg::OneSidedThenLinear => Self::OneSidedThenLinear,
+            PartialDomainArg::LinearNearBoundaries => Self::LinearNearDomain,
+        }
+    }
+}
+
+impl From<ContinuationArg> for BinaryExtrapolation {
+    fn from(value: ContinuationArg) -> Self {
+        match value {
+            ContinuationArg::RawBarycentric => Self::RawBarycentric,
+            ContinuationArg::Muggianu => Self::Muggianu,
+            ContinuationArg::Kohler => Self::Kohler,
+        }
+    }
 }
 #[cfg(feature = "viewer")]
 fn view(input: Option<PathBuf>, options: PlotOptions) -> Result<(), Box<dyn Error>> {

@@ -2,11 +2,14 @@ use std::collections::BTreeMap;
 
 use ternary_contours::{
     BinaryExtrapolation, CubicAlphaBuildOptions, CubicAlphaMethod, CubicBoundaryPolicy,
-    CubicPartialDomainPolicy, FieldInterpolation, IrregularTernaryMesh, PathRegularizationOptions,
+    CubicPartialDomainPolicy, FieldInterpolation, IrregularTernaryMesh, NoopTraceSink,
+    NumericalTraceConfig, NumericalTraceEventKind, NumericalTraceLevel, NumericalTracePayload,
+    NumericalTraceSession, NumericalTraceSink, NumericalTraceStage, PathRegularizationOptions,
     PreparedStablePhaseEnsemble, RegularTernaryGrid, RegularTernaryScalarField,
     StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity, StableContourSet,
     StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
-    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
+    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, TraceCounts, TraceDecision,
+    TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
 };
 
 use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
@@ -255,11 +258,89 @@ pub(crate) fn undefined_reason(value: &TabulatedValue) -> StablePhaseUndefinedRe
     }
 }
 
+/// Request metadata included in a trace envelope without participating in
+/// numerical option equality, caching, or document state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct NumericalTraceRunContext {
+    pub input_identifier: Option<String>,
+    pub input_content_hash: Option<String>,
+    pub dataset_revision: Option<u64>,
+    pub options_revision: Option<u64>,
+    pub request_id: Option<u64>,
+}
+
 /// Convert parsed temperature fields to explicit partial-domain evaluators, then
 /// calculate stable isotherms and the boundary-connected univariant network.
 pub fn calculate_projection(
     dataset: &TabulatedTernaryDataset,
     options: &ProjectionOptions,
+) -> Result<LiquidusProjection, ProjectionError> {
+    let mut sink = NoopTraceSink;
+    calculate_projection_with_trace(dataset, options, &mut sink)
+}
+
+/// Calculate a liquidus projection while emitting optional deterministic,
+/// observation-only numerical trace events.
+pub fn calculate_projection_with_trace(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+) -> Result<LiquidusProjection, ProjectionError> {
+    calculate_projection_with_trace_context(
+        dataset,
+        options,
+        sink,
+        &NumericalTraceRunContext::default(),
+    )
+}
+
+/// Calculate a projection with deterministic trace events and request-local
+/// metadata supplied by the caller. The context is observation-only.
+pub fn calculate_projection_with_trace_context(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+    context: &NumericalTraceRunContext,
+) -> Result<LiquidusProjection, ProjectionError> {
+    let mut trace = NumericalTraceSession::new(sink);
+    if trace.is_enabled(NumericalTraceLevel::Summary) {
+        trace.emit(
+            NumericalTraceLevel::Summary,
+            NumericalTraceStage::Run,
+            NumericalTracePayload::RunStarted(trace_run_started(
+                dataset,
+                options,
+                trace.config(),
+                context,
+            )),
+        );
+    }
+    let result = calculate_projection_with_trace_session(dataset, options, &mut trace);
+    match &result {
+        Ok(projection) if trace.is_configured(NumericalTraceLevel::Summary) => {
+            trace.emit_terminal(NumericalTracePayload::RunCompleted(TraceRunCompleted {
+                invariant_count: projection.diagnostics.invariant_count,
+                univariant_count: projection.diagnostics.univariant_count,
+                contour_path_count: projection.diagnostics.contour_path_count,
+                trace_events: trace.emitted(),
+                truncated: trace.is_truncated(),
+            }));
+        }
+        Err(error) if trace.is_configured(NumericalTraceLevel::Summary) => {
+            trace.emit_terminal(NumericalTracePayload::RunFailed(TraceRunFailed {
+                error_kind: NumericalTraceEventKind::InvalidOptions,
+                message: error.to_string(),
+            }));
+        }
+        _ => {}
+    }
+    result
+}
+
+pub(crate) fn calculate_projection_with_trace_session(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    trace: &mut NumericalTraceSession<'_>,
 ) -> Result<LiquidusProjection, ProjectionError> {
     let mut fields = BTreeMap::<StablePhaseId, PhaseSourceModel>::new();
     let mut regular_grid_count = 0;
@@ -284,6 +365,34 @@ pub fn calculate_projection(
                 .filter_map(TabulatedValue::calculated_value)
                 .collect::<Vec<_>>();
             let counts = tabulated_state_counts(&field.values);
+            if trace.is_enabled(NumericalTraceLevel::Decisions) {
+                trace.emit(
+                    NumericalTraceLevel::Decisions,
+                    NumericalTraceStage::SourcePreparation,
+                    decision(
+                        NumericalTraceEventKind::PhaseFieldLocated,
+                        TraceDecision {
+                            phase: Some(field.phase_id.0),
+                            counts: Some(TraceCounts {
+                                calculated: counts[0],
+                                non_existing: counts[1],
+                                cut_off: counts[2],
+                                missing: counts[3],
+                            }),
+                            reason: Some(format!(
+                                "grid={}, property={}, geometry={}",
+                                grid.name(),
+                                field.property,
+                                match grid {
+                                    TabulatedGrid::Regular(_) => "regular",
+                                    TabulatedGrid::Irregular(_) => "irregular",
+                                },
+                            )),
+                            ..TraceDecision::default()
+                        },
+                    ),
+                );
+            }
             let coverage = format!(
                 "grid {} phase {}.{} (calculated {}, non-existing {}, cut-off {}, missing {})",
                 grid.name(),
@@ -501,13 +610,14 @@ pub fn calculate_projection(
             "regularization spacing must be finite and positive".into(),
         ));
     }
-    let prepared = PreparedStablePhaseEnsemble::new(
+    let prepared = PreparedStablePhaseEnsemble::new_with_trace_session(
         sources,
         StableContourQuantity::Height,
         StableGridOptions {
             subdivisions: sampling_subdivisions,
             ..StableGridOptions::default()
         },
+        trace,
     )
     .map_err(|error| ProjectionError::Preparation {
         error,
@@ -515,14 +625,17 @@ pub fn calculate_projection(
     })?;
     // Stable topology is independent of requested isotherm levels. Build it
     // first so automatic Viewer ranges use authoritative invariant values.
-    let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
-        regularization: options.regularize.then_some(PathRegularizationOptions {
-            spacing: options.regularization_spacing.unwrap_or(0.02),
-            protected_endpoint_distance: 0.0,
-            ..PathRegularizationOptions::default()
-        }),
-        ..StableBoundaryOptions::default()
-    })?;
+    let stable_boundaries = prepared.stable_boundaries_with_trace_session(
+        StableBoundaryOptions {
+            regularization: options.regularize.then_some(PathRegularizationOptions {
+                spacing: options.regularization_spacing.unwrap_or(0.02),
+                protected_endpoint_distance: 0.0,
+                ..PathRegularizationOptions::default()
+            }),
+            ..StableBoundaryOptions::default()
+        },
+        trace,
+    )?;
     let automatic_range = options
         .automatic_level_step
         .map(|step| automatic_iso_range(&stable_boundaries, minimum, maximum, step))
@@ -541,13 +654,12 @@ pub fn calculate_projection(
             options.levels.clone()
         }
     };
-    let stable_contours =
-        prepared
-            .contours(&levels)
-            .map_err(|error| ProjectionError::Preparation {
-                error,
-                details: source_coverage.join("; "),
-            })?;
+    let stable_contours = prepared
+        .contours_with_trace_session(&levels, trace)
+        .map_err(|error| ProjectionError::Preparation {
+            error,
+            details: source_coverage.join("; "),
+        })?;
     if stable_contours
         .levels
         .iter()
@@ -593,6 +705,51 @@ pub fn calculate_projection(
     })
 }
 
+fn trace_run_started(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    trace_config: &NumericalTraceConfig,
+    context: &NumericalTraceRunContext,
+) -> TraceRunStarted {
+    let property = dataset.property("T");
+    TraceRunStarted {
+        crate_version: env!("CARGO_PKG_VERSION").into(),
+        git_commit: option_env!("VERGEN_GIT_SHA").map(str::to_owned),
+        calculation_kind: "stable_liquidus_projection".into(),
+        input_identifier: context.input_identifier.clone().or_else(|| {
+            dataset
+                .source_path
+                .as_ref()
+                .map(|path| path.display().to_string())
+        }),
+        input_content_hash: context.input_content_hash.clone(),
+        components: dataset.components.clone().map(|component| component.name),
+        phase_ids: dataset.phases.iter().map(|phase| phase.id.0).collect(),
+        phase_names: dataset
+            .phases
+            .iter()
+            .map(|phase| phase.name.clone())
+            .collect(),
+        property: "T".into(),
+        unit: property
+            .map(|property| property.unit.clone())
+            .unwrap_or_default(),
+        sampling_subdivisions: options.sampling_subdivisions,
+        interpolation: format!("{:?}", options.source_interpolation),
+        partial_domain_policy: format!("{:?}", options.partial_domain_policy),
+        continuation: match options.source_interpolation {
+            SourceInterpolation::Linear => "not_applicable".into(),
+            SourceInterpolation::CubicAlpha { continuation, .. } => format!("{continuation:?}"),
+        },
+        regularization: options.regularize,
+        requested_levels: options.levels.clone(),
+        dataset_revision: context.dataset_revision,
+        options_revision: context.options_revision,
+        request_id: context.request_id,
+        trace_level: trace_config.level,
+        trace_maximum_events: trace_config.maximum_events,
+    }
+}
 fn tabulated_state_counts(values: &[TabulatedValue]) -> [usize; 4] {
     values.iter().fold([0usize; 4], |mut counts, value| {
         counts[match value.state {
@@ -852,6 +1009,63 @@ mod tests {
             error,
             ProjectionError::CubicSourceIncomplete { .. }
         ));
+    }
+
+    #[test]
+    fn traced_projection_is_exactly_equivalent_to_untraced_projection() {
+        let dataset = parse_str(include_str!("../fixtures/interior-invariant.tct")).unwrap();
+        let options = ProjectionOptions::default();
+        let plain = calculate_projection(&dataset, &options).unwrap();
+        let mut sink = ternary_contours::VecTraceSink::new(
+            ternary_contours::NumericalTraceConfig::decisions(),
+        );
+        let traced = calculate_projection_with_trace(&dataset, &options, &mut sink).unwrap();
+        assert_eq!(plain.levels, traced.levels);
+        assert_eq!(plain.stable_boundaries, traced.stable_boundaries);
+        assert_eq!(plain.stable_contours, traced.stable_contours);
+        let events = sink.events();
+        assert!(matches!(
+            events.first().map(|event| &event.payload),
+            Some(ternary_contours::NumericalTracePayload::RunStarted(_))
+        ));
+        assert!(matches!(
+            events.last().map(|event| &event.payload),
+            Some(ternary_contours::NumericalTracePayload::RunCompleted(_))
+        ));
+        assert!(
+            events
+                .windows(2)
+                .all(|pair| pair[0].sequence < pair[1].sequence)
+        );
+    }
+    #[test]
+    fn trace_context_is_recorded_without_affecting_projection() {
+        let dataset = parse_str(include_str!("../fixtures/interior-invariant.tct")).unwrap();
+        let options = ProjectionOptions::default();
+        let mut sink = ternary_contours::VecTraceSink::new(
+            ternary_contours::NumericalTraceConfig::decisions(),
+        );
+        let context = NumericalTraceRunContext {
+            input_identifier: Some("fixture.tct".into()),
+            input_content_hash: Some("fnv1a64:0000000000000000".into()),
+            dataset_revision: Some(7),
+            options_revision: Some(11),
+            request_id: Some(13),
+        };
+        calculate_projection_with_trace_context(&dataset, &options, &mut sink, &context).unwrap();
+        let Some(ternary_contours::NumericalTracePayload::RunStarted(started)) =
+            sink.events().first().map(|event| &event.payload)
+        else {
+            panic!("trace must begin with run metadata");
+        };
+        assert_eq!(started.input_identifier.as_deref(), Some("fixture.tct"));
+        assert_eq!(
+            started.input_content_hash.as_deref(),
+            Some("fnv1a64:0000000000000000")
+        );
+        assert_eq!(started.dataset_revision, Some(7));
+        assert_eq!(started.options_revision, Some(11));
+        assert_eq!(started.request_id, Some(13));
     }
 
     #[test]

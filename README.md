@@ -199,7 +199,7 @@ metrics apply to both regular and irregular fields.
 | Local Hessian estimate | Yes | Yes |
 | Curvature anisotropy | Yes | Yes |
 | Derived-field evaluation | Yes | Yes |
-| Mesh–field alignment | Controlled lattice form | Full irregular form |
+| Meshâ€“field alignment | Controlled lattice form | Full irregular form |
 | Alpha-response metrics | Regular cubic continuity | Irregular cubic response |
 | Contour-response metrics | Yes | Yes |
 
@@ -453,3 +453,10 @@ Detailed formulas and validation material live in the
 Contributions are welcome through the
 [project repository](https://github.com/evnekdev/ternary-contours). The crate
 is licensed under either [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE).
+
+## Numerical diagnostics
+
+The core offers deterministic opt-in structured numerical tracing through
+`NumericalTraceSink`. It is disabled by default, has no role in numerical
+options or cache keys, and is consumed by optional tool integrations. See
+[`docs/numerical-trace-schema.md`](docs/numerical-trace-schema.md).

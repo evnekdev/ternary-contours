@@ -170,3 +170,12 @@ recalculation, typed geometry, golden counts, and collapsible defaults.
 This contract does not require document tabs, spreadsheet formulas, multi-document
 workflows, an independently editable canvas dataset, or replacement of Qt native
 painting with a different GUI toolkit.
+## Developer numerical tracing
+
+The numerical core owns deterministic typed trace events and their observation
+levels. Qt only submits a Rust-owned per-calculation trace request from
+**Settings → Developer diagnostics**; it does not rebuild numerical events,
+log algorithm decisions in C++, or store a trace choice in TCT. Trace state is
+not part of `ProjectionOptions`, option equality, cache keys, document dirty
+state, or calculation-option revisions. A trace-output failure is surfaced
+separately and never replaces the last valid projection.

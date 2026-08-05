@@ -60,6 +60,8 @@ mod simplex;
 pub mod stable;
 /// Deterministic analytical fields used by examples and regression tests.
 pub mod synthetic;
+/// Deterministic, opt-in observation events for numerical diagnostics.
+pub mod trace;
 
 /// A semantic `(a, b, c)` composition coordinate owned by the numerical core.
 ///
@@ -162,6 +164,12 @@ pub use stable::{
     StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
     StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
     StableUnivariantRegularizationDiagnostics, StableVerificationPassDiagnostics,
+};
+pub use trace::{
+    CompositionRegion, NoopTraceSink, NumericalTraceConfig, NumericalTraceEvent,
+    NumericalTraceEventKind, NumericalTraceLevel, NumericalTracePayload, NumericalTraceSession,
+    NumericalTraceSink, NumericalTraceStage, TraceBinaryBoundary, TraceCounts, TraceDecision,
+    TraceRunCompleted, TraceRunFailed, TraceRunStarted, VecTraceSink, decision,
 };
 
 /// Compatibility alias retained for the stable Plotters adapter.

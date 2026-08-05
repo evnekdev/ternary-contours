@@ -14,6 +14,7 @@ path = "src/main.rs"
 default = []
 inspection = ["ternary-contours/cubic-alpha"]
 viewer = ["dep:eframe", "dep:egui", "dep:rfd", "inspection"]
+trace = ["dep:serde_json", "ternary-contours/numerical-trace-serde"]
 
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }
@@ -30,3 +31,4 @@ plotters-ternary = { path = "../../../plotters-ternary", features = ["stable-con
 ternary-contours = { path = "../..", features = ["irregular-delaunay"] }
 ternary-contours-gui-core = { path = "../ternary-contours-gui-core" }
 thiserror = "2.0.17"
+serde_json = { version = "1.0.145", optional = true }

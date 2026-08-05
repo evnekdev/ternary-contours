@@ -15,16 +15,17 @@ use std::{
 };
 
 use ternary_contours::{
-    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, RegularTernaryGrid,
-    StableInvariantNode, StablePhaseId,
+    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, NumericalTraceConfig,
+    NumericalTraceLevel, RegularTernaryGrid, StableInvariantNode, StablePhaseId,
 };
 use ternary_contours_cli::{
-    CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, LiquidusProjection,
-    OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvLayerFilter, ProjectionCsvOptions,
-    ProjectionCsvRecord, ProjectionOptions, ProjectionPathSource, PropertyDefinition,
-    RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange, TabulatedField,
-    TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
-    TctSerializeOptions, automatic_iso_levels, calculate_projection, empty_project_dataset,
+    CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, JsonLinesTraceSink,
+    LiquidusProjection, NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition,
+    ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
+    ProjectionPathSource, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode,
+    RowOrder, SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
+    TabulatedValueState, TctSerializeOptions, automatic_iso_levels, calculate_projection,
+    calculate_projection_with_trace_context, empty_project_dataset,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
@@ -265,6 +266,21 @@ pub struct TcqtProjectionRecord {
     pub line_id: [u8; NAME],
 }
 
+#[derive(Clone, Debug, Default)]
+struct NumericalTraceRequest {
+    level: NumericalTraceLevel,
+    destination: Option<PathBuf>,
+}
+
+impl NumericalTraceRequest {
+    fn config(&self) -> NumericalTraceConfig {
+        NumericalTraceConfig {
+            level: self.level,
+            maximum_events: 500_000,
+            ..NumericalTraceConfig::default()
+        }
+    }
+}
 struct ProjectDocument {
     dataset: TabulatedTernaryDataset,
     saved_dataset: TabulatedTernaryDataset,
@@ -287,6 +303,7 @@ struct ProjectDocument {
     // Numerical Viewer settings are validated and retained in Rust. Qt keeps
     // only a presentation mirror for its controls.
     viewer_options: TcqtViewerCalculationOptions,
+    trace_request: NumericalTraceRequest,
 }
 impl ProjectDocument {
     fn new() -> Self {
@@ -310,6 +327,7 @@ impl ProjectDocument {
             projection_options_revision: 0,
             projection_request_id: 0,
             viewer_options: default_viewer_options(),
+            trace_request: NumericalTraceRequest::default(),
         }
     }
     fn invalidate_calculation(&mut self) {
@@ -493,6 +511,38 @@ pub unsafe extern "C" fn tcqt_set_viewer_calculation_options(
     })())
 }
 
+/// Configure a developer-only numerical trace for the next Viewer calculation.
+/// This observation request never changes TCT dirty state, calculation options,
+/// or their revision.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_set_numerical_trace(
+    level: u32,
+    destination: *const c_char,
+) -> TcqtStatus {
+    status((|| {
+        let level = match level {
+            0 => NumericalTraceLevel::Off,
+            1 => NumericalTraceLevel::Summary,
+            2 => NumericalTraceLevel::Decisions,
+            3 => NumericalTraceLevel::Iterations,
+            _ => return Err("unsupported numerical trace level".into()),
+        };
+        let destination = if level == NumericalTraceLevel::Off {
+            None
+        } else {
+            let destination = unsafe { input(destination, "trace destination") }?;
+            if destination.trim().is_empty() {
+                return Err("a trace destination is required when tracing is enabled".into());
+            }
+            Some(PathBuf::from(destination))
+        };
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        state.trace_request = NumericalTraceRequest { level, destination };
+        Ok(())
+    })())
+}
 /// Return the Rust-authoritative numerical Viewer configuration. This lets Qt
 /// refresh controls after validation instead of treating widget values as the
 /// source of truth.
@@ -1616,7 +1666,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         Ok(options) => options,
         Err(error) => return failure(error, 0, 0),
     };
-    let (dataset, options_revision) = match document().lock() {
+    let (dataset, options_revision, trace_request) = match document().lock() {
         Ok(mut state) => {
             if state.revision != expected_revision {
                 return failure(
@@ -1642,7 +1692,11 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
                 );
             }
             state.calculation_generation = request_id;
-            (state.dataset.clone(), state.options_revision)
+            (
+                state.dataset.clone(),
+                state.options_revision,
+                state.trace_request.clone(),
+            )
         }
         Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
     };
@@ -1673,6 +1727,44 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
             );
         }
     };
+    // Trace output is observation-only. It uses the exact complete options
+    // snapshot and cannot turn a valid projection into a numerical failure.
+    let trace_status = trace_request.destination.as_ref().map(|destination| {
+        let mut sink = match JsonLinesTraceSink::create(destination, trace_request.config()) {
+            Ok(sink) => sink,
+            Err(error) => return format!("Numerical trace could not be created: {error}"),
+        };
+        let context = NumericalTraceRunContext {
+            input_identifier: dataset
+                .source_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            dataset_revision: Some(expected_revision),
+            options_revision: Some(options_revision),
+            request_id: Some(request_id),
+            ..NumericalTraceRunContext::default()
+        };
+        let result = calculate_projection_with_trace_context(
+            &dataset,
+            &projection_options,
+            &mut sink,
+            &context,
+        );
+        let output = sink.finish();
+        match (result, output.first_error) {
+            (Ok(_), None) => format!(
+                "Numerical trace saved to {} ({} events)",
+                output.path.display(),
+                output.events_written
+            ),
+            (Ok(_), Some(error)) => {
+                format!("Projection remains valid; numerical trace output failed: {error}")
+            }
+            (Err(error), _) => {
+                format!("Projection remains valid; numerical trace calculation failed: {error}")
+            }
+        }
+    });
     let selected_projection = if abi_options.regularize {
         regularized_projection.clone()
     } else {
@@ -1716,11 +1808,15 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         .iter()
         .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
         .count();
-    let summary = format!(
+    let mut summary = format!(
         "Calculated {binary_invariants} binary invariants, {interior_invariants} ternary invariants, {} univariant paths, and {} isotherm paths",
         selected_projection.diagnostics.univariant_count,
         selected_projection.diagnostics.contour_path_count,
     );
+    if let Some(trace_status) = trace_status {
+        summary.push_str(". ");
+        summary.push_str(&trace_status);
+    }
     match document().lock() {
         Ok(mut state)
             if state.revision == expected_revision

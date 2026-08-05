@@ -207,7 +207,32 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionExportLinesCsv, &QAction::triggered, this, &MainWindow::exportLinesCsv);
     connect(ui_->actionQuit, &QAction::triggered, this, &QWidget::close);
     connect(ui_->actionAboutQt, &QAction::triggered, qApp, &QApplication::aboutQt);
-    connect(ui_->actionGridAddRegular, &QAction::triggered, this, [this] { addGrid(true); });
+    connect(ui_->actionSettings, &QAction::triggered, this, [this] {
+        QDialog dialog(this);
+        dialog.setWindowTitle(tr("Developer diagnostics"));
+        auto* layout = new QFormLayout(&dialog);
+        auto* level = new QComboBox(&dialog);
+        level->addItem(tr("Off"), 0);
+        level->addItem(tr("Summary"), 1);
+        level->addItem(tr("Decisions"), 2);
+        level->addItem(tr("Iterations"), 3);
+        auto* destination = new QLineEdit(&dialog);
+        destination->setPlaceholderText(tr("Trace destination (.jsonl)"));
+        destination->setAccessibleName(tr("Numerical trace destination"));
+        destination->setAccessibleDescription(tr("Path for the Rust-owned deterministic numerical trace output."));
+        level->setAccessibleName(tr("Numerical trace level"));
+        level->setAccessibleDescription(tr("Developer-only trace detail. It does not alter numerical options or document state."));
+        layout->addRow(tr("Numerical trace"), level);
+        layout->addRow(tr("Trace destination"), destination);
+        auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+        layout->addRow(buttons);
+        connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+        connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+        if (dialog.exec() != QDialog::Accepted) return;
+        const auto encoded = destination->text().toUtf8();
+        const auto result = tcqt_set_numerical_trace(level->currentData().toUInt(), encoded.constData());
+        reportBridgeStatus(statusText(result), result.success);
+    });    connect(ui_->actionGridAddRegular, &QAction::triggered, this, [this] { addGrid(true); });
     connect(ui_->actionGridAddIrregular, &QAction::triggered, this, [this] { addGrid(false); });
     connect(ui_->actionGridRemove, &QAction::triggered, this, &MainWindow::removeSelectedGrid);
     connect(ui_->actionGridDuplicate, &QAction::triggered, this, &MainWindow::duplicateSelectedGrid);
@@ -709,13 +734,13 @@ void MainWindow::exportLinesCsv() {
             form.labelAddGridStepValue->setText(tr("Step size: %1 (%2%)").arg(step_text, percent_text));
             const auto point_text = QLocale(QLocale::English, QLocale::UnitedStates).toString(point_count);
             form.labelAddGridPointsValue->setText(
-                tr("Grid points: %1\nAllowed subdivisions: %2–%3")
+                tr("Grid points: %1\nAllowed subdivisions: %2â€“%3")
                     .arg(point_text)
                     .arg(min_regular_subdivisions)
                     .arg(max_regular_subdivisions));
         } else {
-            form.labelAddGridStepValue->setText(tr("Step size: —"));
-            form.labelAddGridPointsValue->setText(tr("Grid points: —\nAllowed subdivisions: %1–%2").arg(min_regular_subdivisions).arg(max_regular_subdivisions));
+            form.labelAddGridStepValue->setText(tr("Step size: â€”"));
+            form.labelAddGridPointsValue->setText(tr("Grid points: â€”\nAllowed subdivisions: %1â€“%2").arg(min_regular_subdivisions).arg(max_regular_subdivisions));
         }
         if (auto* ok = form.addGridButtonBox->button(QDialogButtonBox::Ok)) {
             ok->setEnabled(!regular_selected || valid);
@@ -1422,9 +1447,9 @@ void MainWindow::updateViewerSelectionDetails() {
     const auto row = *viewer_.selected_rows.cbegin(); TcqtRow composition{}; TcqtCell cell{};
     if (!tcqt_grid_row_at(viewer_.grid_index, row, &composition).success || !tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success) return;
     const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 1 ? tr("Non-existing") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
-    const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("—");
+    const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("â€”");
     const auto note = text(cell.note);
-    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) · %7\nState: %8\nValue: %9\nNote: %10")
+    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
         .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
         .arg(ui_->comboViewerPhase->currentText()).arg(viewer_.phase_id).arg(viewer_.property).arg(state, value, note));
 }
@@ -1446,7 +1471,7 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
     if (viewer_.property.isEmpty()) return;
     TcqtCell existing{};
     if (!tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &existing).success) return;
-    QDialog dialog(this, Qt::Tool); dialog.setWindowTitle(tr("Vertex %1 — %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
+    QDialog dialog(this, Qt::Tool); dialog.setWindowTitle(tr("Vertex %1 â€” %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
     auto* layout = new QFormLayout(&dialog); auto* state = new QComboBox(&dialog); state->addItem(tr("Calculated"), 0); state->addItem(tr("Missing (NA)"), 3); state->addItem(tr("Non-existing (NE)"), 1); state->addItem(tr("Cut-off (CO)"), 2); state->setCurrentIndex(state->findData(existing.state));
     auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog); auto* note = new QLineEdit(text(existing.note), &dialog); auto* error = new QLabel(&dialog); error->setStyleSheet(QStringLiteral("color: #b03030"));
     layout->addRow(tr("State"), state); layout->addRow(tr("Value"), value); layout->addRow(tr("Note"), note); layout->addRow(error);

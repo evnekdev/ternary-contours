@@ -217,3 +217,20 @@ dataset on the Data tab:
 
 cargo run -p ternary-contours-cli --features viewer --
 cargo run -p ternary-contours-cli --features viewer -- view
+## Developer numerical tracing
+
+The optional `trace` feature writes deterministic, structured JSON Lines while
+running the normal Rust projection pipeline. It is observation-only and does
+not change TCT data or calculation options:
+
+```powershell
+cargo run -p ternary-contours-cli --features trace -- `
+  trace-projection fixtures/interior-invariant.tct `
+  --output target/interior.trace.jsonl --level decisions
+
+cargo run -p ternary-contours-cli --features trace -- `
+  analyze-trace target/interior.trace.jsonl
+```
+
+See [`docs/numerical-trace-schema.md`](../../docs/numerical-trace-schema.md)
+for the schema, filters, trace cap semantics, and reproduction workflow.

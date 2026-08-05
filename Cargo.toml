@@ -35,10 +35,12 @@ default = []
 cubic-alpha = ["dep:spline1d"]
 irregular-delaunay = ["dep:delaunay"]
 irregular-cubic-alpha = ["irregular-delaunay", "cubic-alpha"]
+numerical-trace-serde = ["dep:serde"]
 
 [dependencies]
 delaunay = { version = "0.8.0", optional = true }
 spline1d = { version = "0.1.0", default-features = false, features = ["alloc"], optional = true }
+serde = { version = "1.0.228", features = ["derive"], optional = true }
 
 [[example]]
 name = "interpolate_irregular_field"
