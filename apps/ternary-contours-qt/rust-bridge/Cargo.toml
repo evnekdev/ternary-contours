@@ -10,4 +10,5 @@ crate-type = ["rlib", "staticlib"]
 
 [dependencies]
 ternary-contours = { path = "../../.." }
+ternary-contours-cli = { path = "../../../tools/ternary-contours-cli" }
 ternary-contours-gui-core = { path = "../../../tools/ternary-contours-gui-core" }

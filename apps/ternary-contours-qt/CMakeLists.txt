@@ -24,6 +24,8 @@ add_executable(ternary-contours-qt
     src/main_window.hpp
     src/ternary_canvas.cpp
     src/ternary_canvas.hpp
+    src/grid_table_model.cpp
+    src/grid_table_model.hpp
     include/rust_bridge.hpp
     ${TCQT_UI_FILES}
 )

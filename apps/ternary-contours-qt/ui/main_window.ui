@@ -27,12 +27,41 @@
            <property name="accessibleName"><string>Project tree</string></property>
            <property name="accessibleDescription"><string>Project title, corners, phases, properties, grids, and fields.</string></property>
           </widget>
-          <widget class="QTableView" name="tableGridValues">
-           <property name="minimumSize"><size><width>320</width><height>180</height></size></property>
-           <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
-           <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
-           <property name="accessibleName"><string>Grid values table</string></property>
-           <property name="accessibleDescription"><string>Editable selected-grid composition and phase-property values.</string></property>
+          <widget class="QWidget" name="dataEditorPane">
+           <layout class="QVBoxLayout" name="layoutDataEditorPane">
+            <item>
+             <widget class="QGroupBox" name="groupProjectDeclarations">
+              <property name="title"><string>Project declarations</string></property>
+              <layout class="QFormLayout" name="layoutProjectDeclarations">
+               <item row="0" column="0"><widget class="QLabel" name="labelProjectTitle"><property name="text"><string>Title</string></property></widget></item>
+               <item row="0" column="1"><widget class="QLineEdit" name="editProjectTitle"><property name="accessibleName"><string>Project title</string></property><property name="accessibleDescription"><string>Edit the project title and commit with Enter or focus loss.</string></property></widget></item>
+               <item row="1" column="0"><widget class="QLabel" name="labelCornerA"><property name="text"><string>A corner</string></property></widget></item>
+               <item row="1" column="1"><widget class="QLineEdit" name="editCornerA"><property name="accessibleName"><string>A corner component</string></property><property name="accessibleDescription"><string>Component name at the A ternary corner.</string></property></widget></item>
+               <item row="2" column="0"><widget class="QLabel" name="labelCornerB"><property name="text"><string>B corner</string></property></widget></item>
+               <item row="2" column="1"><widget class="QLineEdit" name="editCornerB"><property name="accessibleName"><string>B corner component</string></property><property name="accessibleDescription"><string>Component name at the B ternary corner.</string></property></widget></item>
+               <item row="3" column="0"><widget class="QLabel" name="labelCornerC"><property name="text"><string>C corner</string></property></widget></item>
+               <item row="3" column="1"><widget class="QLineEdit" name="editCornerC"><property name="accessibleName"><string>C corner component</string></property><property name="accessibleDescription"><string>Component name at the C ternary corner.</string></property></widget></item>
+              </layout>
+             </widget>
+            </item>
+            <item>
+             <layout class="QHBoxLayout" name="layoutDataCommands">
+              <item><widget class="QPushButton" name="buttonAddPhase"><property name="text"><string>Add Phase</string></property><property name="accessibleName"><string>Add phase</string></property><property name="accessibleDescription"><string>Add a phase with a stable Rust identifier.</string></property></widget></item>
+              <item><widget class="QPushButton" name="buttonRemovePhase"><property name="text"><string>Remove Phase</string></property><property name="accessibleName"><string>Remove selected phase</string></property><property name="accessibleDescription"><string>Remove the selected phase and its fields after confirmation.</string></property></widget></item>
+              <item><widget class="QPushButton" name="buttonAddProperty"><property name="text"><string>Add Property</string></property><property name="accessibleName"><string>Add property</string></property><property name="accessibleDescription"><string>Add an optional scalar property.</string></property></widget></item>
+              <item><widget class="QPushButton" name="buttonAddIrregularRow"><property name="text"><string>Add Row</string></property><property name="accessibleName"><string>Add irregular grid row</string></property><property name="accessibleDescription"><string>Add an editable composition row to an irregular grid.</string></property></widget></item>
+             </layout>
+            </item>
+            <item>
+             <widget class="QTableView" name="tableGridValues">
+              <property name="minimumSize"><size><width>320</width><height>180</height></size></property>
+              <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+              <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+              <property name="accessibleName"><string>Grid values table</string></property>
+              <property name="accessibleDescription"><string>Editable selected-grid composition and phase-property values.</string></property>
+             </widget>
+            </item>
+           </layout>
           </widget>
          </widget>
         </item>
@@ -106,6 +135,14 @@
  <tabstops>
   <tabstop>primaryTabs</tabstop>
   <tabstop>treeProject</tabstop>
+  <tabstop>editProjectTitle</tabstop>
+  <tabstop>editCornerA</tabstop>
+  <tabstop>editCornerB</tabstop>
+  <tabstop>editCornerC</tabstop>
+  <tabstop>buttonAddPhase</tabstop>
+  <tabstop>buttonRemovePhase</tabstop>
+  <tabstop>buttonAddProperty</tabstop>
+  <tabstop>buttonAddIrregularRow</tabstop>
   <tabstop>tableGridValues</tabstop>
   <tabstop>buttonRunRustCalculation</tabstop>
   <tabstop>canvasTernary</tabstop>
