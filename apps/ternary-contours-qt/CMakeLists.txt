@@ -49,3 +49,9 @@ if(TCQT_RUST_BRIDGE_LIBRARY)
     target_link_libraries(ternary-contours-qt PRIVATE "${TCQT_RUST_BRIDGE_LIBRARY}")
     target_compile_definitions(ternary-contours-qt PRIVATE TCQT_WITH_RUST_BRIDGE=1)
 endif()
+if(WIN32)
+    target_link_libraries(ternary-contours-qt PRIVATE
+        ws2_32
+        ntdll
+    )
+endif()
