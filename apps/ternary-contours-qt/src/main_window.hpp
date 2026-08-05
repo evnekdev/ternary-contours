@@ -18,12 +18,24 @@ class QLineEdit;
 
 namespace Ui { class MainWindow; }
 
-enum class ViewerAction {
+enum class ViewerWidgetCommand {
     SelectGrid, SelectPhase, SelectProperty, SetInteractionMode,
-    SetSourceVertices, SetVertexFilter, SetMarkerSize, SetNumericalOptions,
-    SetPlotLayer, SetGridLayer, SetQueryPoints, SetResultsVisible,
-    Fit, Reset, RestoreLayout, AddQuery, RemoveSelectedQuery, RemoveAllQueries,
-    ResetAutomaticRange, SelectVertex, CommitVertexEdit, CommitBulkState,
+    SetVertexVisibility, SetRegularGridEdges, SetMarkerSize, SetLabelMode,
+    SetLabelDecimals, SetLabelsSelectedOnly,
+    SetAutomaticRange, CommitIsoMinimum, CommitIsoMaximum, CommitIsoStep,
+    SetSamplingSubdivisions, SetSourceInterpolation, SetCubicMethod,
+    SetPartialDomainPolicy, SetContinuation, SetRegularizationEnabled,
+    SetRegularizationSpacing, SetPathDisplayMode,
+    SetMasterPlotVisible, SetSamplingGridVisible, SetSourceVerticesVisible,
+    SetQueryPointsVisible, SetResultsTableVisible, SetStableIsothermsVisible,
+    SetStableUnivariantsVisible, SetBinaryInvariantsVisible,
+    SetInteriorInvariantsVisible, SetAxisLabelsVisible, SetCornerNamesVisible,
+    SetLegendVisible, SetPathVerticesVisible, SetContourEndpointsVisible,
+    SetUnivariantEndpointsVisible, SetInvariantIdsVisible, SetUnivariantIdsVisible,
+    SetPhasePairLabelsVisible, SetContainingTriangleVisible, SetLineWidth,
+    SetPlotMarkerSize, Fit, Reset, RestoreLayout, AddQuery,
+    RemoveSelectedQuery, RemoveAllQueries, ResetAutomaticRange,
+    SelectVertex, CommitVertexEdit, CommitBulkState,
 };
 
 struct ViewerQuery {
@@ -42,18 +54,40 @@ struct ViewerState {
     std::uint32_t phase_id = 0;
     std::uint32_t field_index = 0;
     QString property;
+    // 0 = Vertex, 1 = Interpolate.  Keep this semantic order aligned with the
+    // Designer combo box and TernaryCanvas interaction routing.
     int interaction_mode = 0;
-    bool show_source_vertices = true;
     bool show_calculated = true;
     bool show_non_existing = true;
     bool show_cut_off = true;
     bool show_missing = true;
+    bool show_regular_grid_edges = true;
+    bool show_source_vertices = true;
     bool show_query_points = true;
     bool show_results_table = true;
-    bool show_plot_layer = true;
-    bool show_grid_layer = true;
+    bool show_master_plot = true;
+    bool show_sampling_grid = true;
+    bool show_stable_isotherms = true;
+    bool show_stable_univariants = true;
+    bool show_binary_invariants = true;
+    bool show_interior_invariants = true;
+    bool show_axis_labels = true;
     bool show_corner_names = true;
+    bool show_legend = false;
+    bool show_path_vertices = false;
+    bool show_contour_endpoints = false;
+    bool show_univariant_endpoints = false;
+    bool show_invariant_ids = false;
+    bool show_univariant_ids = false;
+    bool show_phase_pair_labels = false;
+    bool show_containing_triangle = false;
+    bool labels_selected_only = false;
     int marker_size = 6;
+    int plot_marker_size = 6;
+    int line_width = 2;
+    int label_mode = 0;
+    int label_decimals = 3;
+    int path_display_mode = 1;
     QSet<std::uint32_t> selected_rows;
     QVector<ViewerQuery> queries;
     std::uint64_t next_query_id = 1;
@@ -61,7 +95,8 @@ struct ViewerState {
     std::uint64_t numerical_revision = 1;
     bool calculation_running = false;
     bool has_last_valid_projection = false;
-    TcqtViewerCalculationOptions options{true, 0.0, 0.0, 100.0, 0, true, 0.0, 0, 3, 2, 1};
+    bool projection_is_stale = false;
+    TcqtViewerCalculationOptions options{true, 0.0, 0.0, 100.0, 20, true, 0.02, 0, 3, 2, 1};
 };
 
 class MainWindow final : public QMainWindow {
@@ -111,17 +146,21 @@ private:
     void reportBridgeStatus(const QString& message, bool success);
     void restoreWindowLayout();
     void saveWindowLayout();
-    void dispatchViewerAction(ViewerAction action);
+    void dispatchViewerWidgetCommand(ViewerWidgetCommand action);
     void refreshViewerFieldSelectors();
     void refreshViewerVertices();
     void refreshViewerQueries();
-    void refreshProjectionCanvas();
+    bool refreshProjectionCanvas(bool accept_empty = false);
     void scheduleViewerCalculation();
     void addInterpolationQuery(double a, double b, double c);
     void selectViewerVertex(std::uint32_t row, bool additive);
     void editViewerVertex(std::uint32_t row, const QPoint& global_position);
     void showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position);
     bool commitViewerNumber(QLineEdit* editor, double* target, const QString& label);
+    bool commitViewerCalculationOptions(ViewerWidgetCommand source);
+    void syncViewerPanelControls();
+    void updateViewerSelectionDetails();
+    void setViewerCalculationStatus(const QString& message, bool error = false);
 
     std::unique_ptr<Ui::MainWindow> ui_;
     QStandardItemModel* tree_model_ = nullptr;

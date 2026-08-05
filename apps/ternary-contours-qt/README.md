@@ -1,13 +1,14 @@
-# Ternary Contours Qt feasibility prototype
+# Ternary Contours Qt application
 
-This directory is intentionally outside the default Cargo build. It is the first
-Qt 6 migration prototype; the supported existing CLI and feature-gated egui
-viewer remain available during parity work.
+This directory is intentionally outside the default Cargo build.  It is the
+Qt 6 desktop application while the established CLI remains supported.
 
-The prototype provides a native `QMainWindow`, conventional menus, exactly two
-primary tabs (`Data` and `Viewer`), a tree and table view, a status bar, a
-native `.tct` Open dialog, a vector `QPainter` ternary canvas, persisted
-splitter geometry, and a `QtConcurrent` worker call into a Rust static library.
+The application has two primary tabs: `Data` and `Viewer`.  The Viewer uses a
+Designer-owned split layout: vertically stacked **Vertex inspection** and
+**Iso-plots** controls on the left; the ternary canvas above its interpolation
+results table on the right.
+
+## Build
 
 Build the Rust bridge first:
 
@@ -24,32 +25,44 @@ cmake -S apps/ternary-contours-qt -B build/qt \
 cmake --build build/qt --config Release
 ```
 
-Without `TCQT_RUST_BRIDGE_LIBRARY`, the shell still builds and visibly reports
-that its Rust feasibility bridge is unavailable. This fallback is deliberate:
-it permits UI and multi-monitor checks independently from linker setup.
+See [building.md](../../docs/qt/building.md) for the supported Windows build
+script and deployment details.
 
-See `docs/qt/building.md` and `docs/architecture/qt-ui-decision.md` for the
-selected integration boundary, current local SDK limitation, deployment, and
-licensing requirements.
+## Ownership boundary
+
+Rust is authoritative for:
+
+- the TCT document, typed grid cells, classified values, dirty revisions and undo;
+- viewer calculation configuration and validation;
+- field interpolation, topology, projection preparation and result records;
+- semantic plot-scene metadata: calculated layer, colour, stroke width and marker kind.
+
+Qt/C++ owns only native widgets, menus, dialogs, splitter persistence, input
+translation, and final `QPainter` execution.  `QPainter` calls must stay in C++
+because they require a live Qt paint device; C++ does not choose numerical
+methods, mutate document data directly, or derive plot semantics.
+
 ## Viewer control wiring
 
-The Qt Viewer uses one `ViewerState` in `MainWindow`; widgets never own a
-separate numerical or document copy. Every visible Viewer control follows:
+Every visible Viewer control dispatches through `dispatchViewerWidgetCommand`,
+then either changes render-only presentation state or commits a Rust-owned
+configuration through `tcqt_set_viewer_calculation_options`. A calculation
+uses a value-copied Rust option snapshot with
+`tcqt_calculate_viewer(options, revision, generation)`; completion is accepted
+only for the matching document revision and generation.
 
-`widget signal → QAction or ViewerAction → Rust bridge/state → snapshot → canvas and widgets`.
-
-| Object | Command | State/effect |
+| Widget or command | Adapter command | Authoritative state/effect |
 | --- | --- | --- |
-| `comboViewerGrid` | `SelectGrid` | Selects the authoritative grid index, refreshes fields, vertices, and queries. |
-| `comboViewerPhase` | `SelectPhase` | Selects the stable phase ID and refreshes its fields. |
-| `comboViewerProperty` | `SelectProperty` | Selects `(grid, phase ID, property)` and rebuilds its typed source markers. |
-| `comboViewerMode` | `SetInteractionMode` | Select, edit, or add a Rust-evaluated interpolation query. |
-| `checkViewerCalculated`, `checkViewerNonExisting`, `checkViewerCutOff`, `checkViewerMissing` | `SetVertexFilter` | Applies the typed classified-value filter to the canvas. |
-| `spinViewerMarkerSize` | `SetMarkerSize` | Updates the shared canvas marker size. |
-| View-menu layer actions | `SetPlotLayer`, `SetGridLayer`, `SetSourceVertices`, `SetQueryPoints`, `SetResultsVisible` | Update shared presentation state and redraw only. |
-| Fit/Reset/Restore Layout | `Fit`, `Reset`, `RestoreLayout` | Change only the canvas transform or saved splitter layout. |
-| Query-clear actions | `RemoveSelectedQuery`, `RemoveAllQueries` | Update persistent Qt query presentation rows and markers. |
-| `buttonRunRustCalculation` | `tcqt_calculate_viewer` | Runs the existing Rust projection pipeline with revision/generation rejection. |
+| `comboViewerGrid`, `comboViewerPhase`, `comboViewerProperty` | `SelectGrid`, `SelectPhase`, `SelectProperty` | Stable grid/phase/property field identity; refreshes source markers and queries. |
+| `comboViewerMode` | `SetInteractionMode` | Vertex or Interpolate canvas interaction. |
+| Vertex-state, edge, marker and label controls | `SetVertexVisibility`, `SetRegularGridEdges`, `SetMarkerSize`, `SetLabelMode`, `SetLabelDecimals`, `SetLabelsSelectedOnly` | Render-only source-vertex presentation. |
+| Iso range, sampling, interpolation, cubic method, fallback, continuation, regularization and path controls | corresponding `Commit...` or `Set...` command | Rust `TcqtViewerCalculationOptions`; schedules a revision-checked calculation. |
+| View-menu and layer checkboxes | distinct `SetMasterPlotVisible`, `SetStable...`, `Set...Invariants`, `SetSourceVerticesVisible`, and related commands | Shared render-only visibility state; menu and panel remain synchronized. |
+| Fit, Reset, Restore Layout | `Fit`, `Reset`, `RestoreLayout` | Canvas transform or splitter visibility/geometry only. |
+| Results-table selection and clear actions | `RemoveSelectedQuery`, `RemoveAllQueries` | Persistent query markers/results; selecting a result highlights its marker. |
+| Vertex popup and bulk context actions | bridge vertex/bulk mutation | One Rust mutation/transaction updates undo, revision, dirty presentation, Data, Viewer and automatic calculation. |
 
-The Rust bridge owns vertex edits, bulk state changes, field interpolation,
-projection preparation, undo, dirty revision, and stale-result rejection.
+The source test `visible_qt_viewer_controls_use_the_thin_adapter_and_rust_bridge`
+checks the generated UI inventory, action bindings, distinct calculated-layer
+commands, Rust option APIs, and the absence of the obsolete no-argument
+calculation entry point.

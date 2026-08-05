@@ -50,7 +50,7 @@ struct TcqtGrid { std::uint32_t index; std::uint32_t kind; std::uint32_t subdivi
 struct TcqtField { std::uint32_t index; std::uint32_t phase_id; char property[128]; char column_name[128]; };
 struct TcqtRow { double a; double b; double c; };
 struct TcqtCell { std::uint32_t state; bool has_value; double value; char note[128]; };
-struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; char line_id[128]; };
+struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; char line_id[128]; };
 
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);
@@ -79,7 +79,8 @@ TcqtStatus tcqt_add_irregular_row(std::uint32_t grid_index);
 TcqtStatus tcqt_set_irregular_composition(std::uint32_t grid_index, std::uint32_t row_index, double a, double b, double c);
 TcqtStatus tcqt_undo();
 TcqtStatus tcqt_redo();
-TcqtCalculationResult tcqt_calculate_current();
+TcqtStatus tcqt_set_viewer_calculation_options(const TcqtViewerCalculationOptions* options);
+TcqtStatus tcqt_viewer_calculation_options(TcqtViewerCalculationOptions* output);
 TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t request_id);
 TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
 TcqtStatus tcqt_evaluate_field(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const TcqtViewerCalculationOptions* options, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);

@@ -21,6 +21,11 @@ struct CanvasVertex {
 struct CanvasPath {
     QVector<QPointF> compositions;
     std::uint32_t type = 0;
+    // Semantics and style are supplied by Rust; this struct is a QPainter-ready
+    // transport object, not a second numerical or styling model.
+    std::uint32_t rgba = 0xff2d6eb4;
+    double stroke_width = 1.5;
+    std::uint32_t marker_kind = 0;
 };
 
 struct CanvasQuery {
@@ -45,6 +50,13 @@ public:
     void setSourceVertices(const QVector<QPointF>& compositions);
     void setInspectionVertices(const QVector<CanvasVertex>& vertices);
     void setProjectionPaths(const QVector<CanvasPath>& paths);
+    void setProjectionVisibility(bool master, bool isotherms, bool univariants,
+                                 bool binary_invariants, bool interior_invariants);
+    void setProjectionAppearance(int line_width, int invariant_marker_size);
+    void setDiagnosticVisibility(bool path_vertices, bool contour_endpoints,
+                                 bool univariant_endpoints, bool invariant_ids,
+                                 bool univariant_ids, bool phase_pair_labels);
+    void setVertexLabelSettings(int mode, int decimals, bool selected_only);
     void setQueries(const QVector<CanvasQuery>& queries);
     void setMarkerSize(int size);
     void setVertexVisibility(bool calculated, bool non_existing, bool cut_off, bool missing);
@@ -79,6 +91,21 @@ private:
     bool component_names_visible_ = true;
     bool axis_labels_visible_ = true;
     bool legend_visible_ = false;
+    bool show_isotherms_ = true;
+    bool show_univariants_ = true;
+    bool show_binary_invariants_ = true;
+    bool show_interior_invariants_ = true;
+    bool show_path_vertices_ = false;
+    bool show_contour_endpoints_ = false;
+    bool show_univariant_endpoints_ = false;
+    bool show_invariant_ids_ = false;
+    bool show_univariant_ids_ = false;
+    bool show_phase_pair_labels_ = false;
+    bool labels_selected_only_ = false;
+    int label_mode_ = 0;
+    int label_decimals_ = 3;
+    int line_width_ = 2;
+    int invariant_marker_size_ = 6;
     bool show_calculated_ = true;
     bool show_non_existing_ = true;
     bool show_cut_off_ = true;

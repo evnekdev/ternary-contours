@@ -173,16 +173,54 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "buttonAddProperty" => UiElementId::DataProperties,
         "buttonAddIrregularRow" => UiElementId::DataGridEditor,
         "splitterData" => UiElementId::DataPanel,
-        "splitterViewer" => UiElementId::GridResults,
+        "splitterViewerOuter" => UiElementId::PlotSettings,
+        "splitterViewerControls" => UiElementId::PlotSettings,
+        "splitterViewerRight" => UiElementId::GridResults,
         "canvasTernary" => UiElementId::PlotCanvas,
         "tableInterpolationResults" => UiElementId::InterpolationResultsTable,
         "statusMain" => UiElementId::Status,
-        "buttonRunRustCalculation" => UiElementId::Recalculate,
+        "buttonViewerResetAutomaticRange" => UiElementId::PlotLevels,
+        "comboViewerGrid" => UiElementId::GridSelector,
+        "comboViewerPhase" => UiElementId::GridPhaseSelector,
+        "comboViewerProperty" => UiElementId::GridPropertySelector,
+        "comboViewerMode" => UiElementId::GridMode,
+        "comboViewerLabelMode" => UiElementId::GridLabelMode,
+        "comboViewerSourceInterpolation"
+        | "comboViewerCubicMethod"
+        | "comboViewerPartialDomain"
+        | "comboViewerContinuation" => UiElementId::PlotInterpolation,
+        "comboViewerPathDisplay" => UiElementId::PlotPathMode,
+        "editViewerTmin" | "editViewerTmax" | "editViewerStep" => UiElementId::PlotLevels,
+        "editViewerRegularizationSpacing" => UiElementId::PlotRegularization,
+        "spinViewerMarkerSize" | "spinViewerLabelDecimals" => UiElementId::GridPointEditor,
+        "spinViewerSamplingSubdivisions" => UiElementId::PlotSampling,
+        "spinViewerLineWidth" | "spinViewerPlotMarkerSize" => UiElementId::PlotSettings,
         "checkViewerCalculated"
         | "checkViewerNonExisting"
         | "checkViewerCutOff"
-        | "checkViewerMissing" => UiElementId::GridStateFilter,
-        "spinViewerMarkerSize" => UiElementId::GridPointEditor,
+        | "checkViewerMissing"
+        | "checkViewerRegularGridEdges" => UiElementId::GridStateFilter,
+        "checkViewerLabelsSelectedOnly" => UiElementId::GridLabelMode,
+        "checkViewerAutomaticRange" => UiElementId::PlotLevels,
+        "checkViewerRegularizePaths" => UiElementId::PlotRegularization,
+        "checkViewerStableIsotherms"
+        | "checkViewerStableUnivariants"
+        | "checkViewerBinaryInvariants"
+        | "checkViewerInteriorInvariants"
+        | "checkViewerSamplingGrid"
+        | "checkViewerSourceVertices"
+        | "checkViewerQueryPoints"
+        | "checkViewerAxisLabels"
+        | "checkViewerCornerNames"
+        | "checkViewerLegend"
+        | "checkViewerPathVertices"
+        | "checkViewerContourEndpoints"
+        | "checkViewerUnivariantEndpoints"
+        | "checkViewerInvariantIds"
+        | "checkViewerUnivariantIds"
+        | "checkViewerPhasePairLabels"
+        | "checkViewerContainingTriangle" => UiElementId::PlotSettings,
+
         "actionFileOpen" => UiElementId::Open,
         "actionFileSave" => UiElementId::Save,
         "actionFileSaveAs" => UiElementId::SaveAs,
@@ -2177,7 +2215,7 @@ mod tests {
         );
     }
     #[test]
-    fn visible_qt_viewer_commands_use_the_shared_dispatch_path() {
+    fn visible_qt_viewer_controls_use_the_thin_adapter_and_rust_bridge() {
         let source = std::fs::read_to_string(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../../apps/ternary-contours-qt/src/main_window.cpp"),
@@ -2210,36 +2248,55 @@ mod tests {
             "checkViewerNonExisting",
             "checkViewerCutOff",
             "checkViewerMissing",
-            "spinViewerMarkerSize",
+            "checkViewerAutomaticRange",
+            "spinViewerSamplingSubdivisions",
+            "comboViewerSourceInterpolation",
+            "comboViewerCubicMethod",
+            "comboViewerPartialDomain",
+            "comboViewerContinuation",
+            "checkViewerRegularizePaths",
+            "editViewerRegularizationSpacing",
+            "comboViewerPathDisplay",
         ] {
             assert!(
                 source.contains(object_name),
                 "missing Qt receiver for {object_name}"
             );
         }
-        assert!(source.contains("dispatchViewerAction"));
+        assert!(source.contains("dispatchViewerWidgetCommand"));
         assert!(source.contains("updateViewerActionState"));
+        assert!(source.contains("tcqt_set_viewer_calculation_options"));
+        assert!(source.contains("tcqt_viewer_calculation_options"));
+        assert!(source.contains("tcqt_calculate_viewer"));
+        assert!(!source.contains("tcqt_calculate_current"));
+        for command in [
+            "SetStableIsothermsVisible",
+            "SetStableUnivariantsVisible",
+            "SetBinaryInvariantsVisible",
+            "SetInteriorInvariantsVisible",
+            "SetAxisLabelsVisible",
+            "SetCornerNamesVisible",
+            "SetLegendVisible",
+        ] {
+            assert!(
+                source.contains(command),
+                "distinct Viewer command {command} is not wired"
+            );
+        }
     }
+
     #[test]
-    fn designer_inventory_has_two_primary_tabs_and_required_view_models() {
-        let public_tabs = QT_UI_ELEMENTS
-            .iter()
-            .filter(|element| {
-                element.is_public
-                    && element.qt_class == "QWidget"
-                    && element.object_name.starts_with("tab")
-            })
-            .map(|element| element.object_name)
-            .collect::<Vec<_>>();
-        assert_eq!(public_tabs, ["tabData", "tabViewer"]);
+    fn designer_viewer_uses_the_required_split_pane_hierarchy() {
         for object_name in [
-            "splitterData",
-            "splitterViewer",
-            "treeProject",
-            "tableGridValues",
-            "tableInterpolationResults",
+            "splitterViewerOuter",
+            "splitterViewerControls",
+            "scrollVertexInspection",
+            "groupVertexInspection",
+            "scrollIsoPlots",
+            "groupIsoPlots",
+            "splitterViewerRight",
             "canvasTernary",
-            "statusMain",
+            "tableInterpolationResults",
         ] {
             assert!(
                 QT_UI_ELEMENTS
@@ -2247,6 +2304,32 @@ mod tests {
                     .any(|element| element.object_name == object_name)
             );
         }
+        let parent = |name| {
+            QT_UI_ELEMENTS
+                .iter()
+                .find(|element| element.object_name == name)
+                .unwrap()
+                .parent_object_name
+        };
+        assert_eq!(parent("splitterViewerControls"), "splitterViewerOuter");
+        assert_eq!(parent("splitterViewerRight"), "splitterViewerOuter");
+        assert_eq!(parent("scrollVertexInspection"), "splitterViewerControls");
+        assert_eq!(parent("scrollIsoPlots"), "splitterViewerControls");
+        assert_eq!(parent("canvasTernary"), "splitterViewerRight");
+        assert_eq!(parent("tableInterpolationResults"), "splitterViewerRight");
+        assert!(!QT_UI_ELEMENTS.iter().any(|element| matches!(
+            element.object_name,
+            "viewerControls" | "groupViewerPresentation" | "buttonRunRustCalculation"
+        )));
+        let ui = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/ternary-contours-qt/ui/main_window.ui"),
+        )
+        .unwrap();
+        assert!(ui.contains("<string>Vertex</string>"));
+        assert!(ui.contains("<string>Interpolate</string>"));
+        assert!(!ui.contains("<string>Inspect</string>"));
+        assert!(!ui.contains("<string>Edit</string>"));
     }
 
     #[test]
@@ -2257,7 +2340,7 @@ mod tests {
                 QT_UI_ELEMENTS
                     .iter()
                     .find(|element| element.id == *id)
-                    .expect("generated tab-order ID must be in the inventory")
+                    .unwrap()
                     .object_name
             })
             .collect::<Vec<_>>();
@@ -2275,16 +2358,19 @@ mod tests {
                 "buttonAddProperty",
                 "buttonAddIrregularRow",
                 "tableGridValues",
-                "buttonRunRustCalculation",
+                "comboViewerGrid",
+                "comboViewerPhase",
+                "comboViewerProperty",
+                "comboViewerMode",
                 "canvasTernary",
-                "tableInterpolationResults",
+                "tableInterpolationResults"
             ]
         );
         for (child, parent) in [("menuExport", "menuFile"), ("menuAddGrid", "menuGrid")] {
             let element = QT_UI_ELEMENTS
                 .iter()
                 .find(|element| element.object_name == child)
-                .expect("specified menu must exist");
+                .unwrap();
             assert_eq!(element.parent_object_name, parent);
         }
     }

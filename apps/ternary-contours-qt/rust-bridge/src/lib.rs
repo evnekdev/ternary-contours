@@ -214,6 +214,11 @@ pub struct TcqtProjectionRecord {
     pub c: f64,
     pub point_index: u32,
     pub line_type: u32,
+    /// Rust-owned ARGB style consumed by the thin Qt QPainter adapter.
+    pub rgba: u32,
+    pub stroke_width: f64,
+    /// 0 = path/circle, 1 = square invariant marker.
+    pub marker_kind: u32,
     pub line_id: [u8; NAME],
 }
 
@@ -231,6 +236,9 @@ struct ProjectDocument {
     projection_records: Vec<ProjectionCsvRecord>,
     inspection_cache: FieldInspectionCache,
     calculation_generation: u64,
+    // Numerical Viewer settings are validated and retained in Rust. Qt keeps
+    // only a presentation mirror for its controls.
+    viewer_options: TcqtViewerCalculationOptions,
 }
 impl ProjectDocument {
     fn new() -> Self {
@@ -248,6 +256,7 @@ impl ProjectDocument {
             projection_records: Vec::new(),
             inspection_cache: FieldInspectionCache::default(),
             calculation_generation: 0,
+            viewer_options: default_viewer_options(),
         }
     }
     fn invalidate_calculation(&mut self) {
@@ -364,7 +373,8 @@ fn viewer_options(raw: &TcqtViewerCalculationOptions) -> Result<ProjectionOption
         automatic_iso_levels(raw.minimum, raw.maximum, raw.level_step)
             .map_err(|error| format!("invalid manual isotherm range: {error}"))?
     };
-    if raw.regularization_spacing.is_finite() && raw.regularization_spacing <= 0.0 {
+    // Zero is the explicit C ABI sentinel for an unspecified spacing; a supplied spacing must be positive.
+    if raw.regularization_spacing.is_finite() && raw.regularization_spacing < 0.0 {
         return Err("regularization spacing must be positive when supplied".into());
     }
     Ok(ProjectionOptions {
@@ -386,7 +396,7 @@ fn default_viewer_options() -> TcqtViewerCalculationOptions {
         minimum: 0.0,
         maximum: 0.0,
         level_step: 100.0,
-        sampling_subdivisions: 0,
+        sampling_subdivisions: 20,
         regularize: true,
         regularization_spacing: 0.0,
         source_interpolation: 0,
@@ -396,6 +406,39 @@ fn default_viewer_options() -> TcqtViewerCalculationOptions {
     }
 }
 
+/// Store a validated numerical Viewer configuration without changing the TCT
+/// document revision or dirty state. Rendering preferences remain Qt-owned.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_set_viewer_calculation_options(
+    raw_options: *const TcqtViewerCalculationOptions,
+) -> TcqtStatus {
+    status((|| {
+        let raw_options = *unsafe { out(raw_options.cast_mut(), "viewer calculation options") }?;
+        viewer_options(&raw_options)?;
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        state.viewer_options = raw_options;
+        Ok(())
+    })())
+}
+
+/// Return the Rust-authoritative numerical Viewer configuration. This lets Qt
+/// refresh controls after validation instead of treating widget values as the
+/// source of truth.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_viewer_calculation_options(
+    output_value: *mut TcqtViewerCalculationOptions,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "viewer calculation options") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        *output_value = state.viewer_options;
+        Ok(())
+    })())
+}
 fn inspection_state(state: &InterpolatedResultState) -> u32 {
     match state {
         InterpolatedResultState::Defined => 0,
@@ -1461,99 +1504,6 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
     })())
 }
 #[unsafe(no_mangle)]
-pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
-    let request = (|| {
-        let state = document()
-            .lock()
-            .map_err(|_| "project lock is unavailable".to_owned())?;
-        state
-            .dataset
-            .validate_calculation_readiness()
-            .map_err(|error| format!("Calculation unavailable: {error}"))?;
-        let mut contract = state.contract.clone();
-        let effects = update(&mut contract, UiAction::RecalculateRequested);
-        let request_id = effects
-            .iter()
-            .find_map(|effect| match effect {
-                UiEffect::RecalculateProjection { request, .. } => Some(request.0),
-                _ => None,
-            })
-            .unwrap_or_default();
-        Ok::<_, String>((state.dataset.clone(), state.revision, request_id))
-    })();
-    let (dataset, revision, request_id) = match request {
-        Ok(request) => request,
-        Err(error) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id: 0,
-                vertex_count: 0,
-                message: bytes(&error),
-            };
-        }
-    };
-    let options =
-        viewer_options(&default_viewer_options()).expect("default viewer options are valid");
-    let projection = match calculate_projection(&dataset, &options) {
-        Ok(projection) => projection,
-        Err(error) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id,
-                vertex_count: 0,
-                message: bytes(&format!("Calculation failed: {error}")),
-            };
-        }
-    };
-    let projection_records = projection_csv_records(
-        &dataset,
-        Some(&projection),
-        None,
-        &RenderOptions::default(),
-        ProjectionCsvOptions::default(),
-    )
-    .unwrap_or_default();
-    let summary = format!(
-        "Calculated {} phases, {} contour paths",
-        projection.input_summary.phase_count, projection.diagnostics.contour_path_count
-    );
-    let vertex_count = dataset
-        .grids
-        .iter()
-        .map(|grid| grid.compositions().len())
-        .sum::<usize>() as u32;
-    let saved = (|| {
-        let mut state = document()
-            .lock()
-            .map_err(|_| "project lock is unavailable".to_owned())?;
-        if state.revision != revision {
-            return Err("project changed while the calculation was running".to_owned());
-        }
-        state.projection = Some(projection);
-        state.projection_records = projection_records;
-        Ok::<_, String>(())
-    })();
-    match saved {
-        Ok(()) => TcqtCalculationResult {
-            success: true,
-            request_id,
-            vertex_count,
-            message: bytes(&summary),
-        },
-        Err(error) => TcqtCalculationResult {
-            success: false,
-            request_id,
-            vertex_count: 0,
-            message: bytes(&error),
-        },
-    }
-}
-
-/// Runs the exact existing CLI projection pipeline with Viewer-owned options.
-/// The calculation is accepted only when both the document revision and caller
-/// request generation still match, so a stale worker cannot replace a newer
-/// canvas.
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_calculate_viewer(
     raw_options: *const TcqtViewerCalculationOptions,
     expected_revision: u64,
@@ -1600,6 +1550,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
                 };
             }
             state.calculation_generation = request_id;
+            state.viewer_options = raw_options;
             state.dataset.clone()
         }
         Err(_) => {
@@ -1923,6 +1874,17 @@ pub unsafe extern "C" fn tcqt_projection_record_count(output_value: *mut u32) ->
     })())
 }
 
+fn projection_paint_style(line_type: u32) -> (u32, f64, u32) {
+    match line_type {
+        // AARRGGBB values. Scene styling is retained in Rust so every native
+        // frontend receives the same semantic rendering instruction.
+        0 => (0xff2d6eb4, 1.5, 0),
+        1 => (0xffa03782, 2.2, 0),
+        2 => (0xffb63232, 1.5, 1),
+        3 => (0xffe17819, 1.5, 0),
+        _ => (0xff6a6a6a, 1.2, 0),
+    }
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_projection_record_at(
     index: u32,
@@ -1937,18 +1899,23 @@ pub unsafe extern "C" fn tcqt_projection_record_at(
             .projection_records
             .get(index as usize)
             .ok_or("projection record index is out of range")?;
+        let line_type = match record.line_type {
+            ternary_contours_cli::ProjectionLineType::StableIsotherm => 0,
+            ternary_contours_cli::ProjectionLineType::StableUnivariant => 1,
+            ternary_contours_cli::ProjectionLineType::BinaryInvariant => 2,
+            ternary_contours_cli::ProjectionLineType::InteriorInvariant => 3,
+            ternary_contours_cli::ProjectionLineType::StableBoundaryContact => 4,
+        };
+        let (rgba, stroke_width, marker_kind) = projection_paint_style(line_type);
         *output_value = TcqtProjectionRecord {
             a: record.composition[0],
             b: record.composition[1],
             c: record.composition[2],
             point_index: record.point_index as u32,
-            line_type: match record.line_type {
-                ternary_contours_cli::ProjectionLineType::StableIsotherm => 0,
-                ternary_contours_cli::ProjectionLineType::StableUnivariant => 1,
-                ternary_contours_cli::ProjectionLineType::BinaryInvariant => 2,
-                ternary_contours_cli::ProjectionLineType::InteriorInvariant => 3,
-                ternary_contours_cli::ProjectionLineType::StableBoundaryContact => 4,
-            },
+            line_type,
+            rgba,
+            stroke_width,
+            marker_kind,
             line_id: bytes(&record.line_id),
         };
         Ok(())
@@ -2001,7 +1968,7 @@ pub unsafe extern "C" fn tcqt_export_lines_csv(path: *const c_char) -> TcqtStatu
     })())
 }
 /// Original feasibility entrypoint retained for existing callers. The application
-/// now uses `tcqt_calculate_current` against the active dataset.
+/// uses the configurable `tcqt_calculate_viewer` entrypoint against the active dataset.
 #[unsafe(no_mangle)]
 pub extern "C" fn tcqt_run_feasibility_calculation(
     subdivisions: u32,
@@ -2282,6 +2249,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn viewer_option_snapshot_is_validated_and_preserves_non_default_settings() {
+        let raw = TcqtViewerCalculationOptions {
+            automatic_range: false,
+            minimum: 900.0,
+            maximum: 1_200.0,
+            level_step: 25.0,
+            sampling_subdivisions: 37,
+            regularize: false,
+            regularization_spacing: 0.0,
+            source_interpolation: 1,
+            cubic_method: 1,
+            partial_domain_policy: 2,
+            continuation: 2,
+        };
+        let options = viewer_options(&raw).expect("configured Viewer options are valid");
+        assert_eq!(options.sampling_subdivisions, Some(37));
+        assert!(!options.regularize);
+        assert_eq!(
+            options.levels,
+            vec![
+                900.0, 925.0, 950.0, 975.0, 1_000.0, 1_025.0, 1_050.0, 1_075.0, 1_100.0, 1_125.0,
+                1_150.0, 1_175.0, 1_200.0
+            ]
+        );
+        assert!(matches!(
+            options.source_interpolation,
+            ternary_contours_cli::SourceInterpolation::CubicAlpha { .. }
+        ));
+    }
+
+    #[test]
+    fn rust_projection_scene_style_distinguishes_each_calculated_layer() {
+        assert_ne!(projection_paint_style(0).0, projection_paint_style(1).0);
+        assert_ne!(projection_paint_style(2).2, projection_paint_style(3).2);
+        assert!(projection_paint_style(0).1.is_finite());
+    }
     #[test]
     fn viewer_vertex_mutation_is_one_revision_one_undo_and_invalidates_projection() {
         let mut state = ProjectDocument {
