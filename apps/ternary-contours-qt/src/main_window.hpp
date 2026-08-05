@@ -16,11 +16,11 @@ public:
 
 private slots:
     void openDocument();
-    void saveGeometry();
+    void saveWindowLayout();
     void runRustCalculation();
     void updateComposition(double a, double b, double c);
 
 private:
-    void restoreGeometry();
+    void restoreWindowLayout();
     std::unique_ptr<Ui::MainWindow> ui_;
 };

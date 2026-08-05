@@ -76,10 +76,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(ui_->actionViewPlot, &QAction::toggled, ui_->canvasTernary, &TernaryCanvas::setPlotVisible);
     connect(ui_->actionViewGrid, &QAction::toggled, ui_->canvasTernary, &TernaryCanvas::setGridVisible);
     connect(ui_->canvasTernary, &TernaryCanvas::compositionSelected, this, &MainWindow::updateComposition);
-    restoreGeometry();
+    restoreWindowLayout();
 }
 
-MainWindow::~MainWindow() { saveGeometry(); }
+MainWindow::~MainWindow() { saveWindowLayout(); }
 
 void MainWindow::openDocument() {
     const auto path = QFileDialog::getOpenFileName(
@@ -106,9 +106,12 @@ void MainWindow::updateComposition(double a, double b, double c) {
         tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4));
 }
 
-void MainWindow::restoreGeometry() {
+void MainWindow::restoreWindowLayout() {
     QSettings settings("evnekdev", "ternary-contours-qt");
-    restoreGeometry(settings.value("window/geometry").toByteArray());
+    const auto geometry = settings.value("window/geometry").toByteArray();
+    if (!geometry.isEmpty()) {
+        QMainWindow::restoreGeometry(geometry);
+    }
     if (const auto data_state = settings.value("splitter/data").toByteArray(); !data_state.isEmpty()) {
         ui_->splitterData->restoreState(data_state);
     }
@@ -117,7 +120,7 @@ void MainWindow::restoreGeometry() {
     }
 }
 
-void MainWindow::saveGeometry() {
+void MainWindow::saveWindowLayout() {
     QSettings settings("evnekdev", "ternary-contours-qt");
     settings.setValue("window/geometry", QMainWindow::saveGeometry());
     settings.setValue("splitter/data", ui_->splitterData->saveState());
