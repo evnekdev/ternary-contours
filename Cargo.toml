@@ -26,6 +26,7 @@ exclude = [
 members = [
     "tools/ternary-contours-cli",
     "tools/ternary-contours-gui-core",
+    "apps/ternary-contours-qt/rust-bridge",
 ]
 resolver = "3"
 

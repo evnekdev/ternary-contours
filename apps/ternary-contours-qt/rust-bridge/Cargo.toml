@@ -1,0 +1,13 @@
+[package]
+name = "ternary-contours-qt-bridge"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+
+[lib]
+crate-type = ["rlib", "staticlib"]
+
+[dependencies]
+ternary-contours = { path = "../../.." }
+ternary-contours-gui-core = { path = "../../../tools/ternary-contours-gui-core" }

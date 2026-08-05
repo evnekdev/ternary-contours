@@ -3,6 +3,12 @@
 //! Rendering emits typed actions. The reducer performs no native I/O, filesystem
 //! access, worker spawning, GUI calls, or wall-clock reads.
 
+include!(concat!(env!("OUT_DIR"), "/qt_ui_ids.rs"));
+include!(concat!(env!("OUT_DIR"), "/qt_ui_inventory.rs"));
+include!(concat!(env!("OUT_DIR"), "/qt_ui_hierarchy.rs"));
+include!(concat!(env!("OUT_DIR"), "/qt_ui_actions.rs"));
+include!(concat!(env!("OUT_DIR"), "/qt_ui_tab_order.rs"));
+
 use std::{
     collections::BTreeMap,
     fmt,
@@ -146,6 +152,204 @@ ui_ids!(
     UnsavedChangesDialog,
 );
 
+/// Map a Qt Designer public object to its toolkit-neutral semantic contract.
+/// `QtUiElementId` is generated directly from `.ui` XML; this mapping owns
+/// behaviour rather than XML.
+pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
+    let id = match object_name {
+        "mainWindow" => UiElementId::MainWindow,
+        "menuBarMain" => UiElementId::GlobalToolbar,
+        "menuFile" | "menuGrid" | "menuView" | "menuAbout" | "menuExport" | "menuAddGrid" => {
+            UiElementId::GlobalToolbar
+        }
+        "primaryTabs" => UiElementId::TabBar,
+        "tabData" => UiElementId::TabData,
+        "tabViewer" => UiElementId::TabPlot,
+        "treeProject" => UiElementId::DataGridList,
+        "tableGridValues" => UiElementId::DataGridEditor,
+        "splitterData" => UiElementId::DataPanel,
+        "splitterViewer" => UiElementId::GridResults,
+        "canvasTernary" => UiElementId::PlotCanvas,
+        "tableInterpolationResults" => UiElementId::InterpolationResultsTable,
+        "statusMain" => UiElementId::Status,
+        "buttonRunRustCalculation" => UiElementId::Recalculate,
+        "actionFileOpen" => UiElementId::Open,
+        "actionFileSave" => UiElementId::Save,
+        "actionFileSaveAs" => UiElementId::SaveAs,
+        "actionExportPng" => UiElementId::ExportPng,
+        "actionExportSvg" => UiElementId::ExportSvg,
+        "actionExportLinesCsv" => UiElementId::ExportLinesCsv,
+        "actionViewPlot" => UiElementId::PlotLegend,
+        "actionViewGrid" => UiElementId::GridStateFilter,
+        "actionViewFit" => UiElementId::Fit,
+        "actionViewReset" | "actionViewRestoreLayout" => UiElementId::ResetView,
+        "actionGridCopy" => UiElementId::DataCopyGrid,
+        "actionGridPaste" => UiElementId::DataPasteApply,
+        "actionGridRecalculate" => UiElementId::Recalculate,
+        "actionGridValidate" => UiElementId::DataGridEditor,
+        name if name.starts_with("actionGrid") => UiElementId::DataGridEditor,
+        name if name.starts_with("actionFile")
+            || name == "actionSettings"
+            || name == "actionQuit" =>
+        {
+            UiElementId::DataDeclarations
+        }
+        name if name.starts_with("actionAbout") => UiElementId::DiagnosticsPanel,
+        name if name.starts_with("actionView") => UiElementId::PlotSettings,
+        "settingsDialog" | "settingsTabs" | "settingsButtonBox" => UiElementId::DataDeclarations,
+        "addGridDialog"
+        | "addGridButtonBox"
+        | "editAddGridName"
+        | "radioAddRegularGrid"
+        | "radioAddIrregularGrid"
+        | "spinAddGridSubdivisions" => UiElementId::DataGridEditor,
+        "phaseEditorDialog" | "phaseEditorButtonBox" | "editPhaseName" | "spinPhaseIdentifier" => {
+            UiElementId::DataPhases
+        }
+        "propertyEditorDialog"
+        | "propertyEditorButtonBox"
+        | "editPropertyName"
+        | "editPropertyUnit"
+        | "checkPropertyRequired" => UiElementId::DataProperties,
+        "aboutDialog" | "aboutButtonBox" => UiElementId::DiagnosticsPanel,
+        _ => return None,
+    };
+    Some(id)
+}
+
+/// Typed native command declared by a Qt Designer `QAction`.
+///
+/// This describes an input event only. The Rust controller remains the owner
+/// of parsing, validation, numerical calculation, and state changes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QtUiAction {
+    NewDocument,
+    OpenDocument,
+    SaveDocument,
+    SaveDocumentAs,
+    ExportPng,
+    ExportSvg,
+    ExportLinesCsv,
+    ShowSettings,
+    Quit,
+    AddRegularGrid,
+    AddIrregularGrid,
+    DuplicateGrid,
+    RenameGrid,
+    RemoveGrid,
+    AddPhaseField,
+    ModifyPhaseField,
+    RemovePhaseField,
+    ValidateGrid,
+    RecalculateGrid,
+    CopyGrid,
+    PasteGrid,
+    TogglePlotLayer,
+    ToggleGridLayer,
+    ToggleSourceVertices,
+    ToggleQueryPoints,
+    ToggleResultsTable,
+    FitView,
+    ResetView,
+    RestoreDefaultLayout,
+    ShowApplicationAbout,
+    ShowDocumentation,
+    ShowLicences,
+    ShowQtAbout,
+}
+
+/// Bind every generated QAction identity to an explicit native command.
+/// Returning `None` for a generated QAction is a contract-test failure.
+pub const fn qt_ui_action(id: QtUiElementId) -> Option<QtUiAction> {
+    let action = match id {
+        QtUiElementId::ActionFileNew => QtUiAction::NewDocument,
+        QtUiElementId::ActionFileOpen => QtUiAction::OpenDocument,
+        QtUiElementId::ActionFileSave => QtUiAction::SaveDocument,
+        QtUiElementId::ActionFileSaveAs => QtUiAction::SaveDocumentAs,
+        QtUiElementId::ActionExportPng => QtUiAction::ExportPng,
+        QtUiElementId::ActionExportSvg => QtUiAction::ExportSvg,
+        QtUiElementId::ActionExportLinesCsv => QtUiAction::ExportLinesCsv,
+        QtUiElementId::ActionSettings => QtUiAction::ShowSettings,
+        QtUiElementId::ActionQuit => QtUiAction::Quit,
+        QtUiElementId::ActionGridAddRegular => QtUiAction::AddRegularGrid,
+        QtUiElementId::ActionGridAddIrregular => QtUiAction::AddIrregularGrid,
+        QtUiElementId::ActionGridDuplicate => QtUiAction::DuplicateGrid,
+        QtUiElementId::ActionGridRename => QtUiAction::RenameGrid,
+        QtUiElementId::ActionGridRemove => QtUiAction::RemoveGrid,
+        QtUiElementId::ActionGridAddPhaseField => QtUiAction::AddPhaseField,
+        QtUiElementId::ActionGridModifyPhaseField => QtUiAction::ModifyPhaseField,
+        QtUiElementId::ActionGridRemovePhaseField => QtUiAction::RemovePhaseField,
+        QtUiElementId::ActionGridValidate => QtUiAction::ValidateGrid,
+        QtUiElementId::ActionGridRecalculate => QtUiAction::RecalculateGrid,
+        QtUiElementId::ActionGridCopy => QtUiAction::CopyGrid,
+        QtUiElementId::ActionGridPaste => QtUiAction::PasteGrid,
+        QtUiElementId::ActionViewPlot => QtUiAction::TogglePlotLayer,
+        QtUiElementId::ActionViewGrid => QtUiAction::ToggleGridLayer,
+        QtUiElementId::ActionViewSourceVertices => QtUiAction::ToggleSourceVertices,
+        QtUiElementId::ActionViewQueryPoints => QtUiAction::ToggleQueryPoints,
+        QtUiElementId::ActionViewResultsTable => QtUiAction::ToggleResultsTable,
+        QtUiElementId::ActionViewFit => QtUiAction::FitView,
+        QtUiElementId::ActionViewReset => QtUiAction::ResetView,
+        QtUiElementId::ActionViewRestoreLayout => QtUiAction::RestoreDefaultLayout,
+        QtUiElementId::ActionAboutApplication => QtUiAction::ShowApplicationAbout,
+        QtUiElementId::ActionAboutDocumentation => QtUiAction::ShowDocumentation,
+        QtUiElementId::ActionAboutLicenses => QtUiAction::ShowLicences,
+        QtUiElementId::ActionAboutQt => QtUiAction::ShowQtAbout,
+        _ => return None,
+    };
+    Some(action)
+}
+/// Generated Designer objects, including source and parent metadata for
+/// documentation and QtTest discovery.
+pub fn qt_ui_inventory_markdown() -> String {
+    let mut output = String::from(
+        "# Qt Designer object inventory\n\nGenerated at Rust build time from `apps/ternary-contours-qt/ui/*.ui`.\n\n| Rust Qt ID | Qt objectName | Class | .ui source | Parent | Core contract | Purpose | Visible when | Enabled when | Layout policy | Typed action or model role |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+    );
+    let registry = ui_element_registry();
+    for element in QT_UI_ELEMENTS {
+        if element.is_public {
+            let contract_id = qt_ui_contract_id(element.object_name);
+            let contract =
+                contract_id.and_then(|id| registry.iter().find(|definition| definition.id == id));
+            let contract_name = contract_id.map(UiElementId::name).unwrap_or("MISSING");
+            let purpose = contract
+                .map(|definition| definition.purpose)
+                .unwrap_or("MISSING");
+            let visible_when = contract
+                .map(|definition| definition.visible_when)
+                .unwrap_or("MISSING");
+            let enabled_when = contract
+                .map(|definition| definition.enabled_when)
+                .unwrap_or("MISSING");
+            let layout = contract
+                .map(|definition| {
+                    format!(
+                        "{:?}/{:?}",
+                        definition.layout.horizontal, definition.layout.vertical
+                    )
+                })
+                .unwrap_or_else(|| "MISSING".to_owned());
+            let action = qt_ui_action(element.id)
+                .map(|action| format!("{action:?}"))
+                .unwrap_or_else(|| "Static or model host".to_owned());
+            output.push_str(&format!(
+                "| {:?} | {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
+                element.id,
+                element.object_name,
+                element.qt_class,
+                element.source_file,
+                element.parent_object_name,
+                contract_name,
+                purpose,
+                visible_when,
+                enabled_when,
+                layout,
+                action,
+            ));
+        }
+    }
+    output
+}
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UiElementKind {
     Button,
@@ -1823,6 +2027,18 @@ fn gui_elements_markdown() -> String {
             contract.migration,
         ));
     }
+    output.push_str("\n## Qt Designer public objects\n\nThe Qt object identity and source file are generated from `.ui` XML; the semantic behaviour remains in the core registry.\n\n| Qt objectName | .ui source | Qt class | Core contract |\n| --- | --- | --- | --- |\n");
+    for element in QT_UI_ELEMENTS.iter().filter(|element| element.is_public) {
+        output.push_str(&format!(
+            "| {} | {} | {} | {} |\n",
+            element.object_name,
+            element.source_file,
+            element.qt_class,
+            qt_ui_contract_id(element.object_name)
+                .map(UiElementId::name)
+                .unwrap_or("MISSING"),
+        ));
+    }
     output
 }
 fn gui_elements_json() -> String {
@@ -1902,6 +2118,101 @@ fn contributing_markdown() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_public_designer_object_maps_to_a_core_contract() {
+        let registry = ui_element_registry();
+        for element in QT_UI_ELEMENTS.iter().filter(|element| element.is_public) {
+            let contract = qt_ui_contract_id(element.object_name).unwrap_or_else(|| {
+                panic!(
+                    "missing core contract for Qt object {}",
+                    element.object_name
+                )
+            });
+            assert!(registry.iter().any(|entry| entry.id == contract));
+        }
+    }
+
+    #[test]
+    fn every_designer_menu_action_has_a_typed_native_action() {
+        for action_id in QT_UI_ACTIONS {
+            assert!(
+                qt_ui_action(*action_id).is_some(),
+                "missing typed action for Qt action {action_id:?}"
+            );
+        }
+        assert_eq!(
+            qt_ui_action(QtUiElementId::ActionFileOpen),
+            Some(QtUiAction::OpenDocument)
+        );
+    }
+    #[test]
+    fn designer_inventory_has_two_primary_tabs_and_required_view_models() {
+        let public_tabs = QT_UI_ELEMENTS
+            .iter()
+            .filter(|element| {
+                element.is_public
+                    && element.qt_class == "QWidget"
+                    && element.object_name.starts_with("tab")
+            })
+            .map(|element| element.object_name)
+            .collect::<Vec<_>>();
+        assert_eq!(public_tabs, ["tabData", "tabViewer"]);
+        for object_name in [
+            "splitterData",
+            "splitterViewer",
+            "treeProject",
+            "tableGridValues",
+            "tableInterpolationResults",
+            "canvasTernary",
+            "statusMain",
+        ] {
+            assert!(
+                QT_UI_ELEMENTS
+                    .iter()
+                    .any(|element| element.object_name == object_name)
+            );
+        }
+    }
+
+    #[test]
+    fn designer_tab_order_and_menu_hierarchy_are_explicit() {
+        let tab_order = QT_UI_TAB_ORDER
+            .iter()
+            .map(|id| {
+                QT_UI_ELEMENTS
+                    .iter()
+                    .find(|element| element.id == *id)
+                    .expect("generated tab-order ID must be in the inventory")
+                    .object_name
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tab_order,
+            [
+                "primaryTabs",
+                "treeProject",
+                "tableGridValues",
+                "buttonRunRustCalculation",
+                "canvasTernary",
+                "tableInterpolationResults",
+            ]
+        );
+        for (child, parent) in [("menuExport", "menuFile"), ("menuAddGrid", "menuGrid")] {
+            let element = QT_UI_ELEMENTS
+                .iter()
+                .find(|element| element.object_name == child)
+                .expect("specified menu must exist");
+            assert_eq!(element.parent_object_name, parent);
+        }
+    }
+    #[test]
+    fn qt_designer_inventory_documents_sources_and_contracts() {
+        let inventory = qt_ui_inventory_markdown();
+        assert!(inventory.contains("main_window.ui"));
+        assert!(inventory.contains("actionFileOpen"));
+        assert!(!inventory.contains("MISSING"));
+    }
     #[test]
     fn every_ui_element_has_a_contract() {
         let registry = ui_element_registry();

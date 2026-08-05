@@ -10,4 +10,11 @@ description = "Framework-neutral GUI contracts and reducer for ternary-contours 
 name = "generate-gui-contract-docs"
 path = "src/bin/generate_gui_contract_docs.rs"
 
+[[bin]]
+name = "generate-qt-ui-docs"
+path = "src/bin/generate_qt_ui_docs.rs"
+
+[build-dependencies]
+roxmltree = "0.21"
+
 [dependencies]

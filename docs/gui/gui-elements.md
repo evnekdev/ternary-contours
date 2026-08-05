@@ -76,3 +76,82 @@ Generated from the typed viewer contract registry.
 | SaveDialog | Dialog | NativeDialog | [] | [] | [None] | Wrap/Scroll | FullyContractDriven |
 | ExportDialog | Dialog | NativeDialog | [] | [] | [None] | Wrap/Scroll | FullyContractDriven |
 | UnsavedChangesDialog | Dialog | NativeDialog | [] | [] | [None] | Wrap/Scroll | FullyContractDriven |
+
+## Qt Designer public objects
+
+The Qt object identity and source file are generated from `.ui` XML; the semantic behaviour remains in the core registry.
+
+| Qt objectName | .ui source | Qt class | Core contract |
+| --- | --- | --- | --- |
+| aboutButtonBox | about_dialog.ui | QDialogButtonBox | DiagnosticsPanel |
+| aboutDialog | about_dialog.ui | QDialog | DiagnosticsPanel |
+| actionAboutApplication | main_window.ui | QAction | DiagnosticsPanel |
+| actionAboutDocumentation | main_window.ui | QAction | DiagnosticsPanel |
+| actionAboutLicenses | main_window.ui | QAction | DiagnosticsPanel |
+| actionAboutQt | main_window.ui | QAction | DiagnosticsPanel |
+| actionExportLinesCsv | main_window.ui | QAction | ExportLinesCsv |
+| actionExportPng | main_window.ui | QAction | ExportPng |
+| actionExportSvg | main_window.ui | QAction | ExportSvg |
+| actionFileNew | main_window.ui | QAction | DataDeclarations |
+| actionFileOpen | main_window.ui | QAction | Open |
+| actionFileSave | main_window.ui | QAction | Save |
+| actionFileSaveAs | main_window.ui | QAction | SaveAs |
+| actionGridAddIrregular | main_window.ui | QAction | DataGridEditor |
+| actionGridAddPhaseField | main_window.ui | QAction | DataGridEditor |
+| actionGridAddRegular | main_window.ui | QAction | DataGridEditor |
+| actionGridCopy | main_window.ui | QAction | DataCopyGrid |
+| actionGridDuplicate | main_window.ui | QAction | DataGridEditor |
+| actionGridModifyPhaseField | main_window.ui | QAction | DataGridEditor |
+| actionGridPaste | main_window.ui | QAction | DataPasteApply |
+| actionGridRecalculate | main_window.ui | QAction | Recalculate |
+| actionGridRemove | main_window.ui | QAction | DataGridEditor |
+| actionGridRemovePhaseField | main_window.ui | QAction | DataGridEditor |
+| actionGridRename | main_window.ui | QAction | DataGridEditor |
+| actionGridValidate | main_window.ui | QAction | DataGridEditor |
+| actionQuit | main_window.ui | QAction | DataDeclarations |
+| actionSettings | main_window.ui | QAction | DataDeclarations |
+| actionViewFit | main_window.ui | QAction | Fit |
+| actionViewGrid | main_window.ui | QAction | GridStateFilter |
+| actionViewPlot | main_window.ui | QAction | PlotLegend |
+| actionViewQueryPoints | main_window.ui | QAction | PlotSettings |
+| actionViewReset | main_window.ui | QAction | ResetView |
+| actionViewRestoreLayout | main_window.ui | QAction | ResetView |
+| actionViewResultsTable | main_window.ui | QAction | PlotSettings |
+| actionViewSourceVertices | main_window.ui | QAction | PlotSettings |
+| addGridButtonBox | add_grid_dialog.ui | QDialogButtonBox | DataGridEditor |
+| addGridDialog | add_grid_dialog.ui | QDialog | DataGridEditor |
+| buttonRunRustCalculation | main_window.ui | QPushButton | Recalculate |
+| canvasTernary | main_window.ui | TernaryCanvas | PlotCanvas |
+| checkPropertyRequired | property_editor_dialog.ui | QCheckBox | DataProperties |
+| editAddGridName | add_grid_dialog.ui | QLineEdit | DataGridEditor |
+| editPhaseName | phase_editor_dialog.ui | QLineEdit | DataPhases |
+| editPropertyName | property_editor_dialog.ui | QLineEdit | DataProperties |
+| editPropertyUnit | property_editor_dialog.ui | QLineEdit | DataProperties |
+| mainWindow | main_window.ui | QMainWindow | MainWindow |
+| menuAbout | main_window.ui | QMenu | GlobalToolbar |
+| menuAddGrid | main_window.ui | QMenu | GlobalToolbar |
+| menuBarMain | main_window.ui | QMenuBar | GlobalToolbar |
+| menuExport | main_window.ui | QMenu | GlobalToolbar |
+| menuFile | main_window.ui | QMenu | GlobalToolbar |
+| menuGrid | main_window.ui | QMenu | GlobalToolbar |
+| menuView | main_window.ui | QMenu | GlobalToolbar |
+| phaseEditorButtonBox | phase_editor_dialog.ui | QDialogButtonBox | DataPhases |
+| phaseEditorDialog | phase_editor_dialog.ui | QDialog | DataPhases |
+| primaryTabs | main_window.ui | QTabWidget | TabBar |
+| propertyEditorButtonBox | property_editor_dialog.ui | QDialogButtonBox | DataProperties |
+| propertyEditorDialog | property_editor_dialog.ui | QDialog | DataProperties |
+| radioAddIrregularGrid | add_grid_dialog.ui | QRadioButton | DataGridEditor |
+| radioAddRegularGrid | add_grid_dialog.ui | QRadioButton | DataGridEditor |
+| settingsButtonBox | settings_dialog.ui | QDialogButtonBox | DataDeclarations |
+| settingsDialog | settings_dialog.ui | QDialog | DataDeclarations |
+| settingsTabs | settings_dialog.ui | QTabWidget | DataDeclarations |
+| spinAddGridSubdivisions | add_grid_dialog.ui | QSpinBox | DataGridEditor |
+| spinPhaseIdentifier | phase_editor_dialog.ui | QSpinBox | DataPhases |
+| splitterData | main_window.ui | QSplitter | DataPanel |
+| splitterViewer | main_window.ui | QSplitter | GridResults |
+| statusMain | main_window.ui | QStatusBar | Status |
+| tabData | main_window.ui | QWidget | TabData |
+| tabViewer | main_window.ui | QWidget | TabPlot |
+| tableGridValues | main_window.ui | QTableView | DataGridEditor |
+| tableInterpolationResults | main_window.ui | QTableView | InterpolationResultsTable |
+| treeProject | main_window.ui | QTreeView | DataGridList |

@@ -1,0 +1,114 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="mainWindow">
+  <property name="geometry"><rect><x>0</x><y>0</y><width>1280</width><height>800</height></rect></property>
+  <property name="windowTitle"><string>Ternary Contours</string></property>
+  <property name="accessibleName"><string>Main application window</string></property>
+  <property name="accessibleDescription"><string>Desktop application for tabulated ternary contour data.</string></property>
+  <widget class="QWidget" name="centralWidget">
+   <layout class="QVBoxLayout" name="layoutCentral">
+    <item>
+     <widget class="QTabWidget" name="primaryTabs">
+      <property name="accessibleName"><string>Primary application tabs</string></property>
+      <property name="accessibleDescription"><string>Switch between project data editing and the unified viewer.</string></property>
+      <widget class="QWidget" name="tabData"><property name="accessibleName"><string>Data tab</string></property><property name="accessibleDescription"><string>Edit the TCT project and selected grid.</string></property>
+       <attribute name="title"><string>Data</string></attribute>
+       <attribute name="accessibleName"><string>Data tab</string></attribute>
+       <layout class="QVBoxLayout" name="layoutData">
+        <item>
+         <widget class="QSplitter" name="splitterData">
+          <property name="orientation"><enum>Qt::Horizontal</enum></property>
+          <property name="childrenCollapsible"><bool>false</bool></property>
+          <property name="accessibleName"><string>Data pane splitter</string></property>
+          <property name="accessibleDescription"><string>Resize the project tree and selected object editor.</string></property>
+          <widget class="QTreeView" name="treeProject">
+           <property name="minimumSize"><size><width>200</width><height>180</height></size></property>
+           <property name="accessibleName"><string>Project tree</string></property>
+           <property name="accessibleDescription"><string>Project title, corners, phases, properties, grids, and fields.</string></property>
+          </widget>
+          <widget class="QTableView" name="tableGridValues">
+           <property name="minimumSize"><size><width>320</width><height>180</height></size></property>
+           <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+           <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+           <property name="accessibleName"><string>Grid values table</string></property>
+           <property name="accessibleDescription"><string>Editable selected-grid composition and phase-property values.</string></property>
+          </widget>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QWidget" name="tabViewer"><property name="accessibleName"><string>Viewer tab</string></property><property name="accessibleDescription"><string>Inspect plot, grid, and interpolation results.</string></property>
+       <attribute name="title"><string>Viewer</string></attribute>
+       <attribute name="accessibleName"><string>Viewer tab</string></attribute>
+       <layout class="QVBoxLayout" name="layoutViewer">
+        <item>
+         <widget class="QWidget" name="viewerControls">
+          <layout class="QHBoxLayout" name="layoutViewerControls">
+           <item><widget class="QPushButton" name="buttonRunRustCalculation">
+            <property name="text"><string>Run Rust feasibility calculation</string></property>
+            <property name="accessibleName"><string>Run Rust feasibility calculation</string></property>
+            <property name="accessibleDescription"><string>Run the prototype calculation on a background Rust worker.</string></property>
+           </widget></item>
+           <item><spacer name="viewerControlsSpacer"><property name="orientation"><enum>Qt::Horizontal</enum></property><property name="sizeHint" stdset="0"><size><width>40</width><height>20</height></size></property></spacer></item>
+          </layout>
+         </widget>
+        </item>
+        <item>
+         <widget class="QSplitter" name="splitterViewer">
+          <property name="orientation"><enum>Qt::Vertical</enum></property>
+          <property name="childrenCollapsible"><bool>false</bool></property>
+          <property name="accessibleName"><string>Viewer pane splitter</string></property>
+          <property name="accessibleDescription"><string>Resize the ternary scene and interpolated results table.</string></property>
+          <widget class="TernaryCanvas" name="canvasTernary">
+           <property name="minimumSize"><size><width>280</width><height>220</height></size></property>
+           <property name="accessibleName"><string>Unified ternary viewer</string></property>
+           <property name="accessibleDescription"><string>Vector ternary plot, grid inspection, and interpolation query canvas.</string></property>
+          </widget>
+          <widget class="QTableView" name="tableInterpolationResults">
+           <property name="minimumSize"><size><width>280</width><height>130</height></size></property>
+           <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+           <property name="verticalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>
+           <property name="accessibleName"><string>Interpolated results table</string></property>
+           <property name="accessibleDescription"><string>Persistent interpolation queries and typed results.</string></property>
+          </widget>
+         </widget>
+        </item>
+       </layout>
+      </widget>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menuBarMain"><property name="accessibleName"><string>Application menu bar</string></property><property name="accessibleDescription"><string>Application menus for document, grid, viewer, and help commands.</string></property>
+   <widget class="QMenu" name="menuFile"><property name="title"><string>File</string></property><property name="accessibleName"><string>File menu</string></property><property name="accessibleDescription"><string>Create, open, save, configure, and export documents.</string></property><addaction name="actionFileNew"/><addaction name="actionFileOpen"/><addaction name="actionFileSave"/><addaction name="actionFileSaveAs"/><addaction name="menuExport"/><addaction name="actionSettings"/><addaction name="separator"/><addaction name="actionQuit"/>
+    <widget class="QMenu" name="menuExport"><property name="title"><string>Export</string></property><property name="accessibleName"><string>Export menu</string></property><property name="accessibleDescription"><string>Choose the projection export format.</string></property><addaction name="actionExportPng"/><addaction name="actionExportSvg"/><addaction name="actionExportLinesCsv"/></widget>
+   </widget>
+   <widget class="QMenu" name="menuGrid"><property name="title"><string>Grid</string></property><property name="accessibleName"><string>Grid menu</string></property><property name="accessibleDescription"><string>Create, edit, validate, copy, and recalculate grid data.</string></property><addaction name="menuAddGrid"/><addaction name="actionGridDuplicate"/><addaction name="actionGridRename"/><addaction name="actionGridRemove"/><addaction name="separator"/><addaction name="actionGridAddPhaseField"/><addaction name="actionGridModifyPhaseField"/><addaction name="actionGridRemovePhaseField"/><addaction name="separator"/><addaction name="actionGridValidate"/><addaction name="actionGridRecalculate"/><addaction name="separator"/><addaction name="actionGridCopy"/><addaction name="actionGridPaste"/>
+    <widget class="QMenu" name="menuAddGrid"><property name="title"><string>Add Grid</string></property><property name="accessibleName"><string>Add grid menu</string></property><property name="accessibleDescription"><string>Choose a regular or irregular grid.</string></property><addaction name="actionGridAddRegular"/><addaction name="actionGridAddIrregular"/></widget>
+   </widget>
+   <widget class="QMenu" name="menuView"><property name="title"><string>View</string></property><property name="accessibleName"><string>View menu</string></property><property name="accessibleDescription"><string>Control visible layers, fitted view, and persisted layout.</string></property><addaction name="actionViewPlot"/><addaction name="actionViewGrid"/><addaction name="actionViewSourceVertices"/><addaction name="actionViewQueryPoints"/><addaction name="actionViewResultsTable"/><addaction name="separator"/><addaction name="actionViewFit"/><addaction name="actionViewReset"/><addaction name="actionViewRestoreLayout"/></widget>
+   <widget class="QMenu" name="menuAbout"><property name="title"><string>About</string></property><property name="accessibleName"><string>About menu</string></property><property name="accessibleDescription"><string>Open application, documentation, licence, and Qt information.</string></property><addaction name="actionAboutApplication"/><addaction name="actionAboutDocumentation"/><addaction name="actionAboutLicenses"/><addaction name="actionAboutQt"/></widget>
+   <addaction name="menuFile"/><addaction name="menuGrid"/><addaction name="menuView"/><addaction name="menuAbout"/>
+  </widget>
+  <widget class="QStatusBar" name="statusMain"><property name="accessibleName"><string>Application status</string></property><property name="accessibleDescription"><string>Progress, document, calculation, and coordinate feedback.</string></property></widget>
+  <action name="actionFileNew"><property name="text"><string>New</string></property><property name="shortcut"><string>Ctrl+N</string></property></action>
+  <action name="actionFileOpen"><property name="text"><string>Open...</string></property><property name="shortcut"><string>Ctrl+O</string></property></action>
+  <action name="actionFileSave"><property name="text"><string>Save</string></property><property name="shortcut"><string>Ctrl+S</string></property></action>
+  <action name="actionFileSaveAs"><property name="text"><string>Save As...</string></property><property name="shortcut"><string>Ctrl+Shift+S</string></property></action>
+  <action name="actionExportPng"><property name="text"><string>PNG...</string></property></action><action name="actionExportSvg"><property name="text"><string>SVG...</string></property></action><action name="actionExportLinesCsv"><property name="text"><string>Lines CSV...</string></property></action>
+  <action name="actionSettings"><property name="text"><string>Settings...</string></property></action><action name="actionQuit"><property name="text"><string>Quit</string></property><property name="shortcut"><string>Ctrl+Q</string></property></action>
+  <action name="actionGridAddRegular"><property name="text"><string>Regular Grid...</string></property></action><action name="actionGridAddIrregular"><property name="text"><string>Irregular Grid...</string></property></action><action name="actionGridDuplicate"><property name="text"><string>Duplicate Grid</string></property></action><action name="actionGridRename"><property name="text"><string>Rename Grid...</string></property></action><action name="actionGridRemove"><property name="text"><string>Remove Grid</string></property></action><action name="actionGridAddPhaseField"><property name="text"><string>Add Phase Field...</string></property></action><action name="actionGridModifyPhaseField"><property name="text"><string>Modify Phase Field...</string></property></action><action name="actionGridRemovePhaseField"><property name="text"><string>Remove Phase Field</string></property></action><action name="actionGridValidate"><property name="text"><string>Validate Selected Grid</string></property></action><action name="actionGridRecalculate"><property name="text"><string>Recalculate Selected Grid</string></property></action><action name="actionGridCopy"><property name="text"><string>Copy Grid Data</string></property></action><action name="actionGridPaste"><property name="text"><string>Paste Grid Data</string></property></action>
+  <action name="actionViewPlot"><property name="text"><string>Plot Layer</string></property><property name="checkable"><bool>true</bool></property><property name="checked"><bool>true</bool></property></action><action name="actionViewGrid"><property name="text"><string>Grid Layer</string></property><property name="checkable"><bool>true</bool></property><property name="checked"><bool>true</bool></property></action><action name="actionViewSourceVertices"><property name="text"><string>Source Vertices</string></property><property name="checkable"><bool>true</bool></property></action><action name="actionViewQueryPoints"><property name="text"><string>Interpolation Query Points</string></property><property name="checkable"><bool>true</bool></property></action><action name="actionViewResultsTable"><property name="text"><string>Interpolated Results Table</string></property><property name="checkable"><bool>true</bool></property><property name="checked"><bool>true</bool></property></action><action name="actionViewFit"><property name="text"><string>Fit Triangle to View</string></property></action><action name="actionViewReset"><property name="text"><string>Reset View</string></property></action><action name="actionViewRestoreLayout"><property name="text"><string>Restore Default Layout</string></property></action>
+  <action name="actionAboutApplication"><property name="text"><string>About Ternary Contours</string></property></action><action name="actionAboutDocumentation"><property name="text"><string>Documentation</string></property></action><action name="actionAboutLicenses"><property name="text"><string>License Information</string></property></action><action name="actionAboutQt"><property name="text"><string>About Qt</string></property></action>
+ </widget>
+ <customwidgets><customwidget><class>TernaryCanvas</class><extends>QWidget</extends><header>ternary_canvas.hpp</header><container>0</container></customwidget></customwidgets>
+ <tabstops>
+  <tabstop>primaryTabs</tabstop>
+  <tabstop>treeProject</tabstop>
+  <tabstop>tableGridValues</tabstop>
+  <tabstop>buttonRunRustCalculation</tabstop>
+  <tabstop>canvasTernary</tabstop>
+  <tabstop>tableInterpolationResults</tabstop>
+ </tabstops> <resources/><connections/>
+</ui>
