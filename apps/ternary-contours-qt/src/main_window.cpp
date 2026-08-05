@@ -53,6 +53,18 @@ constexpr int default_regular_subdivisions = 10;
 QString text(const char* value) { return QString::fromUtf8(value); }
 QString statusText(const TcqtStatus& status) { return text(status.message); }
 QString calculationText(const TcqtCalculationResult& result) { return text(result.message); }
+QString documentLabel(const TcqtProjectSummary& summary) {
+    const auto path = text(summary.path);
+    const auto name = path.isEmpty() ? QStringLiteral("Untitled") : QFileInfo(path).fileName();
+    return name + (summary.dirty ? QStringLiteral(" *") : QString());
+}
+QString documentStatusLabel(const TcqtProjectSummary& summary) {
+    return summary.validity == 2 ? QStringLiteral("Calculation-ready") : summary.validity == 1 ? QStringLiteral("Draft document") : QStringLiteral("Invalid document");
+}
+QString documentTooltip(const TcqtProjectSummary& summary) {
+    const auto path = text(summary.path).isEmpty() ? QStringLiteral("Not yet saved") : text(summary.path);
+    return path + QStringLiteral("\n") + documentStatusLabel(summary) + QStringLiteral("\n") + (summary.dirty ? QStringLiteral("Modified") : QStringLiteral("Saved"));
+}
 QStandardItem* node(const QString& label, NodeKind kind, std::uint32_t grid_id = 0,
                     std::uint32_t phase_id = 0, std::uint32_t property_id = 0,
                     std::uint32_t field_id = 0) {
@@ -70,6 +82,10 @@ QStandardItem* node(const QString& label, NodeKind kind, std::uint32_t grid_id =
 }
 bool isGridNode(NodeKind kind) {
     return kind == NodeKind::Grid || kind == NodeKind::GridPhase || kind == NodeKind::GridField;
+}
+QString normalizeTctPath(QString path) {
+    if (!path.endsWith(QStringLiteral(".tct"), Qt::CaseInsensitive)) path += QStringLiteral(".tct");
+    return path;
 }
 TcqtCalculationResult calculateOnWorker() { return tcqt_calculate_current(); }
 }
@@ -112,7 +128,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionViewReset, &QAction::triggered, ui_->canvasTernary, &TernaryCanvas::fitTriangleToView);
     connect(ui_->canvasTernary, &TernaryCanvas::compositionSelected, this, &MainWindow::updateComposition);
     connect(ui_->treeProject->selectionModel(), &QItemSelectionModel::currentChanged, this, &MainWindow::selectProjectNode);
-    connect(grid_model_, &GridTableModel::bridgeStatus, this, &MainWindow::reportBridgeStatus);
+    connect(grid_model_, &GridTableModel::bridgeStatus, this, [this](const QString& message, bool success) { reportBridgeStatus(message, success); if (!success) editor_commit_failed_ = true; });
     connect(ui_->editProjectTitle, &QLineEdit::editingFinished, this, &MainWindow::commitTitle);
     connect(ui_->editCornerA, &QLineEdit::editingFinished, this, &MainWindow::commitComponentA);
     connect(ui_->editCornerB, &QLineEdit::editingFinished, this, &MainWindow::commitComponentB);
@@ -141,7 +157,7 @@ void MainWindow::rebuildFromRust(std::uint32_t preferred_grid) {
         grid_model_->load(selected_grid_, component_names);
     }
     synchronizing_ = false;
-    rebuildTree(); updateWindowTitle(); updateActionState();
+    rebuildTree(); updateDocumentPresentation(); updateActionState();
     const QStringList components{text(summary.component_a), text(summary.component_b), text(summary.component_c)};
     ui_->canvasTernary->setComponentNames(components);
     QVector<QPointF> vertices;
@@ -181,7 +197,8 @@ void MainWindow::rebuildTree() {
 
     tree_model_->clear();
     tree_model_->setHorizontalHeaderLabels({tr("Project")});
-    auto* project = node(text(summary.title), NodeKind::Project);
+    auto* project = node(documentLabel(summary), NodeKind::Project);
+    project->setToolTip(documentTooltip(summary));
     project->appendRow(node(tr("Title: %1").arg(text(summary.title)), NodeKind::Title));
 
     auto* corners = node(tr("Corners"), NodeKind::Corner);
@@ -313,56 +330,149 @@ void MainWindow::updateActionState() {
     const auto kind = selected.data(node_kind_role).toInt();
     const bool grid_selected = isGridNode(static_cast<NodeKind>(kind));
     const bool phase_selected = kind == static_cast<int>(NodeKind::Phase);
+    ui_->actionFileSave->setEnabled(true);
+    ui_->actionFileSaveAs->setEnabled(true);
     ui_->actionGridRemove->setEnabled(grid_selected);
     ui_->actionGridDuplicate->setEnabled(grid_selected);
     ui_->actionGridRename->setEnabled(grid_selected);
     ui_->buttonRemovePhase->setEnabled(phase_selected);
     ui_->buttonAddIrregularRow->setEnabled(grid_selected && !grid_model_->isRegular());
     ui_->actionGridValidate->setEnabled(grid_selected);
-    ui_->actionGridRecalculate->setEnabled(grid_selected);
+    ui_->actionGridRecalculate->setEnabled(grid_selected && summary.calculation_available);
     ui_->actionGridCopy->setEnabled(grid_selected);
     ui_->actionGridPaste->setEnabled(grid_selected);
-    ui_->buttonRunRustCalculation->setEnabled(summary.phase_count > 0 && summary.grid_count > 0);
-}void MainWindow::updateWindowTitle() {
-    TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
-    const auto path = text(summary.path); const auto document_name = path.isEmpty() ? tr("Untitled") : QFileInfo(path).fileName();
-    setWindowTitle(tr("Ternary Contours — %1%2").arg(document_name, summary.dirty ? QStringLiteral(" *") : QString()));
+    ui_->buttonRunRustCalculation->setEnabled(summary.calculation_available);
+    ui_->buttonRunRustCalculation->setToolTip(summary.calculation_available
+        ? tr("Calculate the current liquidus projection.")
+        : tr("Calculation is unavailable: %1\nThe draft can still be saved.").arg(text(summary.blocking_reason)));
+}
+void MainWindow::updateDocumentPresentation() {
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+    const auto root = tree_model_->index(0, 0);
+    if (root.isValid()) {
+        tree_model_->setData(root, documentLabel(summary), Qt::DisplayRole);
+        tree_model_->setData(root, documentTooltip(summary), Qt::ToolTipRole);
+    }
+    updateWindowTitle();
+}
+void MainWindow::updateWindowTitle() {
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+    setWindowTitle(tr("Ternary Contours \u2014 %1").arg(documentLabel(summary)));
+}
+
+void MainWindow::commitPendingEditors() {
+    editor_commit_failed_ = false;
+    if (auto* focus = QApplication::focusWidget()) focus->clearFocus();
+    ui_->tableGridValues->setFocus(Qt::OtherFocusReason);
 }
 
 bool MainWindow::confirmDocumentReplacement(const QString& action) {
-    TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success || !summary.dirty) return true;
-    const auto choice = QMessageBox::warning(this, tr("Unsaved changes"), tr("The current document has unsaved changes.\n\nSave before %1?").arg(action), QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel, QMessageBox::Save);
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success || !summary.dirty) return true;
+    const auto choice = QMessageBox::warning(
+        this,
+        tr("Unsaved changes"),
+        tr("The current document has unsaved changes.\n\nSave before %1?").arg(action),
+        QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
+        QMessageBox::Save);
     if (choice == QMessageBox::Cancel) return false;
-    if (choice == QMessageBox::Save) { saveDocument(); TcqtProjectSummary after{}; return tcqt_project_summary(&after).success && !after.dirty; }
+    if (choice == QMessageBox::Save) return performSave(false);
     return true;
 }
 
 void MainWindow::newDocument() {
     if (!confirmDocumentReplacement(tr("creating a new project"))) return;
-    const auto result = tcqt_new_document(); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
+    const auto result = tcqt_new_document();
+    reportBridgeStatus(statusText(result), result.success);
+    if (result.success) rebuildFromRust();
 }
 
 void MainWindow::openDocument() {
     if (!confirmDocumentReplacement(tr("opening another project"))) return;
-    TcqtProjectSummary summary{}; tcqt_project_summary(&summary); const auto initial = text(summary.path);
-    const auto path = QFileDialog::getOpenFileName(this, tr("Open Ternary Contour Table"), initial.isEmpty() ? QString() : QFileInfo(initial).absolutePath(), tr("Ternary Contour Table (*.tct)"));
+    TcqtProjectSummary summary{};
+    tcqt_project_summary(&summary);
+    const auto initial = text(summary.path);
+    const auto path = QFileDialog::getOpenFileName(
+        this,
+        tr("Open Ternary Contour Table"),
+        initial.isEmpty() ? QString() : QFileInfo(initial).absolutePath(),
+        tr("Ternary Contour Table (*.tct)"));
     if (path.isEmpty()) return;
-    const auto encoded = path.toUtf8(); const auto result = tcqt_open_document(encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
+    const auto encoded = path.toUtf8();
+    const auto result = tcqt_open_document(encoded.constData());
+    if (!result.success) {
+        QMessageBox::critical(this, tr("Could not open project"),
+                              tr("Path:\n%1\n\nReason:\n%2\n\nThe current document was not changed.")
+                                  .arg(path, statusText(result)));
+        return;
+    }
+    rebuildFromRust();
+    TcqtProjectSummary opened{};
+    tcqt_project_summary(&opened);
+    reportBridgeStatus(
+        tr("Opened %1 - %2").arg(QFileInfo(path).fileName(), documentStatusLabel(opened)),
+        true);
 }
 
 bool MainWindow::saveToPath(const QString& path) {
     if (path.isEmpty()) return false;
-    const auto encoded = path.toUtf8(); const auto result = tcqt_save_document(encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_); return result.success;
-}
-void MainWindow::saveDocument() {
-    TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
-    const auto path = text(summary.path); if (path.isEmpty()) { saveDocumentAs(); return; } saveToPath(path);
-}
-void MainWindow::saveDocumentAs() {
-    TcqtProjectSummary summary{}; tcqt_project_summary(&summary); const auto path = QFileDialog::getSaveFileName(this, tr("Save Ternary Contour Table"), text(summary.path), tr("Ternary Contour Table (*.tct)"));
-    if (!path.isEmpty()) saveToPath(path);
+    const auto encoded = path.toUtf8();
+    const auto result = tcqt_save_document(encoded.constData());
+    if (result.outcome != 0) {
+        const auto title = result.outcome == 1
+            ? tr("Cannot save project")
+            : result.outcome == 2 ? tr("Could not serialize project") : tr("Could not save project");
+        auto details = text(result.message);
+        if (result.outcome == 3) {
+            details += tr("\n\nPath:\n%1").arg(path);
+        }
+        details += tr("\n\nNo file was written.\nThe project remains open and modified.");
+        QMessageBox::critical(this, title, details);
+        ui_->statusMain->showMessage(title, 10000);
+        return false;
+    }
+    rebuildFromRust(selected_grid_);
+    reportBridgeStatus(text(result.message), true);
+    return true;
 }
 
+bool MainWindow::performSave(bool save_as) {
+    commitPendingEditors();
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return false;
+    if (editor_commit_failed_) {
+        QMessageBox::critical(this, tr("Cannot save project"), tr("An active editor contains invalid input.\n\nNo file was written."));
+        return false;
+    }
+    if (!summary.saveable) {
+        QMessageBox::critical(
+            this,
+            tr("Cannot save project"),
+            tr("The project contains invalid data:\n\n%1\n\nNo file was written.\nThe project remains open and modified.")
+                .arg(text(summary.blocking_reason)));
+        return false;
+    }
+    QString path = text(summary.path);
+    if (save_as || path.isEmpty()) {
+        path = QFileDialog::getSaveFileName(
+            this,
+            tr("Save Ternary Contour Table"),
+            path,
+            tr("Ternary Contour Table (*.tct)"));
+        if (path.isEmpty()) return false;
+        path = normalizeTctPath(path);
+    }
+    return saveToPath(path);
+}
+
+void MainWindow::saveDocument() {
+    performSave(false);
+}
+void MainWindow::saveDocumentAs() {
+    performSave(true);
+}
 void MainWindow::exportPng() {
     const auto path = QFileDialog::getSaveFileName(this, tr("Export PNG"), {}, tr("PNG image (*.png)"));
     if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_plot(encoded.constData(), 0); reportBridgeStatus(statusText(result), result.success);

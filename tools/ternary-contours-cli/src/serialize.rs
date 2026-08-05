@@ -62,7 +62,10 @@ pub fn serialize_tct(
     dataset: &TabulatedTernaryDataset,
     options: &TctSerializeOptions,
 ) -> Result<String, SerializeError> {
-    dataset.validate_structure().map_err(SerializeError)?;
+    dataset
+        .validate_saveable_document()
+        .map_err(SerializeError)?;
+    validate_serializable_declarations(dataset)?;
     if options.missing_token.trim().is_empty()
         || options.missing_token.contains(char::is_whitespace)
     {
@@ -125,6 +128,33 @@ pub fn serialize_tct(
     Ok(output)
 }
 
+fn validate_serializable_declarations(
+    dataset: &TabulatedTernaryDataset,
+) -> Result<(), SerializeError> {
+    for property in &dataset.properties {
+        if property.name.contains(['"', '\t', '\n', '\r'])
+            || property.unit.contains(['\t', '\n', '\r'])
+        {
+            return Err(SerializeError(format!(
+                "property name {} contains text that cannot be represented safely in TCT",
+                property.name
+            )));
+        }
+    }
+    for grid in &dataset.grids {
+        for field in grid.fields() {
+            if field.property.contains(['"', '\t', '\n', '\r'])
+                || field.column_name.contains(['"', '\t', '\n', '\r'])
+            {
+                return Err(SerializeError(format!(
+                    "grid field text in {} cannot be represented safely in TCT",
+                    grid.name()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
 fn serialize_grid(
     output: &mut String,
     dataset: &TabulatedTernaryDataset,
@@ -302,7 +332,10 @@ mod tests {
         let second = serialize_tct(&dataset, &TctSerializeOptions::default()).unwrap();
         assert_eq!(first, second);
         let reparsed = parse_str(&first).unwrap();
-        assert_eq!(reparsed.components, dataset.components);
+        assert_eq!(
+            reparsed.components.map(|component| component.name),
+            dataset.components.map(|component| component.name)
+        );
         assert_eq!(reparsed.phases, dataset.phases);
         assert_eq!(reparsed.grids.len(), dataset.grids.len());
     }
@@ -321,6 +354,24 @@ mod tests {
         assert_eq!(
             reparsed.grids[0].fields()[1].values,
             dataset.grids[0].fields()[1].values
+        );
+    }
+
+    #[test]
+    fn draft_with_empty_phases_and_grids_round_trips() {
+        let dataset = crate::empty_project_dataset();
+        assert!(dataset.validate_saveable_document().is_ok());
+        assert!(dataset.validate_calculation_readiness().is_err());
+        let text = serialize_tct(&dataset, &TctSerializeOptions::default()).unwrap();
+        assert!(text.contains("[phases]\n[/phases]"));
+        assert!(!text.contains("[grid "));
+        let reparsed = parse_str(&text).unwrap();
+        assert!(reparsed.phases.is_empty());
+        assert!(reparsed.grids.is_empty());
+        assert_eq!(reparsed.title, dataset.title);
+        assert_eq!(
+            reparsed.components.map(|component| component.name),
+            dataset.components.map(|component| component.name)
         );
     }
 

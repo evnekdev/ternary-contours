@@ -8,7 +8,11 @@ struct TcqtCalculationResult { bool success; std::uint64_t request_id; std::uint
 struct TcqtProjectSummary {
     char title[128]; char path[512]; char component_a[128]; char component_b[128]; char component_c[128];
     std::uint32_t phase_count; std::uint32_t property_count; std::uint32_t grid_count;
-    bool dirty; std::uint64_t revision;
+    bool dirty; std::uint64_t revision; std::uint64_t saved_revision;
+    std::uint32_t validity; bool saveable; bool calculation_available; char blocking_reason[512];
+};
+struct TcqtSaveResult {
+    std::uint32_t outcome; char message[512]; char path[512];
 };
 struct TcqtPhase { std::uint32_t id; char name[128]; };
 struct TcqtProperty { std::uint32_t ordinal; bool required; char name[128]; char unit[128]; };
@@ -20,7 +24,7 @@ struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_
 
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);
-TcqtStatus tcqt_save_document(const char* path);
+TcqtSaveResult tcqt_save_document(const char* path);
 TcqtStatus tcqt_project_summary(TcqtProjectSummary* output);
 TcqtStatus tcqt_phase_at(std::uint32_t index, TcqtPhase* output);
 TcqtStatus tcqt_property_at(std::uint32_t index, TcqtProperty* output);

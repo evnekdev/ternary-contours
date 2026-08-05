@@ -411,17 +411,6 @@ pub fn parse_str(input: &str) -> Result<TabulatedTernaryDataset, TctError> {
         }
         grids.push(grid);
     }
-    if grids.is_empty() {
-        return Err(TctError::new(1, "at least one grid is required"));
-    }
-    for phase in &phases {
-        if !defined_fields.contains(&(phase.id, "T".to_owned())) {
-            return Err(TctError::new(
-                phase.line,
-                format!("phase `{}` has no required `T` field", phase.name),
-            ));
-        }
-    }
     Ok(TabulatedTernaryDataset {
         source_path: None,
         version,
@@ -510,9 +499,6 @@ fn validate_declarations(
     phases: &[PhaseDefinition],
     properties: &[PropertyDefinition],
 ) -> Result<(), TctError> {
-    if phases.is_empty() {
-        return Err(TctError::new(1, "at least one phase is required"));
-    }
     if phases.iter().any(|phase| phase.name.is_empty())
         || has_duplicates_by(phases, |phase| phase.name.clone())
     {
@@ -523,6 +509,15 @@ fn validate_declarations(
     }
     if has_duplicates_by(phases, |phase| phase.id) {
         return Err(TctError::new(phases[0].line, "phase IDs must be unique"));
+    }
+    if properties
+        .iter()
+        .any(|property| property.name.trim().is_empty() || property.unit.trim().is_empty())
+    {
+        return Err(TctError::new(
+            properties.first().map_or(1, |property| property.line),
+            "property names and units must be non-empty",
+        ));
     }
     if has_duplicates_by(properties, |property| property.name.clone()) {
         return Err(TctError::new(

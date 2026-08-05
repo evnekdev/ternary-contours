@@ -5,6 +5,8 @@
 //! in Rust; no second document parser or NaN-based missing representation exists
 //! in the C++ layer.
 
+#![allow(clippy::missing_safety_doc)]
+
 use std::{
     ffi::CStr,
     os::raw::c_char,
@@ -52,6 +54,19 @@ pub struct TcqtProjectSummary {
     pub grid_count: u32,
     pub dirty: bool,
     pub revision: u64,
+    pub saved_revision: u64,
+    /// 0 invalid, 1 draft-valid, 2 calculation-ready.
+    pub validity: u32,
+    pub saveable: bool,
+    pub calculation_available: bool,
+    pub blocking_reason: [u8; MESSAGE],
+}
+#[repr(C)]
+pub struct TcqtSaveResult {
+    /// 0 saved, 1 invalid document, 2 serialization failure, 3 write failure.
+    pub outcome: u32,
+    pub message: [u8; MESSAGE],
+    pub path: [u8; PATH],
 }
 #[repr(C)]
 pub struct TcqtPhase {
@@ -114,9 +129,11 @@ pub struct TcqtProjectionRecord {
 #[derive(Clone)]
 struct ProjectDocument {
     dataset: TabulatedTernaryDataset,
+    saved_dataset: TabulatedTernaryDataset,
     path: Option<PathBuf>,
     dirty: bool,
     revision: u64,
+    saved_revision: u64,
     undo: Vec<TabulatedTernaryDataset>,
     redo: Vec<TabulatedTernaryDataset>,
     contract: GuiContractState,
@@ -127,9 +144,11 @@ impl ProjectDocument {
     fn new() -> Self {
         Self {
             dataset: empty_project_dataset(),
+            saved_dataset: empty_project_dataset(),
             path: None,
             dirty: false,
             revision: 1,
+            saved_revision: 1,
             undo: Vec::new(),
             redo: Vec::new(),
             contract: GuiContractState::default(),
@@ -137,20 +156,22 @@ impl ProjectDocument {
             projection_records: Vec::new(),
         }
     }
+    fn mark_revision_changed(&mut self) {
+        self.revision = self.revision.saturating_add(1);
+        self.dirty = self.dataset != self.saved_dataset;
+        self.contract.revisions.dataset = Revision(self.revision);
+    }
+
     fn mutate(
         &mut self,
         edit: impl FnOnce(&mut TabulatedTernaryDataset) -> Result<(), String>,
     ) -> Result<(), String> {
         let prior = self.dataset.clone();
-        edit(&mut self.dataset)?;
-        // A new document is intentionally allowed to be incomplete while the
-        // user adds its first phase and grid. Once both collections exist, use
-        // the normal dataset validator so loaded/populated projects retain all
-        // declaration and field invariants.
-        if !self.dataset.phases.is_empty()
-            && !self.dataset.grids.is_empty()
-            && let Err(error) = self.dataset.validate_structure()
-        {
+        if let Err(error) = edit(&mut self.dataset) {
+            self.dataset = prior;
+            return Err(error);
+        }
+        if let Err(error) = self.dataset.validate_document_structure() {
             self.dataset = prior;
             return Err(error);
         }
@@ -159,9 +180,7 @@ impl ProjectDocument {
             self.undo.remove(0);
         }
         self.redo.clear();
-        self.dirty = true;
-        self.revision = self.revision.saturating_add(1);
-        self.contract.revisions.dataset = Revision(self.revision);
+        self.mark_revision_changed();
         let _ = update(&mut self.contract, UiAction::DatasetEdited);
         Ok(())
     }
@@ -170,12 +189,14 @@ impl ProjectDocument {
         mut dataset: TabulatedTernaryDataset,
         path: PathBuf,
     ) -> Result<(), String> {
-        dataset.validate_structure()?;
+        dataset.validate_saveable_document()?;
         dataset.source_path = Some(path.clone());
         self.dataset = dataset;
+        self.saved_dataset = self.dataset.clone();
         self.path = Some(path);
-        self.dirty = false;
         self.revision = self.revision.saturating_add(1);
+        self.saved_revision = self.revision;
+        self.dirty = false;
         self.undo.clear();
         self.redo.clear();
         self.contract = GuiContractState::default();
@@ -205,6 +226,13 @@ fn status(result: Result<(), String>) -> TcqtStatus {
             success: false,
             message: bytes(&error),
         },
+    }
+}
+fn save_result(outcome: u32, message: impl AsRef<str>, path: impl AsRef<str>) -> TcqtSaveResult {
+    TcqtSaveResult {
+        outcome,
+        message: bytes(message.as_ref()),
+        path: bytes(path.as_ref()),
     }
 }
 unsafe fn input(value: *const c_char, label: &str) -> Result<String, String> {
@@ -275,21 +303,53 @@ pub unsafe extern "C" fn tcqt_open_document(path: *const c_char) -> TcqtStatus {
     })())
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tcqt_save_document(path: *const c_char) -> TcqtStatus {
-    status((|| {
-        // SAFETY: Qt passes a NUL-terminated UTF-8 filesystem path.
-        let path = PathBuf::from(unsafe { input(path, "document path") }?);
-        let mut state = document()
-            .lock()
-            .map_err(|_| "project lock is unavailable".to_owned())?;
-        let text = serialize_tct(&state.dataset, &TctSerializeOptions::default())
-            .map_err(|error| error.to_string())?;
-        save_tct_atomic(&path, &text).map_err(|error| error.to_string())?;
-        state.dataset.source_path = Some(path.clone());
-        state.path = Some(path);
-        state.dirty = false;
-        Ok(())
-    })())
+pub unsafe extern "C" fn tcqt_save_document(path: *const c_char) -> TcqtSaveResult {
+    let path = match unsafe { input(path, "document path") } {
+        Ok(path) => PathBuf::from(path),
+        Err(error) => return save_result(3, error, ""),
+    };
+    let attempted = path.to_string_lossy().into_owned();
+    let mut state = match document().lock() {
+        Ok(state) => state,
+        Err(_) => return save_result(3, "project lock is unavailable", &attempted),
+    };
+    if let Err(error) = state.dataset.validate_saveable_document() {
+        return save_result(1, format!("Cannot save project: {error}"), &attempted);
+    }
+    let text = match serialize_tct(&state.dataset, &TctSerializeOptions::default()) {
+        Ok(text) => text,
+        Err(error) => {
+            return save_result(
+                2,
+                format!("Could not serialize project: {error}"),
+                &attempted,
+            );
+        }
+    };
+    if let Err(error) = save_tct_atomic(&path, &text) {
+        return save_result(3, format!("Could not save project: {error}"), &attempted);
+    }
+    state.dataset.source_path = Some(path.clone());
+    state.path = Some(path);
+    state.saved_revision = state.revision;
+    state.saved_dataset = state.dataset.clone();
+    state.dirty = false;
+    let (validity, _, _, _) = document_status(&state.dataset);
+    let message = if validity == 1 {
+        format!("Saved {} - draft document", attempted)
+    } else {
+        format!("Saved {}", attempted)
+    };
+    save_result(0, message, &attempted)
+}
+fn document_status(dataset: &TabulatedTernaryDataset) -> (u32, bool, bool, String) {
+    match dataset.validate_saveable_document() {
+        Err(error) => (0, false, false, error),
+        Ok(()) => match dataset.validate_calculation_readiness() {
+            Ok(()) => (2, true, true, String::new()),
+            Err(error) => (1, true, false, error),
+        },
+    }
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_project_summary(output_value: *mut TcqtProjectSummary) -> TcqtStatus {
@@ -299,6 +359,8 @@ pub unsafe extern "C" fn tcqt_project_summary(output_value: *mut TcqtProjectSumm
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
+        let (validity, saveable, calculation_available, blocking_reason) =
+            document_status(&state.dataset);
         *output_value = TcqtProjectSummary {
             title: bytes(state.dataset.title.as_deref().unwrap_or("Untitled")),
             path: bytes(
@@ -316,6 +378,11 @@ pub unsafe extern "C" fn tcqt_project_summary(output_value: *mut TcqtProjectSumm
             grid_count: state.dataset.grids.len() as u32,
             dirty: state.dirty,
             revision: state.revision,
+            saved_revision: state.saved_revision,
+            validity,
+            saveable,
+            calculation_available,
+            blocking_reason: bytes(&blocking_reason),
         };
         Ok(())
     })())
@@ -780,8 +847,7 @@ pub extern "C" fn tcqt_undo() -> TcqtStatus {
         let prior = state.undo.pop().ok_or("nothing to undo")?;
         let current = std::mem::replace(&mut state.dataset, prior);
         state.redo.push(current);
-        state.dirty = true;
-        state.revision = state.revision.saturating_add(1);
+        state.mark_revision_changed();
         Ok(())
     })())
 }
@@ -794,8 +860,7 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
         let next = state.redo.pop().ok_or("nothing to redo")?;
         let current = std::mem::replace(&mut state.dataset, next);
         state.undo.push(current);
-        state.dirty = true;
-        state.revision = state.revision.saturating_add(1);
+        state.mark_revision_changed();
         Ok(())
     })())
 }
@@ -805,6 +870,10 @@ pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
+        state
+            .dataset
+            .validate_calculation_readiness()
+            .map_err(|error| format!("Calculation unavailable: {error}"))?;
         let mut contract = state.contract.clone();
         let effects = update(&mut contract, UiAction::RecalculateRequested);
         let request_id = effects
@@ -1043,7 +1112,7 @@ pub extern "C" fn tcqt_set_irregular_composition(
                 if grid.compositions.iter().enumerate().any(|(index, point)| {
                     index != row_index as usize
                         && point
-                            .into_iter()
+                            .iter()
                             .zip([a, b, c])
                             .map(|(left, right)| (left - right).abs())
                             .fold(0.0, f64::max)
@@ -1130,6 +1199,31 @@ mod tests {
         assert_eq!(state.dataset.properties[0].name, "T");
         assert!(state.dataset.properties[0].required);
         assert_eq!(state.dataset.properties[0].unit, "C");
+    }
+
+    #[test]
+    fn draft_save_and_reopen_round_trips_transactionally() {
+        let path =
+            std::env::temp_dir().join(format!("ternary-contours-draft-{}.tct", std::process::id()));
+        let encoded = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            assert!(tcqt_new_document().success);
+            let saved = tcqt_save_document(encoded.as_ptr());
+            assert_eq!(saved.outcome, 0);
+            assert!(path.exists());
+            let mut summary = std::mem::zeroed();
+            assert!(tcqt_project_summary(&mut summary).success);
+            assert_eq!(summary.phase_count, 0);
+            assert_eq!(summary.grid_count, 0);
+            assert!(!summary.dirty);
+            assert!(tcqt_open_document(encoded.as_ptr()).success);
+            let mut reopened = std::mem::zeroed();
+            assert!(tcqt_project_summary(&mut reopened).success);
+            assert_eq!(reopened.phase_count, 0);
+            assert_eq!(reopened.grid_count, 0);
+            assert!(!reopened.dirty);
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

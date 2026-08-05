@@ -62,6 +62,8 @@ integers and do not depend on declaration order. Property names are unique.
 `T required <unit>` is mandatory; units are descriptive strings and are not
 converted automatically.
 
+A document with an empty `[phases]` section and no grid sections is a valid draft document. Drafts preserve their title, components, and required properties and can be saved and reopened; calculation readiness is validated separately and requires phases, grids, and usable temperature coverage.
+
 ## Grid grammar
 
 A grid has this shape:

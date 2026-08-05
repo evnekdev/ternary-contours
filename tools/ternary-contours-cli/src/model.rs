@@ -517,8 +517,8 @@ impl TabulatedTernaryDataset {
             .find(|property| property.name == name)
     }
 
-    /// Validate declarations and grid references without requiring scalar values.
-    pub fn validate_structure(&self) -> Result<(), String> {
+    /// Validate declarations and every object that exists. Empty phase and grid collections are valid drafts.
+    pub fn validate_document_structure(&self) -> Result<(), String> {
         if self
             .components
             .iter()
@@ -535,9 +535,6 @@ impl TabulatedTernaryDataset {
         {
             return Err("component names must be non-empty and unique".into());
         }
-        if self.phases.is_empty() {
-            return Err("at least one phase is required".into());
-        }
         if self.phases.iter().any(|phase| phase.name.trim().is_empty())
             || self.phases.iter().enumerate().any(|(index, phase)| {
                 self.phases[..index]
@@ -551,14 +548,14 @@ impl TabulatedTernaryDataset {
         if self
             .properties
             .iter()
-            .any(|property| property.name.trim().is_empty())
+            .any(|property| property.name.trim().is_empty() || property.unit.trim().is_empty())
             || self.properties.iter().enumerate().any(|(index, property)| {
                 self.properties[..index]
                     .iter()
                     .any(|previous| previous.name == property.name)
             })
         {
-            return Err("property names must be non-empty and unique".into());
+            return Err("property names and units must be non-empty and unique".into());
         }
         let Some(temperature) = self.properties.iter().find(|property| property.name == "T") else {
             return Err("required property T is missing".into());
@@ -566,8 +563,22 @@ impl TabulatedTernaryDataset {
         if !temperature.required {
             return Err("property T must remain required".into());
         }
-        if self.grids.is_empty() {
-            return Err("at least one grid is required".into());
+        if self.missing_tokens.is_empty()
+            || self
+                .missing_tokens
+                .iter()
+                .any(|token| token.trim().is_empty() || token.chars().any(char::is_whitespace))
+        {
+            return Err("missing-value tokens must be non-blank single tokens".into());
+        }
+        if self.grids.iter().any(|grid| grid.name().trim().is_empty())
+            || self.grids.iter().enumerate().any(|(index, grid)| {
+                self.grids[..index]
+                    .iter()
+                    .any(|previous| previous.name() == grid.name())
+            })
+        {
+            return Err("grid names must be non-empty and unique".into());
         }
         for grid in &self.grids {
             match grid {
@@ -644,13 +655,62 @@ impl TabulatedTernaryDataset {
                 ));
             }
         }
+        Ok(())
+    }
+    /// Backwards-compatible structural-validation name.
+    pub fn validate_structure(&self) -> Result<(), String> {
+        self.validate_document_structure()
+    }
+
+    /// Validate that the document can be represented safely as TCT.
+    pub fn validate_saveable_document(&self) -> Result<(), String> {
+        self.validate_document_structure()?;
+        let unsafe_text = |value: &str| value.contains(['"', '\t', '\n', '\r']);
+        if self.title.as_deref().is_some_and(unsafe_text)
+            || self
+                .components
+                .iter()
+                .any(|component| unsafe_text(&component.name))
+            || self.phases.iter().any(|phase| unsafe_text(&phase.name))
+            || self
+                .properties
+                .iter()
+                .any(|property| unsafe_text(&property.name) || unsafe_text(&property.unit))
+            || self.grids.iter().any(|grid| {
+                unsafe_text(grid.name())
+                    || grid.fields().iter().any(|field| {
+                        unsafe_text(&field.property) || unsafe_text(&field.column_name)
+                    })
+            })
+        {
+            return Err("document declarations contain quote, tab, or newline text that cannot be represented safely in TCT".into());
+        }
+        Ok(())
+    }
+
+    /// Validate the additional inputs required by liquidus calculation.
+    pub fn validate_calculation_readiness(&self) -> Result<(), String> {
+        self.validate_document_structure()?;
+        if self.phases.is_empty() {
+            return Err("calculation requires at least one phase".into());
+        }
+        if self.grids.is_empty() {
+            return Err("calculation requires at least one grid".into());
+        }
         for phase in &self.phases {
-            if !self.grids.iter().any(|grid| {
-                grid.fields()
-                    .iter()
-                    .any(|field| field.phase_id == phase.id && field.property == "T")
-            }) {
+            let temperature = self
+                .grids
+                .iter()
+                .flat_map(TabulatedGrid::fields)
+                .find(|field| field.phase_id == phase.id && field.property == "T");
+            let Some(field) = temperature else {
                 return Err(format!("phase {} has no required T field", phase.name));
+            };
+            if !field.values.iter().any(TabulatedValue::is_calculated) {
+                return Err(format!(
+                    "required Temperature values are missing for phase {}",
+                    phase.name
+                ));
             }
         }
         Ok(())
@@ -731,6 +791,17 @@ mod tests {
         assert!(validate_new_regular_grid_subdivisions(50).is_ok());
     }
 
+    #[test]
+    fn empty_project_is_saveable_but_not_calculation_ready() {
+        let dataset = empty_project_dataset();
+        assert!(dataset.validate_document_structure().is_ok());
+        assert!(dataset.validate_saveable_document().is_ok());
+        assert!(dataset.validate_calculation_readiness().is_err());
+        assert!(dataset.phases.is_empty());
+        assert!(dataset.grids.is_empty());
+        assert_eq!(dataset.properties[0].name, "T");
+        assert_eq!(dataset.properties[0].unit, "C");
+    }
     #[test]
     fn empty_project_dataset_has_only_required_declarations() {
         let dataset = empty_project_dataset();
