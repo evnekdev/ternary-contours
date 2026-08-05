@@ -46,7 +46,7 @@ void TernaryCanvas::wheelEvent(QWheelEvent* event) { const auto factor = event->
 
 void TernaryCanvas::paintEvent(QPaintEvent*) {
     QPainter painter(this); painter.setRenderHint(QPainter::Antialiasing, true); painter.fillRect(rect(), palette().base());
-    const auto t = triangle(); QPainterPath boundary; boundary.addPolygon(t); painter.setPen(QPen(palette().text().color(), 1.5)); painter.setBrush(Qt::NoBrush); painter.drawPath(boundary);
+    const auto t = triangle(); QPainterPath boundary; boundary.addPolygon(t); boundary.closeSubpath(); painter.setPen(QPen(palette().text().color(), 1.5)); painter.setBrush(Qt::NoBrush); painter.drawPath(boundary);
     if (grid_visible_) {
         painter.setPen(QPen(palette().mid().color(), 0.75, Qt::DashLine));
         for (int step = 1; step < 10; ++step) { const auto value = step / 10.0; painter.drawLine(pointForComposition(value, 1.0 - value, 0.0), pointForComposition(value, 0.0, 1.0 - value)); painter.drawLine(pointForComposition(1.0 - value, value, 0.0), pointForComposition(0.0, value, 1.0 - value)); painter.drawLine(pointForComposition(1.0 - value, 0.0, value), pointForComposition(0.0, 1.0 - value, value)); }
