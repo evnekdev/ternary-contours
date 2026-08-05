@@ -4,6 +4,8 @@
 #include "rust_bridge.hpp"
 #include "ternary_canvas.hpp"
 #include "ui_add_grid_dialog.h"
+#include <algorithm>
+#include <functional>
 #include "ui_main_window.h"
 
 #include <QAbstractItemView>
@@ -23,24 +25,51 @@
 #include <QPushButton>
 #include <QStandardItem>
 #include <QStandardItemModel>
+#include <QStyle>
 #include <QtConcurrentRun>
 
 namespace {
-constexpr auto node_kind_role = Qt::UserRole;
-constexpr auto node_id_role = Qt::UserRole + 1;
-enum class NodeKind { Project, Title, Corner, Phase, Property, Grid, Field };
+constexpr int node_kind_role = Qt::UserRole;
+constexpr int grid_id_role = Qt::UserRole + 1;
+constexpr int phase_id_role = Qt::UserRole + 2;
+constexpr int property_id_role = Qt::UserRole + 3;
+constexpr int field_id_role = Qt::UserRole + 4;
+enum class NodeKind {
+    Project,
+    Title,
+    Corner,
+    PhaseCollection,
+    Phase,
+    PropertyCollection,
+    Property,
+    GridCollection,
+    Grid,
+    GridPhase,
+    GridField
+};
 constexpr int min_regular_subdivisions = 1;
 constexpr int max_regular_subdivisions = 50;
 constexpr int default_regular_subdivisions = 10;
 QString text(const char* value) { return QString::fromUtf8(value); }
 QString statusText(const TcqtStatus& status) { return text(status.message); }
 QString calculationText(const TcqtCalculationResult& result) { return text(result.message); }
-QStandardItem* node(const QString& label, NodeKind kind, std::uint32_t id = 0) {
+QStandardItem* node(const QString& label, NodeKind kind, std::uint32_t grid_id = 0,
+                    std::uint32_t phase_id = 0, std::uint32_t property_id = 0,
+                    std::uint32_t field_id = 0) {
     auto* item = new QStandardItem(label);
     item->setEditable(false);
     item->setData(static_cast<int>(kind), node_kind_role);
-    item->setData(id, node_id_role);
+    item->setData(grid_id, grid_id_role);
+    item->setData(phase_id, phase_id_role);
+    item->setData(property_id, property_id_role);
+    item->setData(field_id, field_id_role);
+    if (kind == NodeKind::Grid) item->setIcon(qApp->style()->standardIcon(QStyle::SP_DirIcon));
+    if (kind == NodeKind::GridPhase) item->setIcon(qApp->style()->standardIcon(QStyle::SP_ComputerIcon));
+    if (kind == NodeKind::GridField) item->setIcon(qApp->style()->standardIcon(QStyle::SP_FileIcon));
     return item;
+}
+bool isGridNode(NodeKind kind) {
+    return kind == NodeKind::Grid || kind == NodeKind::GridPhase || kind == NodeKind::GridField;
 }
 TcqtCalculationResult calculateOnWorker() { return tcqt_calculate_current(); }
 }
@@ -128,35 +157,161 @@ void MainWindow::rebuildFromRust(std::uint32_t preferred_grid) {
 }
 
 void MainWindow::rebuildTree() {
-    TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
-    tree_model_->clear(); tree_model_->setHorizontalHeaderLabels({tr("Project")});
+    const auto previous = ui_->treeProject->currentIndex();
+    const auto previous_kind = previous.data(node_kind_role).toInt();
+    const auto previous_grid = previous.data(grid_id_role).toUInt();
+    const auto previous_phase = previous.data(phase_id_role).toUInt();
+    const auto previous_property = previous.data(property_id_role).toUInt();
+    const auto previous_field = previous.data(field_id_role).toUInt();
+
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+
+
+    QVector<TcqtPhase> phases;
+    for (std::uint32_t index = 0; index < summary.phase_count; ++index) {
+        TcqtPhase phase{};
+        if (tcqt_phase_at(index, &phase).success) phases.append(phase);
+    }
+    QVector<TcqtProperty> properties;
+    for (std::uint32_t index = 0; index < summary.property_count; ++index) {
+        TcqtProperty property{};
+        if (tcqt_property_at(index, &property).success) properties.append(property);
+    }
+
+    tree_model_->clear();
+    tree_model_->setHorizontalHeaderLabels({tr("Project")});
     auto* project = node(text(summary.title), NodeKind::Project);
     project->appendRow(node(tr("Title: %1").arg(text(summary.title)), NodeKind::Title));
-    auto* corners = node(tr("Corners"), NodeKind::Project);
+
+    auto* corners = node(tr("Corners"), NodeKind::Corner);
     corners->appendRow(node(tr("A: %1").arg(text(summary.component_a)), NodeKind::Corner, 0));
-    corners->appendRow(node(tr("B: %1").arg(text(summary.component_b)), NodeKind::Corner, 1));
-    corners->appendRow(node(tr("C: %1").arg(text(summary.component_c)), NodeKind::Corner, 2)); project->appendRow(corners);
-    auto* phases = node(tr("Phases"), NodeKind::Project);
-    for (std::uint32_t index = 0; index < summary.phase_count; ++index) { TcqtPhase phase{}; if (tcqt_phase_at(index, &phase).success) phases->appendRow(node(tr("[%1] %2").arg(phase.id).arg(text(phase.name)), NodeKind::Phase, phase.id)); }
-    project->appendRow(phases);
-    auto* properties = node(tr("Properties"), NodeKind::Project);
-    for (std::uint32_t index = 0; index < summary.property_count; ++index) { TcqtProperty property{}; if (tcqt_property_at(index, &property).success) properties->appendRow(node(tr("%1%2 (%3)").arg(text(property.name), property.required ? tr(" required") : QString(), text(property.unit)), NodeKind::Property, index)); }
-    project->appendRow(properties);
-    auto* grids = node(tr("Grids"), NodeKind::Project);
-    for (std::uint32_t index = 0; index < summary.grid_count; ++index) {
-        TcqtGrid grid{}; if (!tcqt_grid_at(index, &grid).success) continue;
-        auto* grid_node = node(tr("%1 — %2 (%3 rows)").arg(grid.kind == 0 ? tr("Regular") : tr("Irregular"), text(grid.name)).arg(grid.row_count), NodeKind::Grid, index);
-        for (std::uint32_t field_index = 0; field_index < grid.field_count; ++field_index) { TcqtField field{}; if (tcqt_grid_field_at(index, field_index, &field).success) grid_node->appendRow(node(text(field.column_name), NodeKind::Field, index)); }
-        grids->appendRow(grid_node);
+    corners->appendRow(node(tr("B: %1").arg(text(summary.component_b)), NodeKind::Corner));
+    corners->appendRow(node(tr("C: %1").arg(text(summary.component_c)), NodeKind::Corner));
+    project->appendRow(corners);
+
+    auto* phase_collection = node(tr("Phases"), NodeKind::PhaseCollection);
+    for (const auto& phase : phases) {
+        phase_collection->appendRow(node(tr("[%1] %2").arg(phase.id).arg(text(phase.name)), NodeKind::Phase, 0, phase.id));
     }
-    project->appendRow(grids); tree_model_->appendRow(project); ui_->treeProject->expandAll();
+    project->appendRow(phase_collection);
+
+    auto* property_collection = node(tr("Properties"), NodeKind::PropertyCollection);
+    for (int index = 0; index < properties.size(); ++index) {
+        const auto& property = properties.at(index);
+        property_collection->appendRow(node(
+            tr("%1%2 (%3)").arg(text(property.name), property.required ? tr(" required") : QString(), text(property.unit)),
+            NodeKind::Property, 0, 0, static_cast<std::uint32_t>(property.ordinal)));
+    }
+    project->appendRow(property_collection);
+
+    auto* grid_collection = node(tr("Grids"), NodeKind::GridCollection);
+    for (std::uint32_t grid_index = 0; grid_index < summary.grid_count; ++grid_index) {
+        TcqtGrid grid{};
+        if (!tcqt_grid_at(grid_index, &grid).success) continue;
+        auto* grid_node = node(
+            tr("%1 - %2 (%3 rows)").arg(grid.kind == 0 ? tr("Regular") : tr("Irregular"), text(grid.name)).arg(grid.row_count),
+            NodeKind::Grid, grid_index);
+        grid_node->setToolTip(tr("%1 grid \"%2\"\n%3 rows\n%4 phase/property fields")
+                                  .arg(grid.kind == 0 ? tr("Regular") : tr("Irregular"), text(grid.name))
+                                  .arg(grid.row_count)
+                                  .arg(grid.field_count));
+
+        QVector<TcqtField> fields;
+        for (std::uint32_t field_index = 0; field_index < grid.field_count; ++field_index) {
+            TcqtField field{};
+            if (tcqt_grid_field_at(grid_index, field_index, &field).success) fields.append(field);
+        }
+        QVector<std::uint32_t> phase_ids;
+        for (const auto& field : fields) {
+            if (!phase_ids.contains(field.phase_id)) phase_ids.append(field.phase_id);
+        }
+        std::stable_sort(phase_ids.begin(), phase_ids.end(), [&](std::uint32_t left, std::uint32_t right) {
+            auto phase_order = [&](std::uint32_t id) {
+                for (int i = 0; i < phases.size(); ++i) if (phases.at(i).id == id) return i;
+                return static_cast<int>(phases.size());
+            };
+            return phase_order(left) < phase_order(right);
+        });
+
+        for (const auto phase_id : phase_ids) {
+            QString phase_name = tr("Unknown phase");
+            for (const auto& phase : phases) if (phase.id == phase_id) { phase_name = text(phase.name); break; }
+            QVector<TcqtField> phase_fields;
+            for (const auto& field : fields) if (field.phase_id == phase_id) phase_fields.append(field);
+            auto* phase_node = node(tr("[%1] %2").arg(phase_id).arg(phase_name), NodeKind::GridPhase, grid_index, phase_id);
+            phase_node->setToolTip(tr("Phase %1 [%2]\nIncluded in grid \"%3\"\n%4 property fields")
+                                       .arg(phase_name).arg(phase_id).arg(text(grid.name)).arg(phase_fields.size()));
+            QVector<std::uint32_t> added_fields;
+            auto append_field = [&](const TcqtField& field, std::uint32_t property_id) {
+                QString property_name = text(field.property);
+                QString property_unit;
+                for (const auto& property : properties) {
+                    if (property.ordinal == property_id || QString::fromUtf8(property.name) == property_name) {
+                        property_name = text(property.name);
+                        property_unit = text(property.unit);
+                        property_id = property.ordinal;
+                        break;
+                    }
+                }
+                auto* field_node = node(
+                    tr("%1 (%2)").arg(property_name, property_unit), NodeKind::GridField,
+                    grid_index, phase_id, property_id, field.index);
+                field_node->setToolTip(tr("%1 (%2)\nGrid: %3\nPhase: %4 [%5]")
+                                           .arg(property_name, property_unit, text(grid.name), phase_name).arg(phase_id));
+                phase_node->appendRow(field_node);
+                added_fields.append(field.index);
+            };
+            for (const auto& property : properties) {
+                for (const auto& field : phase_fields) {
+                    if (added_fields.contains(field.index)) continue;
+                    if (QString::fromUtf8(field.property) == text(property.name)) {
+                        append_field(field, property.ordinal);
+                    }
+                }
+            }
+            for (const auto& field : phase_fields) {
+                if (!added_fields.contains(field.index)) append_field(field, 0);
+            }
+            grid_node->appendRow(phase_node);
+        }
+        grid_collection->appendRow(grid_node);
+    }
+    project->appendRow(grid_collection);
+    tree_model_->appendRow(project);
+    ui_->treeProject->expandAll();
+
+    QModelIndex restored;
+    std::function<void(const QModelIndex&)> find_node = [&](const QModelIndex& parent) {
+        if (restored.isValid()) return;
+        for (int row = 0; row < tree_model_->rowCount(parent); ++row) {
+            const auto candidate = tree_model_->index(row, 0, parent);
+            if (candidate.data(node_kind_role).toInt() == previous_kind
+                && candidate.data(grid_id_role).toUInt() == previous_grid
+                && candidate.data(phase_id_role).toUInt() == previous_phase
+                && candidate.data(property_id_role).toUInt() == previous_property
+                && candidate.data(field_id_role).toUInt() == previous_field) {
+                restored = candidate;
+                return;
+            }
+            find_node(candidate);
+            if (restored.isValid()) return;
+        }
+    };
+    if (previous.isValid()) find_node({});
+    if (restored.isValid()) {
+        const auto old_synchronizing = synchronizing_;
+        synchronizing_ = true;
+        ui_->treeProject->setCurrentIndex(restored);
+        synchronizing_ = old_synchronizing;
+    }
 }
 void MainWindow::updateActionState() {
     TcqtProjectSummary summary{};
     if (!tcqt_project_summary(&summary).success) return;
     const auto selected = ui_->treeProject->currentIndex();
     const auto kind = selected.data(node_kind_role).toInt();
-    const bool grid_selected = kind == static_cast<int>(NodeKind::Grid);
+    const bool grid_selected = isGridNode(static_cast<NodeKind>(kind));
     const bool phase_selected = kind == static_cast<int>(NodeKind::Phase);
     ui_->actionGridRemove->setEnabled(grid_selected);
     ui_->actionGridDuplicate->setEnabled(grid_selected);
@@ -291,18 +446,19 @@ void MainWindow::exportLinesCsv() {
     reportBridgeStatus(statusText(result), result.success);
     if (result.success) rebuildFromRust();
 }void MainWindow::removeSelectedGrid() {
-    const auto index = ui_->treeProject->currentIndex(); if (index.data(node_kind_role).toInt() != static_cast<int>(NodeKind::Grid)) return;
+    const auto index = ui_->treeProject->currentIndex(); if (!isGridNode(static_cast<NodeKind>(index.data(node_kind_role).toInt()))) return;
     if (QMessageBox::question(this, tr("Remove grid"), tr("Remove the selected grid and its values?")) != QMessageBox::Yes) return;
-    const auto result = tcqt_remove_grid(index.data(node_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
+    const auto result = tcqt_remove_grid(index.data(grid_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
 }
 void MainWindow::duplicateSelectedGrid() {
-    const auto index = ui_->treeProject->currentIndex(); if (index.data(node_kind_role).toInt() != static_cast<int>(NodeKind::Grid)) return;
-    const auto result = tcqt_duplicate_grid(index.data(node_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
+    const auto index = ui_->treeProject->currentIndex(); if (!isGridNode(static_cast<NodeKind>(index.data(node_kind_role).toInt()))) return;
+    const auto result = tcqt_duplicate_grid(index.data(grid_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
 }
 void MainWindow::renameSelectedGrid() {
-    const auto index = ui_->treeProject->currentIndex(); if (index.data(node_kind_role).toInt() != static_cast<int>(NodeKind::Grid)) return;
-    bool accepted = false; const auto name = QInputDialog::getText(this, tr("Rename grid"), tr("Grid name:"), QLineEdit::Normal, index.data(Qt::DisplayRole).toString().section(QStringLiteral(" — "), 1).section(QStringLiteral(" ("), 0, 0), &accepted); if (!accepted) return;
-    const auto encoded = name.toUtf8(); const auto result = tcqt_rename_grid(index.data(node_id_role).toUInt(), encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
+    const auto index = ui_->treeProject->currentIndex(); if (!isGridNode(static_cast<NodeKind>(index.data(node_kind_role).toInt()))) return;
+    TcqtGrid grid{}; tcqt_grid_at(index.data(grid_id_role).toUInt(), &grid);
+    bool accepted = false; const auto name = QInputDialog::getText(this, tr("Rename grid"), tr("Grid name:"), QLineEdit::Normal, text(grid.name), &accepted); if (!accepted) return;
+    const auto encoded = name.toUtf8(); const auto result = tcqt_rename_grid(index.data(grid_id_role).toUInt(), encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
 }void MainWindow::addPhase() {
     bool accepted = false; const auto name = QInputDialog::getText(this, tr("Add phase"), tr("Phase name:"), QLineEdit::Normal, {}, &accepted); if (!accepted) return;
     const auto encoded = name.toUtf8(); const auto result = tcqt_add_phase(encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
@@ -310,7 +466,7 @@ void MainWindow::renameSelectedGrid() {
 void MainWindow::removeSelectedPhase() {
     const auto index = ui_->treeProject->currentIndex(); if (index.data(node_kind_role).toInt() != static_cast<int>(NodeKind::Phase)) return;
     if (QMessageBox::question(this, tr("Remove phase"), tr("Removing this phase also removes its grid fields and values. Continue?")) != QMessageBox::Yes) return;
-    const auto result = tcqt_remove_phase(index.data(node_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
+    const auto result = tcqt_remove_phase(index.data(phase_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
 }
 void MainWindow::addProperty() {
     bool accepted = false; const auto name = QInputDialog::getText(this, tr("Add property"), tr("Property name:"), QLineEdit::Normal, {}, &accepted); if (!accepted) return;
@@ -321,9 +477,39 @@ void MainWindow::addIrregularRow() { const auto result = tcqt_add_irregular_row(
 
 void MainWindow::selectProjectNode(const QModelIndex& index) {
     if (!index.isValid() || synchronizing_) return;
-    const auto kind = index.data(node_kind_role).toInt();
-    if (kind == static_cast<int>(NodeKind::Grid) || kind == static_cast<int>(NodeKind::Field)) { selected_grid_ = index.data(node_id_role).toUInt(); rebuildFromRust(selected_grid_); }
-    if (kind == static_cast<int>(NodeKind::Phase)) selected_phase_id_ = index.data(node_id_role).toUInt();
+    const auto kind = static_cast<NodeKind>(index.data(node_kind_role).toInt());
+    if (isGridNode(kind)) {
+        selected_grid_ = index.data(grid_id_role).toUInt();
+        selected_phase_id_ = index.data(phase_id_role).toUInt();
+        const auto requested_field = index.data(field_id_role).toUInt();
+        rebuildFromRust(selected_grid_);
+
+        std::uint32_t field_index = requested_field;
+        bool found = false;
+        TcqtGrid grid{};
+        if (tcqt_grid_at(selected_grid_, &grid).success) {
+            for (std::uint32_t i = 0; i < grid.field_count; ++i) {
+                TcqtField field{};
+                if (!tcqt_grid_field_at(selected_grid_, i, &field).success) continue;
+                if (kind == NodeKind::GridField && field.index == requested_field) {
+                    field_index = i;
+                    found = true;
+                    break;
+                }
+                if (kind == NodeKind::GridPhase && field.phase_id == selected_phase_id_ && !found) {
+                    field_index = i;
+                    found = true;
+                }
+            }
+        }
+        if (found && grid_model_->rowCount() > 0) {
+            const auto cell = grid_model_->index(0, static_cast<int>(field_index) + 3);
+            ui_->tableGridValues->setCurrentIndex(cell);
+            ui_->tableGridValues->scrollTo(cell, QAbstractItemView::PositionAtCenter);
+        }
+    } else if (kind == NodeKind::Phase) {
+        selected_phase_id_ = index.data(phase_id_role).toUInt();
+    }
     updateActionState();
 }
 

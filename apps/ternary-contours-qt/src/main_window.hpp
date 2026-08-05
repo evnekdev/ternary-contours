@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <cstdint>
 #include <memory>
 
 class GridTableModel;
