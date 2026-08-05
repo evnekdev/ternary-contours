@@ -346,6 +346,43 @@ pub struct TabulatedTernaryDataset {
     pub warnings: Vec<String>,
 }
 
+/// Interactive regular-grid resolution bounds used by project authoring.
+///
+/// These limits apply to newly created/resized grids. Existing files may still
+/// contain larger regular grids and remain valid for loading and inspection.
+pub const MIN_REGULAR_GRID_SUBDIVISIONS: usize = 1;
+pub const MAX_REGULAR_GRID_SUBDIVISIONS: usize = 50;
+
+/// Return the canonical regular-grid point count using checked arithmetic.
+pub fn regular_grid_point_count(subdivisions: usize) -> Option<usize> {
+    (subdivisions >= MIN_REGULAR_GRID_SUBDIVISIONS)
+        .then_some(subdivisions)
+        .and_then(|n| n.checked_add(1))
+        .and_then(|left| {
+            subdivisions
+                .checked_add(2)
+                .and_then(|right| left.checked_mul(right))
+        })
+        .map(|product| product / 2)
+}
+
+/// Validate a subdivision count for interactive regular-grid creation.
+pub fn validate_new_regular_grid_subdivisions(subdivisions: usize) -> Result<(), String> {
+    if subdivisions < MIN_REGULAR_GRID_SUBDIVISIONS {
+        return Err(format!(
+            "regular-grid subdivisions must be at least {MIN_REGULAR_GRID_SUBDIVISIONS}"
+        ));
+    }
+    if subdivisions > MAX_REGULAR_GRID_SUBDIVISIONS {
+        return Err(format!(
+            "regular-grid subdivisions cannot exceed {MAX_REGULAR_GRID_SUBDIVISIONS}"
+        ));
+    }
+    regular_grid_point_count(subdivisions)
+        .ok_or_else(|| "regular-grid point count overflows".to_owned())
+        .map(|_| ())
+}
+
 /// Construct an empty project for a new desktop document.
 ///
 /// This is intentionally different from [`default_regular_dataset`], which is
@@ -541,17 +578,8 @@ impl TabulatedTernaryDataset {
                             grid.name()
                         ));
                     }
-                    let expected = value
-                        .subdivisions
-                        .checked_add(1)
-                        .and_then(|left| {
-                            value
-                                .subdivisions
-                                .checked_add(2)
-                                .and_then(|right| left.checked_mul(right))
-                        })
-                        .map(|value| value / 2)
-                        .ok_or_else(|| {
+                    let expected =
+                        regular_grid_point_count(value.subdivisions).ok_or_else(|| {
                             format!("grid {} subdivision count overflows", grid.name())
                         })?;
                     if value.compositions.len() != expected {
@@ -689,6 +717,18 @@ mod tests {
                 .state,
             TabulatedValueState::Missing
         );
+    }
+
+    #[test]
+    fn regular_grid_resolution_bounds_and_point_counts() {
+        assert_eq!(regular_grid_point_count(1), Some(3));
+        assert_eq!(regular_grid_point_count(4), Some(15));
+        assert_eq!(regular_grid_point_count(10), Some(66));
+        assert_eq!(regular_grid_point_count(20), Some(231));
+        assert_eq!(regular_grid_point_count(50), Some(1326));
+        assert!(validate_new_regular_grid_subdivisions(0).is_err());
+        assert!(validate_new_regular_grid_subdivisions(51).is_err());
+        assert!(validate_new_regular_grid_subdivisions(50).is_ok());
     }
 
     #[test]

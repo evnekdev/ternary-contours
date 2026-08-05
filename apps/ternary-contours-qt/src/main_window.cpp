@@ -7,6 +7,7 @@
 #include "ui_main_window.h"
 
 #include <QAbstractItemView>
+#include <limits>
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
@@ -17,6 +18,9 @@
 #include <QItemSelectionModel>
 #include <QMessageBox>
 #include <QSettings>
+
+#include <QLocale>
+#include <QPushButton>
 #include <QStandardItem>
 #include <QStandardItemModel>
 #include <QtConcurrentRun>
@@ -25,6 +29,9 @@ namespace {
 constexpr auto node_kind_role = Qt::UserRole;
 constexpr auto node_id_role = Qt::UserRole + 1;
 enum class NodeKind { Project, Title, Corner, Phase, Property, Grid, Field };
+constexpr int min_regular_subdivisions = 1;
+constexpr int max_regular_subdivisions = 50;
+constexpr int default_regular_subdivisions = 10;
 QString text(const char* value) { return QString::fromUtf8(value); }
 QString statusText(const TcqtStatus& status) { return text(status.message); }
 QString calculationText(const TcqtCalculationResult& result) { return text(result.message); }
@@ -213,17 +220,77 @@ void MainWindow::exportLinesCsv() {
     const auto path = QFileDialog::getSaveFileName(this, tr("Export contour lines CSV"), {}, tr("CSV files (*.csv)"));
     if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_lines_csv(encoded.constData()); reportBridgeStatus(statusText(result), result.success);
 }void MainWindow::addGrid(bool regular) {
-    QDialog dialog(this); Ui::AddGridDialog form; form.setupUi(&dialog);
-    form.radioAddRegularGrid->setChecked(regular); form.spinAddGridSubdivisions->setEnabled(regular);
-    connect(form.radioAddRegularGrid, &QRadioButton::toggled, form.spinAddGridSubdivisions, &QWidget::setEnabled);
-    connect(form.addGridButtonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QDialog dialog(this);
+    Ui::AddGridDialog form;
+    form.setupUi(&dialog);
+    form.radioAddRegularGrid->setChecked(regular);
+    form.spinAddGridSubdivisions->setRange(min_regular_subdivisions, max_regular_subdivisions);
+    form.spinAddGridSubdivisions->setValue(default_regular_subdivisions);
+    form.spinAddGridSubdivisions->setToolTip(
+        tr("Regular-grid subdivisions range from %1 to %2.\nHigher resolutions create quadratically more grid points.")
+            .arg(min_regular_subdivisions)
+            .arg(max_regular_subdivisions));
+    form.spinAddGridSubdivisions->setEnabled(regular);
+    auto* subdivision_editor = form.spinAddGridSubdivisions->findChild<QLineEdit*>();
+
+    const auto updateRegularHint = [&]() {
+        const auto regular_selected = form.radioAddRegularGrid->isChecked();
+        bool valid = false;
+        std::uint64_t point_count = 0;
+        double step = 0.0;
+        if (regular_selected) {
+            bool parsed = false;
+            const auto text_value = subdivision_editor->text().trimmed();
+            const auto subdivisions = text_value.toUInt(&parsed);
+            const auto max_subdivisions = static_cast<std::uint64_t>(form.spinAddGridSubdivisions->maximum());
+            const auto n = static_cast<std::uint64_t>(subdivisions);
+            if (parsed && n > 0 && n <= max_subdivisions && n < std::numeric_limits<std::uint64_t>::max() - 2) {
+                const auto left = n + 1;
+                const auto right = n + 2;
+                if (left <= std::numeric_limits<std::uint64_t>::max() / right) {
+                    point_count = (left * right) / 2;
+                    step = 1.0 / static_cast<double>(n);
+                    valid = true;
+                }
+            }
+        }
+        if (valid) {
+            const auto step_text = QString::number(step, 'g', 8);
+            const auto percent_text = QString::number(step * 100.0, 'g', 8);
+            form.labelAddGridStepValue->setText(tr("Step size: %1 (%2%)").arg(step_text, percent_text));
+            const auto point_text = QLocale(QLocale::English, QLocale::UnitedStates).toString(point_count);
+            form.labelAddGridPointsValue->setText(
+                tr("Grid points: %1\nAllowed subdivisions: %2–%3")
+                    .arg(point_text)
+                    .arg(min_regular_subdivisions)
+                    .arg(max_regular_subdivisions));
+        } else {
+            form.labelAddGridStepValue->setText(tr("Step size: —"));
+            form.labelAddGridPointsValue->setText(tr("Grid points: —\nAllowed subdivisions: %1–%2").arg(min_regular_subdivisions).arg(max_regular_subdivisions));
+        }
+        if (auto* ok = form.addGridButtonBox->button(QDialogButtonBox::Ok)) {
+            ok->setEnabled(!regular_selected || valid);
+        }
+        return valid;
+    };
+
+    connect(form.spinAddGridSubdivisions, qOverload<int>(&QSpinBox::valueChanged), &dialog, [&](int) { updateRegularHint(); });
+    connect(subdivision_editor, &QLineEdit::textChanged, &dialog, [&](const QString&) { updateRegularHint(); });
+    connect(form.radioAddRegularGrid, &QRadioButton::toggled, &dialog, [&](bool checked) {
+        form.spinAddGridSubdivisions->setEnabled(checked);
+        updateRegularHint();
+    });
+    connect(form.addGridButtonBox, &QDialogButtonBox::accepted, &dialog, [&]() {
+        if (!form.radioAddRegularGrid->isChecked() || updateRegularHint()) dialog.accept();
+    });
     connect(form.addGridButtonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    updateRegularHint();
     if (dialog.exec() != QDialog::Accepted) return;
     const auto name = form.editAddGridName->text().toUtf8();
     const auto result = form.radioAddRegularGrid->isChecked() ? tcqt_add_regular_grid(name.constData(), static_cast<std::uint32_t>(form.spinAddGridSubdivisions->value())) : tcqt_add_irregular_grid(name.constData());
-    reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
-}
-void MainWindow::removeSelectedGrid() {
+    reportBridgeStatus(statusText(result), result.success);
+    if (result.success) rebuildFromRust();
+}void MainWindow::removeSelectedGrid() {
     const auto index = ui_->treeProject->currentIndex(); if (index.data(node_kind_role).toInt() != static_cast<int>(NodeKind::Grid)) return;
     if (QMessageBox::question(this, tr("Remove grid"), tr("Remove the selected grid and its values?")) != QMessageBox::Yes) return;
     const auto result = tcqt_remove_grid(index.data(node_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();

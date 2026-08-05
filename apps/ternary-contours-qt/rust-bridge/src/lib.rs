@@ -20,7 +20,7 @@ use ternary_contours_cli::{
     TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
     TctSerializeOptions, calculate_projection, empty_project_dataset, parse_path,
     parse_tabulated_value_token, projection_csv_records, render_to_path, save_tct_atomic,
-    serialize_projection_csv, serialize_tct,
+    serialize_projection_csv, serialize_tct, validate_new_regular_grid_subdivisions,
 };
 use ternary_contours_gui_core::{GuiContractState, Revision, UiAction, UiEffect, update};
 
@@ -650,9 +650,7 @@ pub unsafe extern "C" fn tcqt_add_regular_grid(
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?
             .mutate(|dataset| {
-                if subdivisions == 0 {
-                    return Err("regular grid subdivisions must be positive".into());
-                }
+                validate_new_regular_grid_subdivisions(subdivisions as usize)?;
                 if name.trim().is_empty() || dataset.grids.iter().any(|grid| grid.name() == name) {
                     return Err("grid names must be non-empty and unique".into());
                 }
