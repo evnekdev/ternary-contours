@@ -89,14 +89,18 @@ pub fn parse_tsv_row(source_row: usize, line: &str) -> ParsedRow {
     }
 }
 impl ParsedTable {
-    /// Parse a literal TSV range. Empty trailing cells are retained; completely
-    /// blank lines are ignored so Excel ranges with a trailing newline work.
+    /// Parse a literal TSV range. Empty trailing cells are retained; one empty
+    /// line introduced solely by a final line ending is ignored, while blank
+    /// rows inside the range remain visible and can be rejected as ragged data.
     pub fn parse_tsv(input: &str, header_mode: HeaderMode) -> Result<Self, TableError> {
-        let raw_rows = input
-            .lines()
+        let mut lines = input.split('\n').collect::<Vec<_>>();
+        if input.ends_with('\n') {
+            lines.pop();
+        }
+        let raw_rows = lines
+            .into_iter()
             .enumerate()
-            .filter_map(|(index, line)| (!line.trim().is_empty()).then_some((index + 1, line)))
-            .map(|(source_row, line)| parse_tsv_row(source_row, line))
+            .map(|(index, line)| parse_tsv_row(index + 1, line.strip_suffix('\r').unwrap_or(line)))
             .collect::<Vec<_>>();
         Self::from_rows(raw_rows, header_mode)
     }
@@ -217,6 +221,14 @@ mod tests {
             table.rows[0].cells[1].location,
             TableLocation { row: 2, column: 2 }
         );
+    }
+
+    #[test]
+    fn trailing_newline_is_ignored_but_internal_blank_rows_are_not() {
+        let table = ParsedTable::parse_tsv("1\t2\n3\t4\n", HeaderMode::Absent).unwrap();
+        assert_eq!(table.height(), 2);
+        let error = ParsedTable::parse_tsv("1\t2\n\n3\t4", HeaderMode::Absent).unwrap_err();
+        assert!(error.message.contains("wrong row width"));
     }
 
     #[test]

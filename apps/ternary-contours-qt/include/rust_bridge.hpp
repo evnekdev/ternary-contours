@@ -14,6 +14,18 @@ struct TcqtProjectSummary {
 struct TcqtSaveResult {
     std::uint32_t outcome; char message[512]; char path[512];
 };
+struct TcqtPasteResult {
+    bool success;
+    std::uint32_t rows_pasted;
+    std::uint32_t columns_pasted;
+    std::uint32_t rows_appended;
+    bool header_skipped;
+    std::uint32_t clipboard_row;
+    std::uint32_t clipboard_column;
+    std::uint32_t target_row;
+    std::uint32_t target_column;
+    char message[512];
+};
 struct TcqtPhase { std::uint32_t id; char name[128]; };
 struct TcqtProperty { std::uint32_t ordinal; bool required; char name[128]; char unit[128]; };
 struct TcqtGrid { std::uint32_t index; std::uint32_t kind; std::uint32_t subdivisions; std::uint32_t row_count; std::uint32_t field_count; char name[128]; };
@@ -25,6 +37,7 @@ struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);
 TcqtSaveResult tcqt_save_document(const char* path);
+TcqtPasteResult tcqt_paste_grid_tsv(std::uint32_t grid_index, std::uint32_t start_row, std::uint32_t start_column, const char* clipboard);
 TcqtStatus tcqt_project_summary(TcqtProjectSummary* output);
 TcqtStatus tcqt_phase_at(std::uint32_t index, TcqtPhase* output);
 TcqtStatus tcqt_property_at(std::uint32_t index, TcqtProperty* output);

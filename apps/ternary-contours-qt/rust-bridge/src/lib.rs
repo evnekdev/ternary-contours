@@ -16,13 +16,14 @@ use std::{
 
 use ternary_contours::{RegularTernaryGrid, StablePhaseId};
 use ternary_contours_cli::{
-    CompositionColumns, GridType, IrregularTabulatedGrid, LiquidusProjection, OutputFormat,
-    PhaseDefinition, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
-    PropertyDefinition, RegularTabulatedGrid, RenderOptions, RowOrder, SourceRange, TabulatedField,
-    TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
-    TctSerializeOptions, calculate_projection, empty_project_dataset, parse_path,
-    parse_tabulated_value_token, projection_csv_records, render_to_path, save_tct_atomic,
-    serialize_projection_csv, serialize_tct, validate_new_regular_grid_subdivisions,
+    CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, LiquidusProjection,
+    OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvOptions, ProjectionCsvRecord,
+    ProjectionOptions, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RowOrder,
+    SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
+    TabulatedValueState, TctSerializeOptions, calculate_projection, empty_project_dataset,
+    parse_path, parse_tabulated_value_token, projection_csv_records, render_to_path,
+    save_tct_atomic, serialize_projection_csv, serialize_tct,
+    validate_new_regular_grid_subdivisions,
 };
 use ternary_contours_gui_core::{GuiContractState, Revision, UiAction, UiEffect, update};
 
@@ -67,6 +68,21 @@ pub struct TcqtSaveResult {
     pub outcome: u32,
     pub message: [u8; MESSAGE],
     pub path: [u8; PATH],
+}
+#[repr(C)]
+pub struct TcqtPasteResult {
+    pub success: bool,
+    pub rows_pasted: u32,
+    pub columns_pasted: u32,
+    pub rows_appended: u32,
+    pub header_skipped: bool,
+    /// 1-based clipboard source row/column for an error, or zero on success.
+    pub clipboard_row: u32,
+    pub clipboard_column: u32,
+    /// 1-based destination table row/column for an error, or zero on success.
+    pub target_row: u32,
+    pub target_column: u32,
+    pub message: [u8; MESSAGE],
 }
 #[repr(C)]
 pub struct TcqtPhase {
@@ -235,6 +251,372 @@ fn save_result(outcome: u32, message: impl AsRef<str>, path: impl AsRef<str>) ->
         path: bytes(path.as_ref()),
     }
 }
+#[derive(Debug)]
+struct PasteFailure {
+    message: String,
+    clipboard_row: usize,
+    clipboard_column: usize,
+    target_row: usize,
+    target_column: usize,
+}
+
+impl PasteFailure {
+    fn new(
+        message: impl Into<String>,
+        clipboard_row: usize,
+        clipboard_column: usize,
+        target_row: usize,
+        target_column: usize,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            clipboard_row,
+            clipboard_column,
+            target_row,
+            target_column,
+        }
+    }
+
+    fn result(self) -> TcqtPasteResult {
+        TcqtPasteResult {
+            success: false,
+            rows_pasted: 0,
+            columns_pasted: 0,
+            rows_appended: 0,
+            header_skipped: false,
+            clipboard_row: self.clipboard_row as u32,
+            clipboard_column: self.clipboard_column as u32,
+            target_row: self.target_row as u32,
+            target_column: self.target_column as u32,
+            message: bytes(&self.message),
+        }
+    }
+}
+
+fn paste_success(
+    rows_pasted: usize,
+    columns_pasted: usize,
+    rows_appended: usize,
+    header_skipped: bool,
+    grid_name: &str,
+) -> TcqtPasteResult {
+    let message = if rows_appended > 0 {
+        format!(
+            "Pasted {} rows x {} columns and added {} irregular-grid rows to grid \"{}\".",
+            rows_pasted, columns_pasted, rows_appended, grid_name
+        )
+    } else {
+        format!(
+            "Pasted {} rows x {} columns into grid \"{}\".",
+            rows_pasted, columns_pasted, grid_name
+        )
+    };
+    TcqtPasteResult {
+        success: true,
+        rows_pasted: rows_pasted as u32,
+        columns_pasted: columns_pasted as u32,
+        rows_appended: rows_appended as u32,
+        header_skipped,
+        clipboard_row: 0,
+        clipboard_column: 0,
+        target_row: 0,
+        target_column: 0,
+        message: bytes(&message),
+    }
+}
+
+fn paste_headers(
+    dataset: &TabulatedTernaryDataset,
+    grid_index: usize,
+) -> Result<Vec<String>, PasteFailure> {
+    let grid = dataset
+        .grids
+        .get(grid_index)
+        .ok_or_else(|| PasteFailure::new("selected grid is unavailable", 0, 0, 0, 0))?;
+    let mut headers = dataset
+        .components
+        .iter()
+        .map(|component| component.name.clone())
+        .collect::<Vec<_>>();
+    headers.extend(grid.fields().iter().map(|field| field.column_name.clone()));
+    Ok(headers)
+}
+
+fn parse_pasted_value(token: &str, missing_tokens: &[String]) -> Result<TabulatedValue, String> {
+    if token.trim().is_empty() {
+        return Err("Blank cells are not accepted. Use NA to represent a missing value.".into());
+    }
+    parse_tabulated_value_token(token, missing_tokens, false)
+        .map_err(|_| "Unsupported value. Enter a finite number, NA, NE, or CO.".to_owned())
+}
+
+fn parse_pasted_composition(token: &str) -> Result<f64, String> {
+    let value = token
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| "Composition must be a finite non-negative number.".to_owned())?;
+    if !value.is_finite() || value < 0.0 {
+        return Err("Composition must be a finite non-negative number.".into());
+    }
+    Ok(value)
+}
+
+fn validate_pasted_irregular_compositions(
+    compositions: &[[f64; 3]],
+) -> Result<(), (usize, String)> {
+    for (row, point) in compositions.iter().enumerate() {
+        if point.iter().any(|value| !value.is_finite() || *value < 0.0)
+            || (point.iter().sum::<f64>() - 1.0).abs() > 1.0e-8
+        {
+            return Err((
+                row + 1,
+                "irregular compositions must be finite, non-negative, and sum to one".into(),
+            ));
+        }
+        for (previous, other) in compositions[..row].iter().enumerate() {
+            if point
+                .iter()
+                .zip(other)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0, f64::max)
+                <= 1.0e-10
+            {
+                return Err((
+                    row + 1,
+                    format!(
+                        "duplicate or near-duplicate composition matches row {}",
+                        previous + 1
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn prepare_grid_paste(
+    dataset: &TabulatedTernaryDataset,
+    grid_index: usize,
+    start_row: usize,
+    start_column: usize,
+    clipboard: &str,
+) -> Result<(TabulatedTernaryDataset, usize, usize, usize, bool, String), PasteFailure> {
+    let headers = paste_headers(dataset, grid_index)?;
+    if start_column >= headers.len() {
+        return Err(PasteFailure::new(
+            "destination column is outside the selected grid",
+            0,
+            0,
+            start_row + 1,
+            start_column + 1,
+        ));
+    }
+    let table = ParsedTable::parse_tsv(clipboard, HeaderMode::Absent).map_err(|error| {
+        let (row, column) = error
+            .location
+            .map(|location| (location.row, location.column))
+            .unwrap_or((0, 0));
+        PasteFailure::new(
+            error.message,
+            row,
+            column,
+            start_row + row,
+            start_column + column,
+        )
+    })?;
+    let width = table.width();
+    if width == 0 || start_column + width > headers.len() {
+        return Err(PasteFailure::new(
+            format!(
+                "The clipboard contains {} columns, but only {} columns are available from the selected destination.",
+                width,
+                headers.len().saturating_sub(start_column)
+            ),
+            0,
+            0,
+            start_row + 1,
+            start_column + 1,
+        ));
+    }
+    let mut rows = table.rows;
+    let header_skipped = rows.first().is_some_and(|row| {
+        row.cells.len() == width
+            && row
+                .cells
+                .iter()
+                .enumerate()
+                .all(|(offset, cell)| cell.text == headers[start_column + offset])
+    });
+    if header_skipped {
+        rows.remove(0);
+    }
+    if rows.is_empty() {
+        return Err(PasteFailure::new(
+            "Clipboard contains a header but no data rows.",
+            1,
+            1,
+            start_row + 1,
+            start_column + 1,
+        ));
+    }
+    let grid = dataset
+        .grids
+        .get(grid_index)
+        .ok_or_else(|| PasteFailure::new("selected grid is unavailable", 0, 0, 0, 0))?;
+    let existing_rows = grid.compositions().len();
+    let mut candidate = dataset.clone();
+    let mut rows_appended = 0;
+    if matches!(grid, TabulatedGrid::Regular(_)) {
+        if start_column < 3 {
+            return Err(PasteFailure::new(
+                "Paste cannot modify the composition columns of a regular grid. Select the first phase/property column and try again.",
+                0,
+                0,
+                start_row + 1,
+                start_column + 1,
+            ));
+        }
+        if start_row + rows.len() > existing_rows {
+            return Err(PasteFailure::new(
+                format!(
+                    "The clipboard contains {} rows, but only {} rows are available from the selected destination.",
+                    rows.len(),
+                    existing_rows.saturating_sub(start_row)
+                ),
+                0,
+                0,
+                start_row + 1,
+                start_column + 1,
+            ));
+        }
+        let mut assignments = Vec::with_capacity(rows.len() * width);
+        for (offset, row) in rows.iter().enumerate() {
+            for (column, cell) in row.cells.iter().enumerate() {
+                let target_column = start_column + column;
+                let value =
+                    parse_pasted_value(&cell.text, &dataset.missing_tokens).map_err(|message| {
+                        PasteFailure::new(
+                            message,
+                            row.source_row,
+                            cell.location.column,
+                            start_row + offset + 1,
+                            target_column + 1,
+                        )
+                    })?;
+                assignments.push((start_row + offset, target_column - 3, value));
+            }
+        }
+        let grid = candidate
+            .grids
+            .get_mut(grid_index)
+            .expect("checked grid index");
+        for (row, field_index, value) in assignments {
+            fields_mut(grid)
+                .get_mut(field_index)
+                .expect("checked field index")
+                .values[row] = value;
+        }
+    } else {
+        if start_row > existing_rows {
+            return Err(PasteFailure::new(
+                "Paste cannot leave a gap before appended irregular-grid rows.",
+                0,
+                0,
+                start_row + 1,
+                start_column + 1,
+            ));
+        }
+        rows_appended = (start_row + rows.len()).saturating_sub(existing_rows);
+        if rows_appended > 0 && (start_column != 0 || width < 3) {
+            return Err(PasteFailure::new(
+                "New irregular-grid rows require A, B, and C values. No cells were changed.",
+                0,
+                0,
+                existing_rows + 1,
+                start_column + 1,
+            ));
+        }
+        let grid = candidate
+            .grids
+            .get_mut(grid_index)
+            .expect("checked grid index");
+        let TabulatedGrid::Irregular(grid) = grid else {
+            unreachable!()
+        };
+        for _ in 0..rows_appended {
+            grid.compositions.push([0.0; 3]);
+            for field in &mut grid.fields {
+                field.values.push(TabulatedValue::missing());
+                field.row_lines.push(0);
+            }
+        }
+        let mut compositions = Vec::new();
+        let mut assignments = Vec::new();
+        for (offset, row) in rows.iter().enumerate() {
+            let target_row = start_row + offset;
+            for (column, cell) in row.cells.iter().enumerate() {
+                let target_column = start_column + column;
+                if target_column < 3 {
+                    let value = parse_pasted_composition(&cell.text).map_err(|message| {
+                        PasteFailure::new(
+                            message,
+                            row.source_row,
+                            cell.location.column,
+                            target_row + 1,
+                            target_column + 1,
+                        )
+                    })?;
+                    compositions.push((target_row, target_column, value));
+                } else {
+                    let value = parse_pasted_value(&cell.text, &dataset.missing_tokens).map_err(
+                        |message| {
+                            PasteFailure::new(
+                                message,
+                                row.source_row,
+                                cell.location.column,
+                                target_row + 1,
+                                target_column + 1,
+                            )
+                        },
+                    )?;
+                    assignments.push((target_row, target_column - 3, value));
+                }
+            }
+        }
+        for (row, component, value) in compositions {
+            grid.compositions[row][component] = value;
+        }
+        if let Err((row, message)) = validate_pasted_irregular_compositions(&grid.compositions) {
+            return Err(PasteFailure::new(message, row, 0, row, 1));
+        }
+        for (row, field_index, value) in assignments {
+            grid.fields
+                .get_mut(field_index)
+                .ok_or_else(|| {
+                    PasteFailure::new(
+                        "destination field is unavailable",
+                        0,
+                        0,
+                        row + 1,
+                        field_index + 4,
+                    )
+                })?
+                .values[row] = value;
+        }
+    }
+    candidate
+        .validate_document_structure()
+        .map_err(|message| PasteFailure::new(message, 0, 0, 0, 0))?;
+    Ok((
+        candidate,
+        rows.len(),
+        width,
+        rows_appended,
+        header_skipped,
+        grid.name().to_owned(),
+    ))
+}
+
 unsafe fn input(value: *const c_char, label: &str) -> Result<String, String> {
     if value.is_null() {
         return Err(format!("{label} is required"));
@@ -558,6 +940,45 @@ pub unsafe extern "C" fn tcqt_grid_cell_at(
         Ok(())
     })())
 }
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_paste_grid_tsv(
+    grid_index: u32,
+    start_row: u32,
+    start_column: u32,
+    clipboard: *const c_char,
+) -> TcqtPasteResult {
+    let clipboard = match unsafe { input(clipboard, "clipboard text") } {
+        Ok(value) => value,
+        Err(error) => return PasteFailure::new(error, 0, 0, 0, 0).result(),
+    };
+    let mut state = match document().lock() {
+        Ok(state) => state,
+        Err(_) => return PasteFailure::new("project lock is unavailable", 0, 0, 0, 0).result(),
+    };
+    let prior = state.dataset.clone();
+    let (candidate, rows, columns, appended, header_skipped, grid_name) = match prepare_grid_paste(
+        &state.dataset,
+        grid_index as usize,
+        start_row as usize,
+        start_column as usize,
+        &clipboard,
+    ) {
+        Ok(plan) => plan,
+        Err(error) => return error.result(),
+    };
+    state.dataset = candidate;
+    state.undo.push(prior);
+    if state.undo.len() > 50 {
+        state.undo.remove(0);
+    }
+    state.redo.clear();
+    state.projection = None;
+    state.projection_records.clear();
+    state.mark_revision_changed();
+    let _ = update(&mut state.contract, UiAction::DatasetEdited);
+    paste_success(rows, columns, appended, header_skipped, &grid_name)
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_set_title(value: *const c_char) -> TcqtStatus {
     status((|| {
@@ -1224,6 +1645,86 @@ mod tests {
             assert!(!reopened.dirty);
         }
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn bulk_paste_handles_headers_states_and_is_transactional() {
+        let dataset = ternary_contours_cli::default_regular_dataset();
+        let pasted = prepare_grid_paste(
+            &dataset,
+            0,
+            0,
+            3,
+            "Phase1.T\tPhase2.T\r\n1200\t1180\r\n1210\tNE\r\n",
+        )
+        .unwrap();
+        assert_eq!(pasted.1, 2);
+        assert_eq!(pasted.2, 2);
+        assert!(pasted.4);
+        let fields = pasted.0.grids[0].fields();
+        assert_eq!(fields[0].values[0].state, TabulatedValueState::Calculated);
+        assert_eq!(fields[1].values[1].state, TabulatedValueState::NonExisting);
+
+        let failure = prepare_grid_paste(&dataset, 0, 0, 3, "1200\tNO").unwrap_err();
+        assert!(failure.message.contains("finite number, NA, NE, or CO"));
+        assert_eq!(
+            dataset.grids[0].fields()[0].values[0].state,
+            TabulatedValueState::Missing
+        );
+        assert!(
+            prepare_grid_paste(&dataset, 0, 0, 3, "1200\n1210\t1220")
+                .unwrap_err()
+                .message
+                .contains("wrong row width")
+        );
+    }
+
+    #[test]
+    fn bulk_paste_rejects_regular_compositions_and_appends_irregular_rows() {
+        let dataset = ternary_contours_cli::default_regular_dataset();
+        let regular_error = prepare_grid_paste(&dataset, 0, 0, 0, "A\tB\n0\t1").unwrap_err();
+        assert!(regular_error.message.contains("composition columns"));
+
+        let mut irregular = empty_project_dataset();
+        irregular.phases.push(PhaseDefinition {
+            name: "Phase1".into(),
+            id: StablePhaseId(1),
+            line: 0,
+        });
+        irregular
+            .grids
+            .push(TabulatedGrid::Irregular(IrregularTabulatedGrid {
+                name: "irregular".into(),
+                source: SourceRange {
+                    first_line: 0,
+                    last_line: 0,
+                },
+                compositions: vec![[1.0, 0.0, 0.0]],
+                fields: vec![TabulatedField {
+                    phase_id: StablePhaseId(1),
+                    property: "T".into(),
+                    column_name: "Phase1.T".into(),
+                    values: vec![TabulatedValue::missing()],
+                    row_lines: vec![0],
+                }],
+            }));
+        let appended = prepare_grid_paste(
+            &irregular,
+            0,
+            1,
+            0,
+            "A\tB\tC\tPhase1.T\n0\t0.5\t0.5\t1250\n0.2\t0.3\t0.5\tCO:3000",
+        )
+        .unwrap();
+        assert_eq!(appended.3, 2);
+        assert_eq!(appended.0.grids[0].compositions().len(), 3);
+        assert_eq!(
+            appended.0.grids[0].fields()[0].values[2].state,
+            TabulatedValueState::CutOff
+        );
+
+        let missing_compositions = prepare_grid_paste(&irregular, 0, 1, 3, "1250").unwrap_err();
+        assert!(missing_compositions.message.contains("A, B, and C"));
     }
 
     #[test]

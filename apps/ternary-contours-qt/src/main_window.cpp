@@ -13,11 +13,15 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QClipboard>
+#include <QMenu>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
 #include <QInputDialog>
 #include <QItemSelectionModel>
+#include <QLineEdit>
+#include <QTextEdit>
 #include <QMessageBox>
 #include <QSettings>
 
@@ -98,6 +102,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     ui_->treeProject->setEditTriggers(QAbstractItemView::NoEditTriggers);
     grid_model_ = new GridTableModel(ui_->tableGridValues);
     ui_->tableGridValues->setModel(grid_model_);
+    ui_->tableGridValues->setContextMenuPolicy(Qt::CustomContextMenu);
+    ui_->tableGridValues->addAction(ui_->actionGridCopy);
+    ui_->tableGridValues->addAction(ui_->actionGridPaste);
     auto* results_model = new QStandardItemModel(0, 10, ui_->tableInterpolationResults);
     results_model->setHorizontalHeaderLabels({tr("Index"), tr("A"), tr("B"), tr("C"), tr("Value"), tr("State"), tr("Grid"), tr("Phase"), tr("Property"), tr("Method")});
     ui_->tableInterpolationResults->setModel(results_model);
@@ -117,6 +124,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionGridRemove, &QAction::triggered, this, &MainWindow::removeSelectedGrid);
     connect(ui_->actionGridDuplicate, &QAction::triggered, this, &MainWindow::duplicateSelectedGrid);
     connect(ui_->actionGridRename, &QAction::triggered, this, &MainWindow::renameSelectedGrid);
+    connect(ui_->actionGridCopy, &QAction::triggered, this, &MainWindow::copyGridSelection);
+    connect(ui_->actionGridPaste, &QAction::triggered, this, &MainWindow::pasteGridClipboard);
+    connect(ui_->tableGridValues, &QTableView::customContextMenuRequested, this, &MainWindow::showGridContextMenu);
+    connect(ui_->tableGridValues->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { updateActionState(); });
+    connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] { updateActionState(); });
     connect(ui_->buttonAddPhase, &QPushButton::clicked, this, &MainWindow::addPhase);
     connect(ui_->buttonRemovePhase, &QPushButton::clicked, this, &MainWindow::removeSelectedPhase);
     connect(ui_->buttonAddProperty, &QPushButton::clicked, this, &MainWindow::addProperty);
@@ -339,8 +351,12 @@ void MainWindow::updateActionState() {
     ui_->buttonAddIrregularRow->setEnabled(grid_selected && !grid_model_->isRegular());
     ui_->actionGridValidate->setEnabled(grid_selected);
     ui_->actionGridRecalculate->setEnabled(grid_selected && summary.calculation_available);
-    ui_->actionGridCopy->setEnabled(grid_selected);
-    ui_->actionGridPaste->setEnabled(grid_selected);
+    const auto selection = ui_->tableGridValues->selectionModel()->selection();
+    const bool has_table_selection = !selection.isEmpty() || ui_->tableGridValues->currentIndex().isValid();
+    const bool table_loaded = grid_model_->rowCount() > 0 && grid_model_->columnCount() > 0;
+    const bool has_clipboard = !QApplication::clipboard()->text().isEmpty();
+    ui_->actionGridCopy->setEnabled(grid_selected && has_table_selection);
+    ui_->actionGridPaste->setEnabled(grid_selected && table_loaded && has_clipboard && has_table_selection);
     ui_->buttonRunRustCalculation->setEnabled(summary.calculation_available);
     ui_->buttonRunRustCalculation->setToolTip(summary.calculation_available
         ? tr("Calculate the current liquidus projection.")
@@ -627,6 +643,116 @@ void MainWindow::commitTitle() { if (synchronizing_) return; const auto value = 
 void MainWindow::commitComponentA() { if (synchronizing_) return; const auto value = ui_->editCornerA->text().toUtf8(); const auto result = tcqt_set_component(0, value.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_); }
 void MainWindow::commitComponentB() { if (synchronizing_) return; const auto value = ui_->editCornerB->text().toUtf8(); const auto result = tcqt_set_component(1, value.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_); }
 void MainWindow::commitComponentC() { if (synchronizing_) return; const auto value = ui_->editCornerC->text().toUtf8(); const auto result = tcqt_set_component(2, value.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_); }
+void MainWindow::copyGridSelection() {
+    const auto ranges = ui_->tableGridValues->selectionModel()->selection();
+    QItemSelectionRange range;
+    if (ranges.size() > 1) {
+        reportBridgeStatus(tr("Copy requires one contiguous table selection."), false);
+        return;
+    }
+    if (ranges.size() == 1) {
+        range = ranges.first();
+    } else if (ui_->tableGridValues->currentIndex().isValid()) {
+        range = QItemSelectionRange(ui_->tableGridValues->currentIndex());
+    } else {
+        reportBridgeStatus(tr("Select a table range before copying."), false);
+        return;
+    }
+    QStringList lines;
+    for (int row = range.top(); row <= range.bottom(); ++row) {
+        QStringList cells;
+        for (int column = range.left(); column <= range.right(); ++column) {
+            cells.append(grid_model_->data(grid_model_->index(row, column), Qt::DisplayRole).toString());
+        }
+        lines.append(cells.join(QChar('\t')));
+    }
+    QApplication::clipboard()->setText(lines.join(QChar('\n')));
+    reportBridgeStatus(tr("Copied %1 rows x %2 columns.").arg(range.height()).arg(range.width()), true);
+}
+
+void MainWindow::pasteGridClipboard() {
+    auto* focus = QApplication::focusWidget();
+    if (focus && (qobject_cast<QLineEdit*>(focus) || qobject_cast<QTextEdit*>(focus))) {
+        return;
+    }
+    if (grid_model_->rowCount() == 0 || grid_model_->columnCount() == 0) {
+        reportBridgeStatus(tr("Select a loaded grid before pasting."), false);
+        return;
+    }
+    const auto ranges = ui_->tableGridValues->selectionModel()->selection();
+    if (ranges.size() > 1) {
+        QMessageBox::critical(this, tr("Could not paste grid data"),
+                              tr("The destination selection is discontiguous. Select one contiguous range.\n\nNo cells were changed."));
+        return;
+    }
+    QModelIndex anchor;
+    if (ranges.size() == 1) {
+        anchor = ranges.first().topLeft();
+    } else {
+        anchor = ui_->tableGridValues->currentIndex();
+    }
+    if (!anchor.isValid()) {
+        reportBridgeStatus(tr("Select a destination cell before pasting."), false);
+        return;
+    }
+    const auto clipboard = QApplication::clipboard()->text();
+    if (clipboard.isEmpty()) {
+        reportBridgeStatus(tr("Clipboard is empty."), false);
+        return;
+    }
+    const auto encoded = clipboard.toUtf8();
+    const auto result = tcqt_paste_grid_tsv(
+        grid_model_->gridIndex(),
+        static_cast<std::uint32_t>(anchor.row()),
+        static_cast<std::uint32_t>(anchor.column()),
+        encoded.constData());
+    if (!result.success) {
+        QString details;
+        if (result.clipboard_row != 0) {
+            details += tr("Clipboard cell:\nRow %1, column %2\n\n")
+                           .arg(result.clipboard_row)
+                           .arg(result.clipboard_column);
+        }
+        if (result.target_row != 0) {
+            const auto header = result.target_column == 0
+                ? QString()
+                : grid_model_->headerData(static_cast<int>(result.target_column - 1), Qt::Horizontal).toString();
+            details += tr("Destination:\nGrid row %1, column %2%3\n\n")
+                           .arg(result.target_row)
+                           .arg(result.target_column)
+                           .arg(header.isEmpty() ? QString() : tr(" (%1)").arg(header));
+        }
+        details += tr("Reason:\n%1\n\nNo cells were changed.").arg(text(result.message));
+        QMessageBox::critical(this, tr("Could not paste grid data"), details);
+        reportBridgeStatus(text(result.message), false);
+        return;
+    }
+    const auto start_row = anchor.row();
+    const auto start_column = anchor.column();
+    rebuildFromRust(selected_grid_);
+    if (result.rows_pasted > 0 && result.columns_pasted > 0) {
+        const auto top = grid_model_->index(start_row, start_column);
+        const auto bottom = grid_model_->index(
+            start_row + static_cast<int>(result.rows_pasted) - 1,
+            start_column + static_cast<int>(result.columns_pasted) - 1);
+        ui_->tableGridValues->selectionModel()->select(
+            QItemSelection(top, bottom), QItemSelectionModel::ClearAndSelect);
+        ui_->tableGridValues->setCurrentIndex(top);
+        ui_->tableGridValues->scrollTo(top, QAbstractItemView::PositionAtCenter);
+    }
+    auto message = text(result.message);
+    if (result.header_skipped) message += tr(" Header row skipped.");
+    reportBridgeStatus(message, true);
+}
+
+void MainWindow::showGridContextMenu(const QPoint& position) {
+    updateActionState();
+    QMenu menu(this);
+    menu.addAction(ui_->actionGridCopy);
+    menu.addAction(ui_->actionGridPaste);
+    menu.exec(ui_->tableGridValues->mapToGlobal(position));
+}
+
 void MainWindow::runRustCalculation() {
     TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
     const auto revision = summary.revision; ui_->buttonRunRustCalculation->setEnabled(false); ui_->statusMain->showMessage(tr("Calculating projection on Rust worker…"));

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QPoint>
 #include <cstdint>
 #include <memory>
 
@@ -41,6 +42,9 @@ private slots:
     void commitComponentA();
     void commitComponentB();
     void commitComponentC();
+    void copyGridSelection();
+    void pasteGridClipboard();
+    void showGridContextMenu(const QPoint& position);
 private:
     bool saveToPath(const QString& path);
     bool performSave(bool save_as);
