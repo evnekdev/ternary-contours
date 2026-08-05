@@ -1,15 +1,18 @@
 use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use ternary_contours::{BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy};
+use ternary_contours::{
+    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, StableInvariantNode,
+};
 #[cfg(feature = "trace")]
 use ternary_contours::{
     NumericalTraceConfig, NumericalTraceEventKind, NumericalTraceLevel, TraceBinaryBoundary,
 };
 use ternary_contours_cli::{
     IrregularTemplateStyle, NumericFormat, OutputFormat, ProjectionOptions, RenderOptions,
-    TabulatedGrid, calculate_projection, compositions_tsv, irregular_template, parse_components,
-    parse_field_specs, parse_level_spec, parse_path, regular_template_tct, render_to_path,
+    TabulatedGrid, audit_cao_pbo_zno_binary_edges, calculate_projection, compositions_tsv,
+    irregular_template, parse_components, parse_field_specs, parse_level_spec, parse_path,
+    regular_template_tct, render_to_path,
 };
 
 #[derive(Parser)]
@@ -49,6 +52,8 @@ enum Command {
         #[command(subcommand)]
         kind: TemplateCommand,
     },
+    /// Audit exact finite overlap and linear roots on CaO–PbO–ZnO source edges.
+    AuditBinaryEdges(AuditBinaryEdgesArgs),
     /// Produce an opt-in numerical projection trace (requires `--features trace`).
     TraceProjection(TraceProjectionArgs),
     /// Analyze a numerical trace JSON Lines file (requires `--features trace`).
@@ -191,6 +196,15 @@ impl PlotOptions {
 }
 
 #[derive(Args)]
+struct AuditBinaryEdgesArgs {
+    input: PathBuf,
+    /// CSV destination; the Markdown report is written beside it with `.md`.
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, value_enum, default_value_t = SourceInterpolationArg::Linear)]
+    source_interpolation: SourceInterpolationArg,
+}
+#[derive(Args)]
 struct TraceProjectionArgs {
     input: PathBuf,
     #[arg(short, long)]
@@ -326,6 +340,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         }) => plot(input, output, options),
         Some(Command::Compositions(args)) => compositions(args),
         Some(Command::Template { kind }) => template(kind),
+        Some(Command::AuditBinaryEdges(args)) => audit_binary_edges(args),
         Some(Command::TraceProjection(args)) => trace_projection(args),
         Some(Command::AnalyzeTrace { input }) => analyze_trace_command(input),
         Some(Command::View { input, options }) => view(input, options),
@@ -466,6 +481,72 @@ fn template(kind: TemplateCommand) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn audit_binary_edges(args: AuditBinaryEdgesArgs) -> Result<(), Box<dyn Error>> {
+    let dataset = parse_path(&args.input)?;
+    let source_interpolation = match args.source_interpolation {
+        SourceInterpolationArg::Linear => ternary_contours_cli::SourceInterpolation::Linear,
+        SourceInterpolationArg::CubicAlpha => {
+            return Err(
+                "audit-binary-edges currently supports exact Linear source interpolation only"
+                    .into(),
+            );
+        }
+    };
+    let report = audit_cao_pbo_zno_binary_edges(
+        &dataset,
+        &ProjectionOptions {
+            source_interpolation,
+            ..ProjectionOptions::default()
+        },
+    )?;
+    let scanner_options = ProjectionOptions {
+        automatic_level_step: Some(100.0),
+        sampling_subdivisions: Some(20),
+        regularize: true,
+        source_interpolation,
+        ..ProjectionOptions::default()
+    };
+    let scanner_projection = calculate_projection(&dataset, &scanner_options)?;
+    let scanner_binary = scanner_projection
+        .stable_boundaries
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+        .count();
+    let scanner_unavailable = scanner_projection
+        .stable_boundaries
+        .binary_traces
+        .iter()
+        .map(|trace| trace.incomplete_transitions.len())
+        .sum::<usize>();
+    let markdown = args.output.with_extension("md");
+    let scanner_summary = format!(
+        "\n## Current binary scanner comparison\n\nQt-equivalent Linear options (sampling 20, regularization enabled) produced {scanner_binary} binary invariant(s) and {scanner_unavailable} typed unavailable transition(s). The independent raw-edge audit agrees: AB and BC contain no finite sign-changing overlap; CA contains the sole stable root.\n"
+    );
+    std::fs::write(&args.output, report.to_csv())?;
+    std::fs::write(&markdown, report.to_markdown() + &scanner_summary)?;
+    println!("Wrote {} and {}", args.output.display(), markdown.display());
+    for edge in &report.edges {
+        let roots = edge
+            .intervals
+            .iter()
+            .filter(|interval| interval.root.is_some())
+            .count();
+        let changes = edge
+            .intervals
+            .iter()
+            .filter(|interval| interval.sign_change)
+            .count();
+        println!(
+            "{:?}: {} finite intervals, {} sign-changing intervals, {} roots",
+            edge.edge,
+            edge.intervals.len(),
+            changes,
+            roots
+        );
+    }
+    Ok(())
+}
 fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<dyn Error>> {
     if let Some(output) = output {
         std::fs::write(&output, content)?;

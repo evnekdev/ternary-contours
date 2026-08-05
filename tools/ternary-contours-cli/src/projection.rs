@@ -12,7 +12,10 @@ use ternary_contours::{
     TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
 };
 
-use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
+use crate::{
+    RegularTabulatedGrid, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
+    TabulatedValueState,
+};
 #[cfg(feature = "inspection")]
 use ternary_contours::{PartialCubicGridField, RegularTernaryPartialScalarField};
 
@@ -230,6 +233,24 @@ impl StablePhaseEvaluator for RuntimePhase {
             Err(reason) => StablePhaseEvaluation::Undefined { reason },
         }
     }
+}
+
+/// Evaluate a regular tabulated field through the exact linear source adapter
+/// used by `calculate_projection`. Diagnostic tools use this to avoid a
+/// second interpolation implementation.
+pub(crate) fn evaluate_regular_linear_field(
+    grid: &RegularTabulatedGrid,
+    field: &TabulatedField,
+    composition: [f64; 3],
+) -> StablePhaseEvaluation {
+    RuntimePhase {
+        field: RuntimeField::Regular {
+            grid: RegularTernaryGrid::new(grid.subdivisions)
+                .expect("a parsed regular grid has positive subdivisions"),
+            values: field.values.clone(),
+        },
+    }
+    .evaluate(composition)
 }
 
 pub(crate) fn interpolate_tabulated(

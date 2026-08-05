@@ -4,6 +4,7 @@
 //! model remains independent from the numerical library, while the conversion
 //! module adapts it to `ternary-contours` only at calculation time.
 
+pub mod binary_edge_audit;
 pub mod editor;
 #[cfg(feature = "inspection")]
 #[path = "viewer/interpolation_inspection.rs"]
@@ -21,6 +22,7 @@ pub mod trace_json;
 #[cfg(feature = "viewer")]
 pub mod viewer;
 
+pub use binary_edge_audit::{BinaryEdgeAuditReport, audit_cao_pbo_zno_binary_edges};
 pub use editor::*;
 pub use model::*;
 pub use parser::{TctError, parse_path, parse_str};
