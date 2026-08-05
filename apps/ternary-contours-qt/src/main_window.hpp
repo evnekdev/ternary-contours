@@ -9,8 +9,10 @@
 #include <QVector>
 #include <cstdint>
 #include <memory>
+#include <vector>
 
 class GridTableModel;
+class CollapsibleSection;
 class QStandardItemModel;
 class QCloseEvent;
 class QModelIndex;
@@ -92,8 +94,12 @@ struct ViewerState {
     QVector<ViewerQuery> queries;
     std::uint64_t next_query_id = 1;
     std::uint64_t calculation_generation = 0;
-    std::uint64_t numerical_revision = 1;
+    std::uint64_t options_revision = 0;
+    std::uint64_t active_dataset_revision = 0;
+    std::uint64_t active_options_revision = 0;
+    std::uint64_t active_request_generation = 0;
     bool calculation_running = false;
+    bool pending_recalculation = false;
     bool has_last_valid_projection = false;
     bool projection_is_stale = false;
     TcqtViewerCalculationOptions options{true, 0.0, 0.0, 100.0, 20, true, 0.02, 0, 3, 2, 1};
@@ -170,4 +176,5 @@ private:
     ViewerState viewer_;
     bool synchronizing_ = false;
     bool editor_commit_failed_ = false;
+    std::vector<std::unique_ptr<CollapsibleSection>> viewer_sections_;
 };

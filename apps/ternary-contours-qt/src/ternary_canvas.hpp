@@ -26,6 +26,10 @@ struct CanvasPath {
     std::uint32_t rgba = 0xff2d6eb4;
     double stroke_width = 1.5;
     std::uint32_t marker_kind = 0;
+    // 0 raw, 1 regularized; supplied by Rust with the typed record.
+    std::uint32_t path_source = 1;
+    QString line_id;
+    QString phase_pair;
 };
 
 struct CanvasQuery {
@@ -33,6 +37,7 @@ struct CanvasQuery {
     QPointF composition;
     std::uint32_t state = 0;
     bool selected = false;
+    QPolygonF containing_triangle;
 };
 
 class TernaryCanvas final : public QWidget {
@@ -52,12 +57,14 @@ public:
     void setProjectionPaths(const QVector<CanvasPath>& paths);
     void setProjectionVisibility(bool master, bool isotherms, bool univariants,
                                  bool binary_invariants, bool interior_invariants);
+    void setProjectionPathDisplayMode(int mode);
     void setProjectionAppearance(int line_width, int invariant_marker_size);
     void setDiagnosticVisibility(bool path_vertices, bool contour_endpoints,
                                  bool univariant_endpoints, bool invariant_ids,
                                  bool univariant_ids, bool phase_pair_labels);
     void setVertexLabelSettings(int mode, int decimals, bool selected_only);
     void setQueries(const QVector<CanvasQuery>& queries);
+    void setContainingTriangleVisible(bool visible);
     void setMarkerSize(int size);
     void setVertexVisibility(bool calculated, bool non_existing, bool cut_off, bool missing);
     void setInteractionMode(int mode);
@@ -101,6 +108,9 @@ private:
     bool show_invariant_ids_ = false;
     bool show_univariant_ids_ = false;
     bool show_phase_pair_labels_ = false;
+    bool show_containing_triangle_ = false;
+    // 0 raw, 1 regularized, 2 overlay.
+    int path_display_mode_ = 1;
     bool labels_selected_only_ = false;
     int label_mode_ = 0;
     int label_decimals_ = 3;

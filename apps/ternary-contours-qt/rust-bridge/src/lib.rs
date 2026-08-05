@@ -16,15 +16,15 @@ use std::{
 
 use ternary_contours::{
     BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, RegularTernaryGrid,
-    StablePhaseId,
+    StableInvariantNode, StablePhaseId,
 };
 use ternary_contours_cli::{
     CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, LiquidusProjection,
-    OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvOptions, ProjectionCsvRecord,
-    ProjectionOptions, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RowOrder,
-    SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
-    TabulatedValueState, TctSerializeOptions, automatic_iso_levels, calculate_projection,
-    empty_project_dataset,
+    OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvLayerFilter, ProjectionCsvOptions,
+    ProjectionCsvRecord, ProjectionOptions, ProjectionPathSource, PropertyDefinition,
+    RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange, TabulatedField,
+    TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
+    TctSerializeOptions, automatic_iso_levels, calculate_projection, empty_project_dataset,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
@@ -37,7 +37,21 @@ use ternary_contours_gui_core::{GuiContractState, Revision, UiAction, UiEffect, 
 const NAME: usize = 128;
 const PATH: usize = 512;
 const MESSAGE: usize = 512;
-
+// C ABI enum values.  Keep these named instead of coupling Rust semantics to
+// Designer combo-box ordering.
+const ABI_SOURCE_LINEAR: u32 = 0;
+const ABI_SOURCE_CUBIC_ALPHA: u32 = 1;
+const ABI_CUBIC_AKIMA: u32 = 0;
+const ABI_CUBIC_MAKIMA: u32 = 1;
+const ABI_CUBIC_PCHIP: u32 = 2;
+const ABI_CUBIC_STEFFEN: u32 = 3;
+const ABI_PARTIAL_STRICT: u32 = 0;
+const ABI_PARTIAL_ONE_SIDED: u32 = 1;
+const ABI_PARTIAL_ONE_SIDED_THEN_LINEAR: u32 = 2;
+const ABI_PARTIAL_LINEAR_NEAR_BOUNDARIES: u32 = 3;
+const ABI_CONTINUATION_RAW_BARYCENTRIC: u32 = 0;
+const ABI_CONTINUATION_MUGGIANU: u32 = 1;
+const ABI_CONTINUATION_KOHLER: u32 = 2;
 #[repr(C)]
 pub struct TcqtStatus {
     pub success: bool,
@@ -47,6 +61,8 @@ pub struct TcqtStatus {
 pub struct TcqtCalculationResult {
     pub success: bool,
     pub request_id: u64,
+    pub dataset_revision: u64,
+    pub options_revision: u64,
     pub vertex_count: u32,
     pub message: [u8; 128],
 }
@@ -54,7 +70,7 @@ pub struct TcqtCalculationResult {
 /// Enum values are deliberately explicit across the C ABI; invalid values are
 /// rejected by the bridge instead of falling back silently.
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct TcqtViewerCalculationOptions {
     pub automatic_range: bool,
     pub minimum: f64,
@@ -74,6 +90,13 @@ pub struct TcqtViewerCalculationOptions {
     pub continuation: u32,
 }
 
+/// Rust-authoritative Viewer numerical configuration and its monotonic revision.
+#[repr(C)]
+pub struct TcqtViewerCalculationState {
+    pub options: TcqtViewerCalculationOptions,
+    pub options_revision: u64,
+}
+
 #[repr(C)]
 pub struct TcqtProjectionSummary {
     pub available: bool,
@@ -83,8 +106,24 @@ pub struct TcqtProjectionSummary {
     pub automatic_used_invariant: bool,
     pub level_count: u32,
     pub invariant_count: u32,
+    pub binary_invariant_count: u32,
+    pub interior_invariant_count: u32,
     pub univariant_count: u32,
     pub contour_path_count: u32,
+    pub effective_automatic_range: bool,
+    pub effective_minimum: f64,
+    pub effective_maximum: f64,
+    pub effective_level_step: f64,
+    pub effective_sampling_subdivisions: u32,
+    pub effective_regularize: bool,
+    pub effective_regularization_spacing: f64,
+    pub effective_source_interpolation: u32,
+    pub effective_cubic_method: u32,
+    pub effective_partial_domain_policy: u32,
+    pub effective_continuation: u32,
+    pub dataset_revision: u64,
+    pub options_revision: u64,
+    pub request_id: u64,
     pub message: [u8; MESSAGE],
 }
 
@@ -219,6 +258,10 @@ pub struct TcqtProjectionRecord {
     pub stroke_width: f64,
     /// 0 = path/circle, 1 = square invariant marker.
     pub marker_kind: u32,
+    /// 0 = raw, 1 = regularized. Preserves geometry provenance through Qt.
+    pub path_source: u32,
+    pub phase_1: [u8; NAME],
+    pub phase_2: [u8; NAME],
     pub line_id: [u8; NAME],
 }
 
@@ -233,9 +276,14 @@ struct ProjectDocument {
     redo: Vec<TabulatedTernaryDataset>,
     contract: GuiContractState,
     projection: Option<LiquidusProjection>,
+    raw_projection: Option<LiquidusProjection>,
+    regularized_projection: Option<LiquidusProjection>,
     projection_records: Vec<ProjectionCsvRecord>,
     inspection_cache: FieldInspectionCache,
     calculation_generation: u64,
+    options_revision: u64,
+    projection_options_revision: u64,
+    projection_request_id: u64,
     // Numerical Viewer settings are validated and retained in Rust. Qt keeps
     // only a presentation mirror for its controls.
     viewer_options: TcqtViewerCalculationOptions,
@@ -253,17 +301,40 @@ impl ProjectDocument {
             redo: Vec::new(),
             contract: GuiContractState::default(),
             projection: None,
+            raw_projection: None,
+            regularized_projection: None,
             projection_records: Vec::new(),
             inspection_cache: FieldInspectionCache::default(),
             calculation_generation: 0,
+            options_revision: 1,
+            projection_options_revision: 0,
+            projection_request_id: 0,
             viewer_options: default_viewer_options(),
         }
     }
     fn invalidate_calculation(&mut self) {
         self.projection = None;
+        self.raw_projection = None;
+        self.regularized_projection = None;
         self.projection_records.clear();
         self.inspection_cache.invalidate();
         self.calculation_generation = self.calculation_generation.saturating_add(1);
+    }
+    /// Store a validated numerical Viewer configuration.  Options are not TCT
+    /// document data, so they advance their own revision and invalidate only
+    /// numerical caches rather than dirtying the document.
+    fn set_viewer_options(
+        &mut self,
+        raw_options: TcqtViewerCalculationOptions,
+    ) -> Result<bool, String> {
+        viewer_options(&raw_options)?;
+        if self.viewer_options == raw_options {
+            return Ok(false);
+        }
+        self.viewer_options = raw_options;
+        self.options_revision = self.options_revision.saturating_add(1);
+        self.invalidate_calculation();
+        Ok(true)
     }
     fn mark_revision_changed(&mut self) {
         self.revision = self.revision.saturating_add(1);
@@ -339,29 +410,29 @@ fn status(result: Result<(), String>) -> TcqtStatus {
 }
 fn viewer_options(raw: &TcqtViewerCalculationOptions) -> Result<ProjectionOptions, String> {
     let source_interpolation = match raw.source_interpolation {
-        0 => ternary_contours_cli::SourceInterpolation::Linear,
-        1 => ternary_contours_cli::SourceInterpolation::CubicAlpha {
+        ABI_SOURCE_LINEAR => ternary_contours_cli::SourceInterpolation::Linear,
+        ABI_SOURCE_CUBIC_ALPHA => ternary_contours_cli::SourceInterpolation::CubicAlpha {
             method: match raw.cubic_method {
-                0 => CubicAlphaMethod::Akima,
-                1 => CubicAlphaMethod::Makima,
-                2 => CubicAlphaMethod::Pchip,
-                3 => CubicAlphaMethod::Steffen,
+                ABI_CUBIC_AKIMA => CubicAlphaMethod::Akima,
+                ABI_CUBIC_MAKIMA => CubicAlphaMethod::Makima,
+                ABI_CUBIC_PCHIP => CubicAlphaMethod::Pchip,
+                ABI_CUBIC_STEFFEN => CubicAlphaMethod::Steffen,
                 _ => return Err("unsupported cubic slope method".into()),
             },
             continuation: match raw.continuation {
-                0 => BinaryExtrapolation::RawBarycentric,
-                1 => BinaryExtrapolation::Muggianu,
-                2 => BinaryExtrapolation::Kohler,
+                ABI_CONTINUATION_RAW_BARYCENTRIC => BinaryExtrapolation::RawBarycentric,
+                ABI_CONTINUATION_MUGGIANU => BinaryExtrapolation::Muggianu,
+                ABI_CONTINUATION_KOHLER => BinaryExtrapolation::Kohler,
                 _ => return Err("unsupported ternary continuation".into()),
             },
         },
         _ => return Err("unsupported source interpolation".into()),
     };
     let partial_domain_policy = match raw.partial_domain_policy {
-        0 => CubicPartialDomainPolicy::Strict,
-        1 => CubicPartialDomainPolicy::OneSided,
-        2 => CubicPartialDomainPolicy::OneSidedThenLinear,
-        3 => CubicPartialDomainPolicy::LinearNearDomain,
+        ABI_PARTIAL_STRICT => CubicPartialDomainPolicy::Strict,
+        ABI_PARTIAL_ONE_SIDED => CubicPartialDomainPolicy::OneSided,
+        ABI_PARTIAL_ONE_SIDED_THEN_LINEAR => CubicPartialDomainPolicy::OneSidedThenLinear,
+        ABI_PARTIAL_LINEAR_NEAR_BOUNDARIES => CubicPartialDomainPolicy::LinearNearDomain,
         _ => return Err("unsupported partial-domain policy".into()),
     };
     if !raw.level_step.is_finite() || raw.level_step <= 0.0 {
@@ -414,11 +485,10 @@ pub unsafe extern "C" fn tcqt_set_viewer_calculation_options(
 ) -> TcqtStatus {
     status((|| {
         let raw_options = *unsafe { out(raw_options.cast_mut(), "viewer calculation options") }?;
-        viewer_options(&raw_options)?;
         let mut state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
-        state.viewer_options = raw_options;
+        state.set_viewer_options(raw_options)?;
         Ok(())
     })())
 }
@@ -436,6 +506,25 @@ pub unsafe extern "C" fn tcqt_viewer_calculation_options(
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
         *output_value = state.viewer_options;
+        Ok(())
+    })())
+}
+
+/// Return the complete Rust-authoritative Viewer option snapshot used for
+/// revision-checked worker submission.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_viewer_calculation_state(
+    output_value: *mut TcqtViewerCalculationState,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "viewer calculation state") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        *output_value = TcqtViewerCalculationState {
+            options: state.viewer_options,
+            options_revision: state.options_revision,
+        };
         Ok(())
     })())
 }
@@ -1507,120 +1596,160 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
 pub unsafe extern "C" fn tcqt_calculate_viewer(
     raw_options: *const TcqtViewerCalculationOptions,
     expected_revision: u64,
+    expected_options_revision: u64,
     request_id: u64,
 ) -> TcqtCalculationResult {
-    let raw_options = match unsafe { out(raw_options.cast_mut(), "viewer calculation options") } {
+    let failure =
+        |message: String, dataset_revision: u64, options_revision: u64| TcqtCalculationResult {
+            success: false,
+            request_id,
+            dataset_revision,
+            options_revision,
+            vertex_count: 0,
+            message: bytes(&message),
+        };
+    let abi_options = match unsafe { out(raw_options.cast_mut(), "viewer calculation options") } {
         Ok(value) => *value,
-        Err(error) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id,
-                vertex_count: 0,
-                message: bytes(&error),
-            };
-        }
+        Err(error) => return failure(error, 0, 0),
     };
-    let options = match viewer_options(&raw_options) {
+    let projection_options = match viewer_options(&abi_options) {
         Ok(options) => options,
-        Err(error) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id,
-                vertex_count: 0,
-                message: bytes(&error),
-            };
-        }
+        Err(error) => return failure(error, 0, 0),
     };
-    let dataset = match document().lock() {
+    let (dataset, options_revision) = match document().lock() {
         Ok(mut state) => {
             if state.revision != expected_revision {
-                return TcqtCalculationResult {
-                    success: false,
-                    request_id,
-                    vertex_count: 0,
-                    message: bytes("project changed before calculation started"),
-                };
+                return failure(
+                    "project changed before calculation started".to_owned(),
+                    state.revision,
+                    state.options_revision,
+                );
+            }
+            if state.options_revision != expected_options_revision
+                || state.viewer_options != abi_options
+            {
+                return failure(
+                    "viewer settings changed before calculation started".to_owned(),
+                    state.revision,
+                    state.options_revision,
+                );
             }
             if let Err(error) = state.dataset.validate_calculation_readiness() {
-                return TcqtCalculationResult {
-                    success: false,
-                    request_id,
-                    vertex_count: 0,
-                    message: bytes(&format!("Calculation unavailable: {error}")),
-                };
+                return failure(
+                    format!("Calculation unavailable: {error}"),
+                    state.revision,
+                    state.options_revision,
+                );
             }
             state.calculation_generation = request_id;
-            state.viewer_options = raw_options;
-            state.dataset.clone()
+            (state.dataset.clone(), state.options_revision)
         }
-        Err(_) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id,
-                vertex_count: 0,
-                message: bytes("project lock is unavailable"),
-            };
-        }
+        Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
     };
-    let projection = match calculate_projection(&dataset, &options) {
+
+    // Retain both authoritative geometries.  Display mode is render-only and
+    // selects this cache without re-running the numerical pipeline.
+    let mut raw_options = projection_options.clone();
+    raw_options.regularize = false;
+    let raw_projection = match calculate_projection(&dataset, &raw_options) {
         Ok(projection) => projection,
         Err(error) => {
-            return TcqtCalculationResult {
-                success: false,
-                request_id,
-                vertex_count: 0,
-                message: bytes(&format!("Calculation failed: {error}")),
-            };
+            return failure(
+                format!("Calculation failed while tracing raw paths: {error}"),
+                expected_revision,
+                options_revision,
+            );
         }
     };
-    let records = projection_csv_records(
+    let mut regularized_options = projection_options.clone();
+    regularized_options.regularize = true;
+    let regularized_projection = match calculate_projection(&dataset, &regularized_options) {
+        Ok(projection) => projection,
+        Err(error) => {
+            return failure(
+                format!("Calculation failed while tracing regularized paths: {error}"),
+                expected_revision,
+                options_revision,
+            );
+        }
+    };
+    let selected_projection = if abi_options.regularize {
+        regularized_projection.clone()
+    } else {
+        raw_projection.clone()
+    };
+    let records = match projection_csv_records(
         &dataset,
-        Some(&projection),
-        None,
+        Some(&regularized_projection),
+        Some(&raw_projection),
         &RenderOptions::default(),
-        ProjectionCsvOptions::default(),
-    )
-    .unwrap_or_default();
+        ProjectionCsvOptions {
+            layers: ProjectionCsvLayerFilter::AllCalculatedLayers,
+            path_mode: RenderPathMode::Overlay,
+        },
+    ) {
+        Ok(records) => records,
+        Err(error) => {
+            return failure(
+                format!(
+                    "Calculation produced projection geometry that could not be transferred: {error}"
+                ),
+                expected_revision,
+                options_revision,
+            );
+        }
+    };
     let vertex_count = dataset
         .grids
         .iter()
         .map(|grid| grid.compositions().len())
         .sum::<usize>() as u32;
+    let binary_invariants = selected_projection
+        .stable_boundaries
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+        .count();
+    let interior_invariants = selected_projection
+        .stable_boundaries
+        .nodes
+        .iter()
+        .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
+        .count();
     let summary = format!(
-        "Calculated {} invariants, {} univariant paths, and {} isotherm paths",
-        projection.diagnostics.invariant_count,
-        projection.diagnostics.univariant_count,
-        projection.diagnostics.contour_path_count,
+        "Calculated {binary_invariants} binary invariants, {interior_invariants} ternary invariants, {} univariant paths, and {} isotherm paths",
+        selected_projection.diagnostics.univariant_count,
+        selected_projection.diagnostics.contour_path_count,
     );
     match document().lock() {
         Ok(mut state)
             if state.revision == expected_revision
+                && state.options_revision == expected_options_revision
                 && state.calculation_generation == request_id =>
         {
-            state.projection = Some(projection);
+            state.projection = Some(selected_projection);
+            state.raw_projection = Some(raw_projection);
+            state.regularized_projection = Some(regularized_projection);
             state.projection_records = records;
+            state.projection_options_revision = expected_options_revision;
+            state.projection_request_id = request_id;
             TcqtCalculationResult {
                 success: true,
                 request_id,
+                dataset_revision: expected_revision,
+                options_revision: expected_options_revision,
                 vertex_count,
                 message: bytes(&summary),
             }
         }
-        Ok(_) => TcqtCalculationResult {
-            success: false,
-            request_id,
-            vertex_count: 0,
-            message: bytes("calculation result became stale and was discarded"),
-        },
-        Err(_) => TcqtCalculationResult {
-            success: false,
-            request_id,
-            vertex_count: 0,
-            message: bytes("project lock is unavailable"),
-        },
+        Ok(state) => failure(
+            "calculation result became stale and was discarded".to_owned(),
+            state.revision,
+            state.options_revision,
+        ),
+        Err(_) => failure("project lock is unavailable".to_owned(), 0, 0),
     }
 }
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_projection_summary(
     output_value: *mut TcqtProjectionSummary,
@@ -1630,6 +1759,7 @@ pub unsafe extern "C" fn tcqt_projection_summary(
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
+        let effective = state.viewer_options;
         let Some(projection) = state.projection.as_ref() else {
             *output_value = TcqtProjectionSummary {
                 available: false,
@@ -1639,13 +1769,45 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 automatic_used_invariant: false,
                 level_count: 0,
                 invariant_count: 0,
+                binary_invariant_count: 0,
+                interior_invariant_count: 0,
                 univariant_count: 0,
                 contour_path_count: 0,
+                effective_automatic_range: effective.automatic_range,
+                effective_minimum: effective.minimum,
+                effective_maximum: effective.maximum,
+                effective_level_step: effective.level_step,
+                effective_sampling_subdivisions: effective.sampling_subdivisions,
+                effective_regularize: effective.regularize,
+                effective_regularization_spacing: effective.regularization_spacing,
+                effective_source_interpolation: effective.source_interpolation,
+                effective_cubic_method: effective.cubic_method,
+                effective_partial_domain_policy: effective.partial_domain_policy,
+                effective_continuation: effective.continuation,
+                dataset_revision: state.revision,
+                options_revision: state.options_revision,
+                request_id: state.projection_request_id,
                 message: bytes("No projection has been calculated."),
             };
             return Ok(());
         };
         let automatic = projection.automatic_iso_range;
+        let binary_invariant_count = projection
+            .stable_boundaries
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+            .count() as u32;
+        let interior_invariant_count = projection
+            .stable_boundaries
+            .nodes
+            .iter()
+            .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
+            .count() as u32;
+        let (effective_minimum, effective_maximum) = automatic
+            .map_or((effective.minimum, effective.maximum), |range| {
+                (range.minimum, range.maximum)
+            });
         *output_value = TcqtProjectionSummary {
             available: true,
             source_minimum: projection.input_summary.temperature_range[0],
@@ -1657,14 +1819,29 @@ pub unsafe extern "C" fn tcqt_projection_summary(
             automatic_used_invariant: automatic.is_some_and(|range| range.used_invariant_minimum),
             level_count: projection.levels.len() as u32,
             invariant_count: projection.diagnostics.invariant_count as u32,
+            binary_invariant_count,
+            interior_invariant_count,
             univariant_count: projection.diagnostics.univariant_count as u32,
             contour_path_count: projection.diagnostics.contour_path_count as u32,
+            effective_automatic_range: effective.automatic_range,
+            effective_minimum,
+            effective_maximum,
+            effective_level_step: effective.level_step,
+            effective_sampling_subdivisions: projection.diagnostics.sampling_subdivisions as u32,
+            effective_regularize: effective.regularize,
+            effective_regularization_spacing: effective.regularization_spacing,
+            effective_source_interpolation: effective.source_interpolation,
+            effective_cubic_method: effective.cubic_method,
+            effective_partial_domain_policy: effective.partial_domain_policy,
+            effective_continuation: effective.continuation,
+            dataset_revision: state.revision,
+            options_revision: state.projection_options_revision,
+            request_id: state.projection_request_id,
             message: bytes("Projection is current."),
         };
         Ok(())
     })())
 }
-
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_evaluate_field(
     grid_index: u32,
@@ -1874,16 +2051,26 @@ pub unsafe extern "C" fn tcqt_projection_record_count(output_value: *mut u32) ->
     })())
 }
 
-fn projection_paint_style(line_type: u32) -> (u32, f64, u32) {
-    match line_type {
-        // AARRGGBB values. Scene styling is retained in Rust so every native
-        // frontend receives the same semantic rendering instruction.
-        0 => (0xff2d6eb4, 1.5, 0),
-        1 => (0xffa03782, 2.2, 0),
-        2 => (0xffb63232, 1.5, 1),
-        3 => (0xffe17819, 1.5, 0),
-        _ => (0xff6a6a6a, 1.2, 0),
-    }
+fn projection_paint_style(line_type: u32, path_source: u32) -> (u32, f64, u32) {
+    // AARRGGBB values. Scene styling and raw/regularized provenance stay in
+    // Rust; Qt executes the supplied scene instructions only.
+    let alpha = if path_source == 0 {
+        0xa0_00_00_00
+    } else {
+        0xff_00_00_00
+    };
+    let (rgb, width, marker_kind) = match line_type {
+        0 => (0x002D_6EB4, 1.5, 0),
+        1 => (0x00A0_3782, 2.2, 0),
+        2 => (0x00B6_3232, 1.5, 1),
+        3 => (0x00E1_7819, 1.5, 0),
+        _ => (0x006A_6A6A, 1.2, 0),
+    };
+    (
+        alpha | rgb,
+        if path_source == 0 { width * 0.8 } else { width },
+        marker_kind,
+    )
 }
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_projection_record_at(
@@ -1906,7 +2093,11 @@ pub unsafe extern "C" fn tcqt_projection_record_at(
             ternary_contours_cli::ProjectionLineType::InteriorInvariant => 3,
             ternary_contours_cli::ProjectionLineType::StableBoundaryContact => 4,
         };
-        let (rgba, stroke_width, marker_kind) = projection_paint_style(line_type);
+        let path_source = match record.path_source {
+            ProjectionPathSource::Raw => 0,
+            ProjectionPathSource::Regularized => 1,
+        };
+        let (rgba, stroke_width, marker_kind) = projection_paint_style(line_type, path_source);
         *output_value = TcqtProjectionRecord {
             a: record.composition[0],
             b: record.composition[1],
@@ -1916,6 +2107,9 @@ pub unsafe extern "C" fn tcqt_projection_record_at(
             rgba,
             stroke_width,
             marker_kind,
+            path_source,
+            phase_1: bytes(record.phase_1.as_deref().unwrap_or_default()),
+            phase_2: bytes(record.phase_2.as_deref().unwrap_or_default()),
             line_id: bytes(&record.line_id),
         };
         Ok(())
@@ -1987,6 +2181,8 @@ pub extern "C" fn tcqt_run_feasibility_calculation(
         Ok(grid) => TcqtCalculationResult {
             success: true,
             request_id,
+            dataset_revision,
+            options_revision: 0,
             vertex_count: grid.vertex_count() as u32,
             message: bytes(&format!(
                 "Rust grid ready: {} canonical vertices",
@@ -1996,6 +2192,8 @@ pub extern "C" fn tcqt_run_feasibility_calculation(
         Err(error) => TcqtCalculationResult {
             success: false,
             request_id,
+            dataset_revision,
+            options_revision: 0,
             vertex_count: 0,
             message: bytes(&format!("Rust grid rejected: {error}")),
         },
@@ -2113,6 +2311,11 @@ pub extern "C" fn tcqt_duplicate_grid(index: u32) -> TcqtStatus {
 mod tests {
     use super::*;
 
+    fn test_document_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
     #[test]
     fn new_document_has_empty_phase_and_grid_collections() {
         let state = ProjectDocument::new();
@@ -2130,6 +2333,7 @@ mod tests {
 
     #[test]
     fn draft_save_and_reopen_round_trips_transactionally() {
+        let _guard = test_document_lock().lock().unwrap();
         let path =
             std::env::temp_dir().join(format!("ternary-contours-draft-{}.tct", std::process::id()));
         let encoded = std::ffi::CString::new(path.to_string_lossy().as_bytes()).unwrap();
@@ -2281,10 +2485,152 @@ mod tests {
     }
 
     #[test]
+    fn viewer_setting_revision_invalidates_only_numerical_caches() {
+        let mut state = ProjectDocument::new();
+        state.projection_records.push(ProjectionCsvRecord {
+            line_id: "cached".into(),
+            point_index: 0,
+            composition: [1.0, 0.0, 0.0],
+            temperature: None,
+            line_type: ternary_contours_cli::ProjectionLineType::StableIsotherm,
+            phase: None,
+            phase_1: None,
+            phase_2: None,
+            level: None,
+            path_source: ProjectionPathSource::Raw,
+            closed: false,
+        });
+        let document_revision = state.revision;
+        let options_revision = state.options_revision;
+        let mut options = state.viewer_options;
+        options.sampling_subdivisions = 37;
+        assert!(state.set_viewer_options(options).unwrap());
+        assert_eq!(state.revision, document_revision);
+        assert_eq!(state.options_revision, options_revision + 1);
+        assert!(state.projection_records.is_empty());
+        assert!(!state.dirty);
+        assert!(!state.set_viewer_options(options).unwrap());
+        assert_eq!(state.options_revision, options_revision + 1);
+    }
+
+    #[test]
+    fn bridge_calculation_uses_the_complete_authoritative_option_snapshot() {
+        let _guard = test_document_lock().lock().unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tools/ternary-contours-cli/fixtures/interior-invariant.tct");
+        let fixture_text = std::fs::read_to_string(&fixture).unwrap();
+        let path = std::ffi::CString::new(fixture.to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            assert!(tcqt_open_document(path.as_ptr()).success);
+            let mut document_summary = std::mem::zeroed::<TcqtProjectSummary>();
+            assert!(tcqt_project_summary(&mut document_summary).success);
+            let configured = TcqtViewerCalculationOptions {
+                automatic_range: true,
+                minimum: 0.0,
+                maximum: 0.0,
+                level_step: 5.0,
+                sampling_subdivisions: 17,
+                regularize: true,
+                regularization_spacing: 0.01,
+                source_interpolation: ABI_SOURCE_LINEAR,
+                cubic_method: ABI_CUBIC_STEFFEN,
+                partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
+                continuation: ABI_CONTINUATION_KOHLER,
+            };
+            assert!(tcqt_set_viewer_calculation_options(&configured).success);
+            let direct = calculate_projection(
+                &ternary_contours_cli::parse_str(&fixture_text).unwrap(),
+                &viewer_options(&configured).unwrap(),
+            )
+            .unwrap();
+            let direct_binary = direct
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+                .count() as u32;
+            let direct_interior = direct
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
+                .count() as u32;
+            assert_eq!(
+                (
+                    direct_binary,
+                    direct_interior,
+                    direct.stable_boundaries.univariants.len()
+                ),
+                (3, 1, 3)
+            );
+            let mut state = std::mem::zeroed::<TcqtViewerCalculationState>();
+            assert!(tcqt_viewer_calculation_state(&mut state).success);
+            let result = tcqt_calculate_viewer(
+                &state.options,
+                document_summary.revision,
+                state.options_revision,
+                91,
+            );
+            assert!(
+                result.success,
+                "{}",
+                String::from_utf8_lossy(&result.message)
+            );
+            let mut projection = std::mem::zeroed::<TcqtProjectionSummary>();
+            assert!(tcqt_projection_summary(&mut projection).success);
+            assert!(projection.available);
+            assert_eq!(
+                (
+                    projection.binary_invariant_count,
+                    projection.interior_invariant_count,
+                    projection.univariant_count
+                ),
+                (
+                    direct_binary,
+                    direct_interior,
+                    direct.stable_boundaries.univariants.len() as u32
+                )
+            );
+            assert_eq!(projection.effective_level_step, 5.0);
+            assert_eq!(projection.effective_sampling_subdivisions, 17);
+            assert_eq!(projection.effective_source_interpolation, ABI_SOURCE_LINEAR);
+            assert_eq!(projection.effective_continuation, ABI_CONTINUATION_KOHLER);
+            assert_eq!(projection.options_revision, state.options_revision);
+            assert_eq!(projection.request_id, 91);
+            let mut record_count = 0;
+            assert!(tcqt_projection_record_count(&mut record_count).success);
+            assert!(record_count > 0);
+            let mut line_type_counts = [0_u32; 4];
+            let mut saw_raw = false;
+            let mut saw_regularized = false;
+            let mut saw_phase_pair = false;
+            for index in 0..record_count {
+                let mut record = std::mem::zeroed::<TcqtProjectionRecord>();
+                assert!(tcqt_projection_record_at(index, &mut record).success);
+                if (record.line_type as usize) < line_type_counts.len() {
+                    line_type_counts[record.line_type as usize] += 1;
+                }
+                saw_raw |= record.path_source == 0;
+                saw_regularized |= record.path_source == 1;
+                saw_phase_pair |= record.phase_1.iter().any(|byte| *byte != 0)
+                    && record.phase_2.iter().any(|byte| *byte != 0);
+            }
+            assert!(line_type_counts.iter().all(|count| *count > 0));
+            assert!(saw_raw && saw_regularized);
+            assert!(saw_phase_pair);
+        }
+    }
+    #[test]
     fn rust_projection_scene_style_distinguishes_each_calculated_layer() {
-        assert_ne!(projection_paint_style(0).0, projection_paint_style(1).0);
-        assert_ne!(projection_paint_style(2).2, projection_paint_style(3).2);
-        assert!(projection_paint_style(0).1.is_finite());
+        assert_ne!(
+            projection_paint_style(0, 1).0,
+            projection_paint_style(1, 1).0
+        );
+        assert_ne!(
+            projection_paint_style(2, 1).2,
+            projection_paint_style(3, 1).2
+        );
+        assert!(projection_paint_style(0, 1).1.is_finite());
     }
     #[test]
     fn viewer_vertex_mutation_is_one_revision_one_undo_and_invalidates_projection() {

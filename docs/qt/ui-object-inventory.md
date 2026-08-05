@@ -1,5 +1,7 @@
 # Qt Designer object inventory
 
+[Qt product and architecture contract](product-and-architecture-contract.md) is normative for this inventory.
+
 Generated at Rust build time from `apps/ternary-contours-qt/ui/*.ui`.
 
 | Rust Qt ID | Qt objectName | Class | .ui source | Parent | Core contract | Purpose | Visible when | Enabled when | Layout policy | Typed action or model role |

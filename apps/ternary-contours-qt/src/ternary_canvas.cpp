@@ -43,6 +43,7 @@ void TernaryCanvas::setProjectionVisibility(bool master, bool isotherms, bool un
     show_interior_invariants_ = interior_invariants;
     update();
 }
+void TernaryCanvas::setProjectionPathDisplayMode(int mode) { path_display_mode_ = std::clamp(mode, 0, 2); update(); }
 void TernaryCanvas::setProjectionAppearance(int line_width, int invariant_marker_size) {
     line_width_ = std::clamp(line_width, 1, 8);
     invariant_marker_size_ = std::clamp(invariant_marker_size, 2, 20);
@@ -66,6 +67,7 @@ void TernaryCanvas::setVertexLabelSettings(int mode, int decimals, bool selected
     update();
 }
 void TernaryCanvas::setQueries(const QVector<CanvasQuery>& queries) { queries_ = queries; update(); }
+void TernaryCanvas::setContainingTriangleVisible(bool visible) { show_containing_triangle_ = visible; update(); }
 void TernaryCanvas::setMarkerSize(int size) { marker_size_ = std::clamp(size, 2, 20); update(); }
 void TernaryCanvas::setVertexVisibility(bool calculated, bool non_existing, bool cut_off, bool missing) {
     show_calculated_ = calculated; show_non_existing_ = non_existing; show_cut_off_ = cut_off; show_missing_ = missing; update();
@@ -151,7 +153,8 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
                 : path.type == 1 ? show_univariants_
                 : path.type == 2 ? show_binary_invariants_
                 : path.type == 3 ? show_interior_invariants_ : true;
-            if (!visible || path.compositions.isEmpty()) continue;
+            const bool source_visible = path_display_mode_ == 2 || path.path_source == static_cast<std::uint32_t>(path_display_mode_);
+            if (!visible || !source_visible || path.compositions.isEmpty()) continue;
             const QColor color = QColor::fromRgba(path.rgba);
             if (path.compositions.size() == 1) {
                 const auto source = path.compositions.front();
@@ -159,7 +162,9 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
                 painter.setPen(QPen(color, 1.5)); painter.setBrush(color);
                 if (path.marker_kind == 1) painter.drawRect(QRectF(point.x() - invariant_marker_size_ / 2.0, point.y() - invariant_marker_size_ / 2.0, invariant_marker_size_, invariant_marker_size_));
                 else painter.drawEllipse(point, invariant_marker_size_ / 2.0, invariant_marker_size_ / 2.0);
-                if ((path.type == 2 && show_invariant_ids_) || (path.type == 3 && show_invariant_ids_)) painter.drawText(point + QPointF(invariant_marker_size_ + 2, -2), tr("I"));
+                if ((path.type == 2 || path.type == 3) && show_invariant_ids_) {
+                    painter.drawText(point + QPointF(invariant_marker_size_ + 2, -2), path.line_id);
+                }
                 continue;
             }
             QPainterPath curve; const auto first = path.compositions.front(); curve.moveTo(pointForComposition(first.x(), first.y(), 1.0 - first.x() - first.y()));
@@ -168,6 +173,15 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
             if (show_path_vertices_) { painter.setBrush(color); for (const auto& source : path.compositions) painter.drawEllipse(pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y()), 1.8, 1.8); }
             if ((path.type == 0 && show_contour_endpoints_) || (path.type == 1 && show_univariant_endpoints_)) {
                 painter.setBrush(color); for (const auto& source : {path.compositions.front(), path.compositions.back()}) painter.drawEllipse(pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y()), 3.0, 3.0);
+            }
+            if (path.type == 1 && (show_univariant_ids_ || show_phase_pair_labels_)) {
+                const auto middle = path.compositions.at(path.compositions.size() / 2);
+                const auto label_point = pointForComposition(middle.x(), middle.y(), 1.0 - middle.x() - middle.y());
+                painter.setPen(color);
+                const auto label = show_phase_pair_labels_ && !path.phase_pair.isEmpty()
+                    ? path.phase_pair
+                    : path.line_id;
+                painter.drawText(label_point + QPointF(5.0, -5.0), label);
             }
         }
         if (projection_paths_.isEmpty() && source_vertices_.isEmpty()) { painter.setPen(palette().mid().color()); painter.drawText(rect(), Qt::AlignCenter, tr("No calculated projection to display")); }
@@ -191,6 +205,18 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
                 else label = vertex.label.section(QLatin1Char(':'), 0, 0) + QStringLiteral(" (") + state + QStringLiteral(")");
                 painter.setPen(palette().text().color()); painter.drawText(point + QPointF(marker_size_ + 2, -2), label);
             }
+        }
+    }
+if (show_containing_triangle_) {
+        painter.setPen(QPen(QColor(185, 60, 185), 1.8, Qt::DashLine));
+        painter.setBrush(QColor(185, 60, 185, 28));
+        for (const auto& query : queries_) {
+            if (!query.selected || query.containing_triangle.size() != 3) continue;
+            QPolygonF triangle;
+            for (const auto& source : query.containing_triangle) {
+                triangle << pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y());
+            }
+            painter.drawPolygon(triangle);
         }
     }
     if (query_points_visible_) for (const auto& query : queries_) { const auto point = pointForComposition(query.composition.x(), query.composition.y(), 1.0 - query.composition.x() - query.composition.y()); painter.setPen(QPen(query.selected ? QColor(220, 50, 50) : QColor(70, 70, 210), query.selected ? 2.5 : 1.4)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(point, query.selected ? 6.0 : 4.0, query.selected ? 6.0 : 4.0); }

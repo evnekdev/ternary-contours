@@ -4,17 +4,24 @@
 
 extern "C" {
 struct TcqtStatus { bool success; char message[512]; };
-struct TcqtCalculationResult { bool success; std::uint64_t request_id; std::uint32_t vertex_count; char message[128]; };
+struct TcqtCalculationResult { bool success; std::uint64_t request_id; std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint32_t vertex_count; char message[128]; };
 struct TcqtViewerCalculationOptions {
     bool automatic_range; double minimum; double maximum; double level_step;
     std::uint32_t sampling_subdivisions; bool regularize; double regularization_spacing;
     std::uint32_t source_interpolation; std::uint32_t cubic_method;
     std::uint32_t partial_domain_policy; std::uint32_t continuation;
 };
+struct TcqtViewerCalculationState { TcqtViewerCalculationOptions options; std::uint64_t options_revision; };
 struct TcqtProjectionSummary {
     bool available; double source_minimum; double source_maximum; double automatic_minimum;
     bool automatic_used_invariant; std::uint32_t level_count; std::uint32_t invariant_count;
-    std::uint32_t univariant_count; std::uint32_t contour_path_count; char message[512];
+    std::uint32_t binary_invariant_count; std::uint32_t interior_invariant_count;
+    std::uint32_t univariant_count; std::uint32_t contour_path_count;
+    bool effective_automatic_range; double effective_minimum; double effective_maximum; double effective_level_step;
+    std::uint32_t effective_sampling_subdivisions; bool effective_regularize; double effective_regularization_spacing;
+    std::uint32_t effective_source_interpolation; std::uint32_t effective_cubic_method;
+    std::uint32_t effective_partial_domain_policy; std::uint32_t effective_continuation;
+    std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id; char message[512];
 };
 struct TcqtInspectionResult {
     bool success; std::uint32_t state; bool has_value; double value;
@@ -50,7 +57,7 @@ struct TcqtGrid { std::uint32_t index; std::uint32_t kind; std::uint32_t subdivi
 struct TcqtField { std::uint32_t index; std::uint32_t phase_id; char property[128]; char column_name[128]; };
 struct TcqtRow { double a; double b; double c; };
 struct TcqtCell { std::uint32_t state; bool has_value; double value; char note[128]; };
-struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; char line_id[128]; };
+struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; std::uint32_t path_source; char phase_1[128]; char phase_2[128]; char line_id[128]; };
 
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);
@@ -81,7 +88,8 @@ TcqtStatus tcqt_undo();
 TcqtStatus tcqt_redo();
 TcqtStatus tcqt_set_viewer_calculation_options(const TcqtViewerCalculationOptions* options);
 TcqtStatus tcqt_viewer_calculation_options(TcqtViewerCalculationOptions* output);
-TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t request_id);
+TcqtStatus tcqt_viewer_calculation_state(TcqtViewerCalculationState* output);
+TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t expected_options_revision, std::uint64_t request_id);
 TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
 TcqtStatus tcqt_evaluate_field(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const TcqtViewerCalculationOptions* options, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);
 TcqtStatus tcqt_set_field_vertex(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, std::uint32_t row_index, const char* token);

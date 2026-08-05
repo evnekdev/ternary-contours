@@ -10,7 +10,7 @@ use ternary_contours::{
 };
 
 use crate::{TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState};
-#[cfg(feature = "viewer")]
+#[cfg(feature = "inspection")]
 use ternary_contours::{PartialCubicGridField, RegularTernaryPartialScalarField};
 
 /// Source interpolation family used consistently for every participating phase.
@@ -183,7 +183,7 @@ struct RuntimePhase {
 enum PhaseSourceModel {
     Evaluator(RuntimePhase),
     CubicRegular(RegularTernaryScalarField),
-    #[cfg(feature = "viewer")]
+    #[cfg(feature = "inspection")]
     CubicPartial(RegularTernaryPartialScalarField),
 }
 
@@ -359,7 +359,7 @@ pub fn calculate_projection(
                             })?;
                         PhaseSourceModel::CubicRegular(cubic)
                     } else {
-                        #[cfg(feature = "viewer")]
+                        #[cfg(feature = "inspection")]
                         {
                             let partial =
                                 RegularTernaryPartialScalarField::new(grid.subdivisions, values)
@@ -395,7 +395,7 @@ pub fn calculate_projection(
                             ));
                             PhaseSourceModel::CubicPartial(partial)
                         }
-                        #[cfg(not(feature = "viewer"))]
+                        #[cfg(not(feature = "inspection"))]
                         {
                             let _ = values;
                             return Err(ProjectionError::CubicSourceIncomplete {
@@ -461,7 +461,7 @@ pub fn calculate_projection(
                         FieldInterpolation::CubicAlpha(cubic_options),
                     )
                 }
-                #[cfg(feature = "viewer")]
+                #[cfg(feature = "inspection")]
                 PhaseSourceModel::CubicPartial(field) => {
                     let mut cubic_options = options
                         .source_interpolation
@@ -777,7 +777,7 @@ mod tests {
         assert!(message.contains("non-existing 0, cut-off 0, missing 66"));
     }
 
-    #[cfg(feature = "viewer")]
+    #[cfg(feature = "inspection")]
     #[test]
     fn cubic_alpha_selection_reaches_every_regular_phase_source() {
         let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
@@ -796,7 +796,7 @@ mod tests {
         assert!(projection.diagnostics.stable_polygon_count > 0);
     }
 
-    #[cfg(feature = "viewer")]
+    #[cfg(feature = "inspection")]
     #[test]
     fn cubic_alpha_partial_regular_domains_use_local_fallbacks() {
         let mut dataset = crate::default_regular_dataset();
@@ -824,7 +824,7 @@ mod tests {
         assert!(projection.diagnostics.stable_polygon_count > 0);
     }
 
-    #[cfg(feature = "viewer")]
+    #[cfg(feature = "inspection")]
     #[test]
     fn cubic_alpha_strict_policy_retains_explicit_partial_rejection() {
         let mut dataset = crate::default_regular_dataset();

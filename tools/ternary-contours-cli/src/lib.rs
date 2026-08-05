@@ -5,6 +5,7 @@
 //! module adapts it to `ternary-contours` only at calculation time.
 
 pub mod editor;
+#[cfg(feature = "inspection")]
 #[path = "viewer/interpolation_inspection.rs"]
 pub mod interpolation_inspection;
 pub mod model;

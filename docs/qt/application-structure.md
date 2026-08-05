@@ -1,10 +1,12 @@
+[Qt product and architecture contract](product-and-architecture-contract.md) is normative for this document.
+
 # Qt application structure
 
 ```text
 apps/ternary-contours-qt/
   CMakeLists.txt                 Qt 6 Widgets shell (not default Cargo build)
   src/                           QMainWindow, vector canvas, menu/status wiring
-  include/rust_bridge.hpp        narrow prototype ABI
+  include/rust_bridge.hpp        narrow Rust bridge ABI
   rust-bridge/                   Rust static library for feasibility work
 
 tools/ternary-contours-gui-core/
@@ -13,7 +15,7 @@ tools/ternary-contours-gui-core/
   src/bin/generate_gui_contract_docs.rs
 
 tools/ternary-contours-cli/
-  src/viewer/contract.rs         temporary egui identity wrappers and legacy audits
+  src/viewer/contract.rs         legacy egui compatibility and migration audits
 ```
 
 The Qt UI dispatches `UiAction` values to the core. The core returns `UiEffect`

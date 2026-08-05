@@ -45,3 +45,9 @@ Run the checked-in documentation guard before submitting a viewer change:
 ```text
 cargo run -p ternary-contours-gui-core --bin generate-gui-contract-docs -- --check
 ```
+## Qt contract
+
+Before modifying `apps/ternary-contours-qt`, read
+[`docs/qt/product-and-architecture-contract.md`](docs/qt/product-and-architecture-contract.md).
+A change that conflicts with that contract MUST update the contract, automated
+tests, affected implementation documentation, and the implementation itself.

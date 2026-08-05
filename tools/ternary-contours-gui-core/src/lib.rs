@@ -371,7 +371,7 @@ pub const fn qt_ui_action(id: QtUiElementId) -> Option<QtUiAction> {
 /// documentation and QtTest discovery.
 pub fn qt_ui_inventory_markdown() -> String {
     let mut output = String::from(
-        "# Qt Designer object inventory\n\nGenerated at Rust build time from `apps/ternary-contours-qt/ui/*.ui`.\n\n| Rust Qt ID | Qt objectName | Class | .ui source | Parent | Core contract | Purpose | Visible when | Enabled when | Layout policy | Typed action or model role |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
+        "# Qt Designer object inventory\n\n[Qt product and architecture contract](product-and-architecture-contract.md) is normative for this inventory.\n\nGenerated at Rust build time from `apps/ternary-contours-qt/ui/*.ui`.\n\n| Rust Qt ID | Qt objectName | Class | .ui source | Parent | Core contract | Purpose | Visible when | Enabled when | Layout policy | Typed action or model role |\n| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n",
     );
     let registry = ui_element_registry();
     for element in QT_UI_ELEMENTS {
@@ -2266,9 +2266,28 @@ mod tests {
         assert!(source.contains("dispatchViewerWidgetCommand"));
         assert!(source.contains("updateViewerActionState"));
         assert!(source.contains("tcqt_set_viewer_calculation_options"));
-        assert!(source.contains("tcqt_viewer_calculation_options"));
+        assert!(source.contains("tcqt_viewer_calculation_state"));
         assert!(source.contains("tcqt_calculate_viewer"));
         assert!(!source.contains("tcqt_calculate_current"));
+        assert!(source.contains("pending_recalculation"));
+        assert!(source.contains("result.request_id != generation"));
+        assert!(source.contains("TcqtViewerCalculationState"));
+        assert!(source.contains("CollapsibleSection"));
+        for section in [
+            "toggleViewerVertexVisibilitySection",
+            "toggleViewerLabelsAppearanceSection",
+            "toggleViewerSelectedVertexSection",
+            "toggleViewerIsoRangeSection",
+            "toggleViewerSourceCalculationSection",
+            "toggleViewerPathsSection",
+            "toggleViewerLayersSection",
+            "toggleViewerDiagnosticsSection",
+        ] {
+            assert!(
+                source.contains(section),
+                "missing collapsible section wiring for {section}"
+            );
+        }
         for command in [
             "SetStableIsothermsVisible",
             "SetStableUnivariantsVisible",
@@ -2328,6 +2347,21 @@ mod tests {
         .unwrap();
         assert!(ui.contains("<string>Vertex</string>"));
         assert!(ui.contains("<string>Interpolate</string>"));
+        for section in [
+            "toggleViewerVertexVisibilitySection",
+            "toggleViewerLabelsAppearanceSection",
+            "toggleViewerSelectedVertexSection",
+            "toggleViewerIsoRangeSection",
+            "toggleViewerSourceCalculationSection",
+            "toggleViewerPathsSection",
+            "toggleViewerLayersSection",
+            "toggleViewerDiagnosticsSection",
+        ] {
+            assert!(
+                ui.contains(section),
+                "missing Designer-defined collapsible header {section}"
+            );
+        }
         assert!(!ui.contains("<string>Inspect</string>"));
         assert!(!ui.contains("<string>Edit</string>"));
     }

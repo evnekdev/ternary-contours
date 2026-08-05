@@ -1,3 +1,5 @@
+[Qt product and architecture contract](product-and-architecture-contract.md) is normative for this document.
+
 # Qt data models
 
 The Qt application will use Qt model/view classes, not independent text widgets

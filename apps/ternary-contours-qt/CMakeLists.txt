@@ -22,6 +22,8 @@ add_executable(ternary-contours-qt
     src/main.cpp
     src/main_window.cpp
     src/main_window.hpp
+    src/collapsible_section.cpp
+    src/collapsible_section.hpp
     src/ternary_canvas.cpp
     src/ternary_canvas.hpp
     src/grid_table_model.cpp
