@@ -10,11 +10,6 @@ description = "Repository CLI for validating and plotting tabulated ternary liqu
 name = "ternary-contours-cli"
 path = "src/main.rs"
 
-[[bin]]
-name = "generate-gui-contract-docs"
-path = "src/bin/generate_gui_contract_docs.rs"
-required-features = ["viewer"]
-
 [features]
 default = []
 viewer = ["dep:eframe", "dep:egui", "dep:rfd", "ternary-contours/cubic-alpha"]
@@ -32,4 +27,5 @@ plotters = { version = "0.3.7", default-features = false, features = [
 ] }
 plotters-ternary = { path = "../../../plotters-ternary", features = ["stable-contours"] }
 ternary-contours = { path = "../..", features = ["irregular-delaunay"] }
+ternary-contours-gui-core = { path = "../ternary-contours-gui-core" }
 thiserror = "2.0.17"

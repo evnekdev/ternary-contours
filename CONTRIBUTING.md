@@ -43,5 +43,5 @@ incomplete until it has:
 Run the checked-in documentation guard before submitting a viewer change:
 
 ```text
-cargo run -p ternary-contours-cli --features viewer --bin generate-gui-contract-docs -- --check
+cargo run -p ternary-contours-gui-core --bin generate-gui-contract-docs -- --check
 ```

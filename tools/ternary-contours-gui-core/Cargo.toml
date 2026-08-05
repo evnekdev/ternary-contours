@@ -1,0 +1,13 @@
+[package]
+name = "ternary-contours-gui-core"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97.1"
+publish = false
+description = "Framework-neutral GUI contracts and reducer for ternary-contours desktop frontends"
+
+[[bin]]
+name = "generate-gui-contract-docs"
+path = "src/bin/generate_gui_contract_docs.rs"
+
+[dependencies]

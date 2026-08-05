@@ -19,7 +19,7 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test
       - run: cargo test --all-features
-      - run: cargo run -p ternary-contours-cli --features viewer --bin generate-gui-contract-docs -- --check
+      - run: cargo run -p ternary-contours-gui-core --bin generate-gui-contract-docs -- --check
       - run: cargo test --no-default-features
       - run: cargo doc --all-features --no-deps
         env:
