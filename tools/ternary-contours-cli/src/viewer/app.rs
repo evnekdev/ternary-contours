@@ -15,6 +15,10 @@ use crate::{
 };
 
 use super::{
+    contract::{
+        self, EventTrace, GuiContractState, RequestId, Revision, UiAction, UiEffect, UiElementId,
+        ViewerTab,
+    },
     controls,
     data_editor::{DataEditorAction, DataEditorUi},
     grid_inspection::{self, GridInspectionAction, GridInspectionUi},
@@ -25,38 +29,6 @@ use super::{
     },
     texture::RenderedTexture,
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ViewerTab {
-    Data,
-    Diagnostics,
-    GridInspection,
-    Plot,
-}
-
-impl ViewerTab {
-    const ORDERED: [Self; 4] = [
-        Self::Data,
-        Self::Diagnostics,
-        Self::GridInspection,
-        Self::Plot,
-    ];
-
-    const fn next(self, backwards: bool) -> Self {
-        let index = match self {
-            Self::Data => 0,
-            Self::Diagnostics => 1,
-            Self::GridInspection => 2,
-            Self::Plot => 3,
-        };
-        let index = if backwards {
-            (index + Self::ORDERED.len() - 1) % Self::ORDERED.len()
-        } else {
-            (index + 1) % Self::ORDERED.len()
-        };
-        Self::ORDERED[index]
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ProjectionExport {
@@ -117,6 +89,11 @@ pub struct LiquidusViewerApp {
     show_plot_after_success: bool,
     open_confirmation: bool,
     csv_export_filter: ProjectionCsvLayerFilter,
+    contract_state: GuiContractState,
+    event_trace: EventTrace,
+    contract_projection_request: Option<(RequestId, Revision, Revision)>,
+    pending_contract_export: Option<ProjectionExport>,
+    open_after_contract_save: bool,
 }
 
 impl LiquidusViewerApp {
@@ -142,6 +119,11 @@ impl LiquidusViewerApp {
             show_plot_after_success: true,
             open_confirmation: false,
             csv_export_filter: ProjectionCsvLayerFilter::default(),
+            contract_state: GuiContractState::default(),
+            event_trace: EventTrace::default(),
+            contract_projection_request: None,
+            pending_contract_export: None,
+            open_after_contract_save: false,
         };
         // Initial command-line file startup shares the exact parser, structural
         // validation, editor construction, and Grid inspection initialization
@@ -151,8 +133,14 @@ impl LiquidusViewerApp {
                 let editor = DatasetEditorState::new(dataset.clone());
                 app.grid_inspection_ui.initialise(&editor);
                 app.state.dataset = Some(dataset.clone());
+                app.contract_state.document = contract::DocumentFreshness::LoadedClean;
+                app.contract_state.revisions.dataset = Revision(1);
                 app.editor = Some(editor);
-                app.start_dataset_calculation(dataset);
+                app.dispatch_contract(
+                    &egui::Context::default(),
+                    UiElementId::Recalculate,
+                    UiAction::RecalculateRequested,
+                );
             }
             Err(error) => {
                 app.state.status = ViewerStatus::Failed(error.clone());
@@ -187,8 +175,242 @@ impl LiquidusViewerApp {
             show_plot_after_success: false,
             open_confirmation: false,
             csv_export_filter: ProjectionCsvLayerFilter::default(),
+            contract_state: GuiContractState::default(),
+            event_trace: EventTrace::default(),
+            contract_projection_request: None,
+            pending_contract_export: None,
+            open_after_contract_save: false,
         }
     }
+    /// Route every migrated interaction through the deterministic reducer before
+    /// executing the requested native effect.
+    fn dispatch_contract(&mut self, ctx: &egui::Context, element: UiElementId, action: UiAction) {
+        if matches!(&action, UiAction::OpenRequested) && self.has_unsaved_changes() {
+            self.contract_state.document = contract::DocumentFreshness::Dirty;
+            self.contract_state.draft_matches_active = false;
+        }
+        if let UiAction::ExportRequested(kind) = action {
+            self.pending_contract_export = Some(match kind {
+                contract::ExportKind::Svg => ProjectionExport::Svg,
+                contract::ExportKind::Png => ProjectionExport::Png,
+                contract::ExportKind::LinesCsv => ProjectionExport::LinesCsv,
+            });
+        }
+        let effects = contract::dispatch(
+            &mut self.contract_state,
+            &mut self.event_trace,
+            Some(element),
+            action,
+        );
+        self.execute_contract_effects(ctx, effects);
+    }
+
+    fn execute_contract_effects(&mut self, ctx: &egui::Context, effects: Vec<UiEffect>) {
+        for effect in effects {
+            match effect {
+                UiEffect::ShowOpenDialog => {
+                    let selected = self.choose_open_path();
+                    self.dispatch_contract(
+                        ctx,
+                        UiElementId::OpenDialog,
+                        UiAction::OpenDialogCompleted(selected),
+                    );
+                }
+                UiEffect::ShowUnsavedChangesDialog => self.open_confirmation = true,
+                UiEffect::ShowSaveDialog => {
+                    if let Some(export) = self.pending_contract_export.take() {
+                        let selected = self.choose_export_path(export);
+                        let kind = match export {
+                            ProjectionExport::Svg => contract::ExportKind::Svg,
+                            ProjectionExport::Png => contract::ExportKind::Png,
+                            ProjectionExport::LinesCsv => contract::ExportKind::LinesCsv,
+                        };
+                        self.dispatch_contract(
+                            ctx,
+                            UiElementId::ExportDialog,
+                            UiAction::ExportDialogCompleted {
+                                kind,
+                                path: selected,
+                            },
+                        );
+                    } else {
+                        let selected = self.choose_save_path();
+                        if selected.is_none() {
+                            self.open_after_contract_save = false;
+                        }
+                        self.dispatch_contract(
+                            ctx,
+                            UiElementId::SaveDialog,
+                            UiAction::SaveDialogCompleted(selected),
+                        );
+                    }
+                }
+                UiEffect::LoadDataset { request, path } => {
+                    let result = match self.open_document_path(ctx, path.clone()) {
+                        Ok(()) => Ok(()),
+                        Err(error) => {
+                            self.state.message = Some(format!(
+                                "File could not be loaded ({}): {error}",
+                                path.display()
+                            ));
+                            Err(contract::UiError(error))
+                        }
+                    };
+                    self.dispatch_contract(
+                        ctx,
+                        UiElementId::OpenDialog,
+                        UiAction::DatasetLoaded { request, result },
+                    );
+                }
+                UiEffect::SaveDataset { request, path } => {
+                    let original_path = self.state.input_path.clone();
+                    let original_unsaved = self.state.unsaved;
+                    self.state.input_path = path;
+                    self.state.unsaved = false;
+                    let succeeded = self.save_document(ctx, false);
+                    if !succeeded {
+                        self.state.input_path = original_path;
+                        self.state.unsaved = original_unsaved;
+                    }
+                    self.dispatch_contract(
+                        ctx,
+                        UiElementId::SaveDialog,
+                        UiAction::DatasetSaved {
+                            request,
+                            result: succeeded
+                                .then_some(())
+                                .ok_or_else(|| contract::UiError("save failed".into())),
+                        },
+                    );
+                    if succeeded && std::mem::take(&mut self.open_after_contract_save) {
+                        self.dispatch_contract(ctx, UiElementId::Open, UiAction::OpenRequested);
+                    }
+                }
+                UiEffect::Export {
+                    request,
+                    kind,
+                    path,
+                } => {
+                    let succeeded = self.export_to_path(kind, &path);
+                    self.dispatch_contract(
+                        ctx,
+                        UiElementId::ExportDialog,
+                        UiAction::ExportCompleted {
+                            request,
+                            result: succeeded
+                                .then_some(())
+                                .ok_or_else(|| contract::UiError("export failed".into())),
+                        },
+                    );
+                }
+                UiEffect::RecalculateProjection {
+                    request,
+                    dataset_revision,
+                    settings_revision,
+                } => {
+                    self.contract_projection_request =
+                        Some((request, dataset_revision, settings_revision));
+                    self.schedule_recalculation();
+                }
+                UiEffect::RecalculateRegisteredQueries { .. } => {
+                    if let Some(editor) = self.editor.as_ref() {
+                        self.grid_inspection_ui.recalculate_interpolation_results(
+                            editor,
+                            &self.state.calculation_options,
+                        );
+                    }
+                }
+                UiEffect::RebuildPlotTexture { .. } => self.state.mark_render_dirty(),
+                UiEffect::RebuildHitGeometry { .. } => self.state.dirty.hit_geometry = true,
+                UiEffect::CopyToClipboard(text) => ctx.copy_text(text),
+                UiEffect::PersistWindowLayout(_) => {
+                    // Persistence is deliberately deferred until a user chooses
+                    // a layout store. The reducer never issues viewport commands.
+                }
+            }
+        }
+    }
+
+    fn export_to_path(&mut self, kind: contract::ExportKind, output: &std::path::Path) -> bool {
+        match kind {
+            contract::ExportKind::Svg | contract::ExportKind::Png => {
+                let format = match kind {
+                    contract::ExportKind::Svg => OutputFormat::Svg,
+                    contract::ExportKind::Png => OutputFormat::Png,
+                    contract::ExportKind::LinesCsv => unreachable!(),
+                };
+                let export = match kind {
+                    contract::ExportKind::Svg => ProjectionExport::Svg,
+                    contract::ExportKind::Png => ProjectionExport::Png,
+                    contract::ExportKind::LinesCsv => unreachable!(),
+                };
+                let result = match (self.state.dataset.as_ref(), self.state.active_projection()) {
+                    (Some(dataset), Some(projection)) => {
+                        let raw = matches!(
+                            self.state.render_options.path_mode,
+                            crate::RenderPathMode::Overlay
+                        )
+                        .then_some(self.state.raw_projection.as_ref())
+                        .flatten();
+                        render_to_path_with_raw(
+                            output,
+                            dataset,
+                            projection,
+                            raw,
+                            &self.state.render_options,
+                            Some(format),
+                        )
+                        .map_err(|error| error.to_string())
+                    }
+                    _ => Err("There is no calculated projection to export.".into()),
+                };
+                match result {
+                    Ok(()) => {
+                        self.state.mark_exported(output);
+                        self.state.status = ViewerStatus::Ready;
+                        self.state.message = Some(format!(
+                            "Exported {}:\n{}",
+                            export.label(),
+                            output.display()
+                        ));
+                        true
+                    }
+                    Err(error) => {
+                        self.set_export_error(export, output, &error);
+                        false
+                    }
+                }
+            }
+            contract::ExportKind::LinesCsv => match self.projection_csv_text() {
+                Ok(text) => match fs::write(output, text) {
+                    Ok(()) => {
+                        self.state.mark_exported(output);
+                        self.state.status = ViewerStatus::Ready;
+                        self.state.message = Some(format!(
+                            "Exported {}:\n{}",
+                            ProjectionExport::LinesCsv.label(),
+                            output.display()
+                        ));
+                        true
+                    }
+                    Err(error) => {
+                        self.set_export_error(
+                            ProjectionExport::LinesCsv,
+                            output,
+                            &error.to_string(),
+                        );
+                        false
+                    }
+                },
+                Err(error) => {
+                    self.state.status = ViewerStatus::Failed(error.clone());
+                    self.state.message = Some(error);
+                    false
+                }
+            },
+        }
+    }
+
     fn start_file_calculation(&mut self) {
         self.sync_editor_on_success = true;
         let request = self.state.begin_request();
@@ -258,8 +480,25 @@ impl LiquidusViewerApp {
         match worker.try_recv() {
             Ok(result) => {
                 self.worker = None;
+                let worker_succeeded = matches!(result, WorkerResult::Ready { .. });
                 let accepted = self.state.apply_worker_result(result);
                 if accepted {
+                    if let Some((request, dataset_revision, settings_revision)) =
+                        self.contract_projection_request.take()
+                    {
+                        self.dispatch_contract(
+                            ctx,
+                            UiElementId::Recalculate,
+                            UiAction::ProjectionCalculated {
+                                request,
+                                dataset_revision,
+                                settings_revision,
+                                result: worker_succeeded
+                                    .then_some(())
+                                    .ok_or_else(|| contract::UiError("calculation failed".into())),
+                            },
+                        );
+                    }
                     self.texture = None;
                     if let Some(dataset) = self.state.dataset.as_ref() {
                         let title = self
@@ -428,59 +667,6 @@ impl LiquidusViewerApp {
         }
     }
 
-    fn export_current(&mut self, format: OutputFormat) {
-        let export = match format {
-            OutputFormat::Svg => ProjectionExport::Svg,
-            OutputFormat::Png => ProjectionExport::Png,
-        };
-        if self.state.dataset.is_none() || self.state.active_projection().is_none() {
-            self.state.status = ViewerStatus::Failed("nothing has been calculated yet".into());
-            self.state.message = Some("There is no calculated projection to export.".into());
-            return;
-        }
-        let Some(output) = self.choose_export_path(export) else {
-            return;
-        };
-        let result = {
-            let dataset = self
-                .state
-                .dataset
-                .as_ref()
-                .expect("projection export checked that a dataset is present");
-            let projection = self
-                .state
-                .active_projection()
-                .expect("projection export checked that a projection is present");
-            let raw_projection = matches!(
-                self.state.render_options.path_mode,
-                crate::RenderPathMode::Overlay
-            )
-            .then_some(self.state.raw_projection.as_ref())
-            .flatten();
-            render_to_path_with_raw(
-                &output,
-                dataset,
-                projection,
-                raw_projection,
-                &self.state.render_options,
-                Some(format),
-            )
-            .map_err(|error| error.to_string())
-        };
-        match result {
-            Ok(()) => {
-                self.state.mark_exported(&output);
-                self.state.status = ViewerStatus::Ready;
-                self.state.message = Some(format!(
-                    "Exported {}:\n{}",
-                    export.label(),
-                    output.display()
-                ));
-            }
-            Err(error) => self.set_export_error(export, &output, &error),
-        }
-    }
-
     fn set_export_error(
         &mut self,
         export: ProjectionExport,
@@ -518,34 +704,6 @@ impl LiquidusViewerApp {
         )
         .map_err(|error| error.to_string())?;
         serialize_projection_csv(&records).map_err(|error| error.to_string())
-    }
-
-    fn export_lines_csv(&mut self) {
-        let text = match self.projection_csv_text() {
-            Ok(text) => text,
-            Err(error) => {
-                self.state.status = ViewerStatus::Failed(error.clone());
-                self.state.message = Some(error);
-                return;
-            }
-        };
-        let Some(output) = self.choose_export_path(ProjectionExport::LinesCsv) else {
-            return;
-        };
-        match fs::write(&output, text) {
-            Ok(()) => {
-                self.state.mark_exported(&output);
-                self.state.status = ViewerStatus::Ready;
-                self.state.message = Some(format!(
-                    "Exported {}:\n{}",
-                    ProjectionExport::LinesCsv.label(),
-                    output.display()
-                ));
-            }
-            Err(error) => {
-                self.set_export_error(ProjectionExport::LinesCsv, &output, &error.to_string())
-            }
-        }
     }
 
     fn copy_lines_csv(&mut self, ctx: &egui::Context) {
@@ -890,7 +1048,6 @@ impl LiquidusViewerApp {
         self.open_confirmation = false;
         self.tab = ViewerTab::Data;
         self.show_plot_after_success = true;
-        self.start_dataset_calculation(dataset);
         self.state.message = Some("Dataset loaded; calculating the new document.".into());
         let title = path
             .file_name()
@@ -899,18 +1056,6 @@ impl LiquidusViewerApp {
             .unwrap_or_else(|| "Ternary contours liquidus viewer".into());
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         Ok(())
-    }
-
-    fn begin_open_dialog(&mut self, ctx: &egui::Context) {
-        let Some(path) = self.choose_open_path() else {
-            return;
-        };
-        if let Err(error) = self.open_document_path(ctx, path.clone()) {
-            self.state.message = Some(format!(
-                "File could not be loaded ({}): {error}",
-                path.display()
-            ));
-        }
     }
 
     fn save_document(&mut self, ctx: &egui::Context, force_dialog: bool) -> bool {
@@ -992,16 +1137,25 @@ impl LiquidusViewerApp {
                 ),
             )
         };
-        if recalculate_queries && let Some(editor) = self.editor.as_ref() {
-            self.grid_inspection_ui
-                .recalculate_interpolation_results(editor, &self.state.calculation_options);
+        if recalculate_queries {
+            self.dispatch_contract(ctx, UiElementId::DataPasteApply, UiAction::DatasetEdited);
+            if let Some(editor) = self.editor.as_ref() {
+                self.grid_inspection_ui
+                    .recalculate_interpolation_results(editor, &self.state.calculation_options);
+            }
         }
         if dataset.is_some() {
             self.state.invalidate_projection();
-            self.schedule_recalculation();
+            self.dispatch_contract(
+                ctx,
+                UiElementId::Recalculate,
+                UiAction::RecalculateRequested,
+            );
         }
     }
     fn show_grid_inspection(&mut self, ctx: &egui::Context) {
+        let source_before = self.state.calculation_options.source_interpolation;
+        let fallback_before = self.state.calculation_options.partial_domain_policy;
         let action = {
             let (editor, grid_ui, options) = (
                 &mut self.editor,
@@ -1012,6 +1166,8 @@ impl LiquidusViewerApp {
                 let mut action = GridInspectionAction::None;
                 egui::SidePanel::left("grid_inspection_controls")
                     .resizable(true)
+                    .min_width(250.0)
+                    .max_width(480.0)
                     .default_width(310.0)
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1031,6 +1187,7 @@ impl LiquidusViewerApp {
                 | GridInspectionAction::Recalculate
         ) {
             self.state.mark_document_dirty();
+            self.dispatch_contract(ctx, UiElementId::GridPointApply, UiAction::DatasetEdited);
         }
         let recalculate = matches!(
             action,
@@ -1038,6 +1195,8 @@ impl LiquidusViewerApp {
         );
         egui::SidePanel::right("grid_inspection_results")
             .resizable(true)
+            .min_width(220.0)
+            .max_width(620.0)
             .default_width(370.0)
             .show(ctx, |ui| {
                 grid_inspection::show_results(ctx, ui, &mut self.grid_inspection_ui);
@@ -1056,9 +1215,21 @@ impl LiquidusViewerApp {
                 });
             }
         });
-        if recalculate {
+        if source_before != self.state.calculation_options.source_interpolation
+            || fallback_before != self.state.calculation_options.partial_domain_policy
+        {
+            self.dispatch_contract(
+                ctx,
+                UiElementId::GridInterpolation,
+                UiAction::CalculationSettingsCommitted,
+            );
+        } else if recalculate {
             self.state.invalidate_projection();
-            self.schedule_recalculation();
+            self.dispatch_contract(
+                ctx,
+                UiElementId::Recalculate,
+                UiAction::RecalculateRequested,
+            );
         }
     }
     fn show_diagnostics_tab(&mut self, ctx: &egui::Context, ui: &mut egui::Ui) {
@@ -1178,6 +1349,42 @@ impl LiquidusViewerApp {
                 projection.input_summary.temperature_range[1],
             ));
         }
+        ui.separator();
+        ui.collapsing("Public state inspector", |ui| {
+            ui.monospace(self.contract_state.state_report());
+            if contract::button(ui, UiElementId::DiagnosticsCopyState, "Copy state report")
+                .clicked()
+            {
+                ctx.copy_text(self.contract_state.state_report());
+            }
+        });
+        ui.collapsing("GUI event trace", |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(180.0)
+                .show(ui, |ui| {
+                    for entry in self.event_trace.entries().iter().rev() {
+                        ui.small(format!(
+                            "{:?} {:?}; effects: {:?}; dataset {} -> {}; settings {} -> {}",
+                            entry.element,
+                            entry.action,
+                            entry.effects,
+                            entry.dataset_before.0,
+                            entry.dataset_after.0,
+                            entry.settings_before.0,
+                            entry.settings_after.0,
+                        ));
+                    }
+                });
+            ui.horizontal(|ui| {
+                if contract::button(ui, UiElementId::DiagnosticsCopyTrace, "Copy trace").clicked() {
+                    ctx.copy_text(self.event_trace.as_text());
+                }
+                if contract::button(ui, UiElementId::DiagnosticsEventTrace, "Clear trace").clicked()
+                {
+                    self.event_trace.clear();
+                }
+            });
+        });
     }
     fn show_plot(&mut self, ui: &mut egui::Ui) {
         let Some(texture) = self.texture.as_ref() else {
@@ -1298,18 +1505,46 @@ impl eframe::App for LiquidusViewerApp {
         let mut open_requested = false;
         let mut save_requested = false;
         let mut save_as_requested = false;
+        let mut export_svg_requested = false;
+        let mut export_png_requested = false;
+        let mut export_csv_requested = false;
+        let tab_before = self.tab;
         egui::TopBottomPanel::top("viewer_toolbar").show(ctx, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("Liquidus inspection viewer");
                 ui.separator();
-                ui.selectable_value(&mut self.tab, ViewerTab::Data, "Data");
-                ui.selectable_value(&mut self.tab, ViewerTab::Diagnostics, "Diagnostics");
-                ui.selectable_value(&mut self.tab, ViewerTab::GridInspection, "Grid inspection");
-                ui.selectable_value(&mut self.tab, ViewerTab::Plot, "Plot");
+                contract::selectable_value(
+                    ui,
+                    UiElementId::TabData,
+                    &mut self.tab,
+                    ViewerTab::Data,
+                    "Data",
+                );
+                contract::selectable_value(
+                    ui,
+                    UiElementId::TabDiagnostics,
+                    &mut self.tab,
+                    ViewerTab::Diagnostics,
+                    "Diagnostics",
+                );
+                contract::selectable_value(
+                    ui,
+                    UiElementId::TabGridInspection,
+                    &mut self.tab,
+                    ViewerTab::GridInspection,
+                    "Grid inspection",
+                );
+                contract::selectable_value(
+                    ui,
+                    UiElementId::TabPlot,
+                    &mut self.tab,
+                    ViewerTab::Plot,
+                    "Plot",
+                );
                 ui.separator();
-                open_requested = ui.button("Open").clicked();
-                save_requested = ui.button("Save").clicked();
-                save_as_requested = ui.button("Save As").clicked();
+                open_requested = contract::button(ui, UiElementId::Open, "Open").clicked();
+                save_requested = contract::button(ui, UiElementId::Save, "Save").clicked();
+                save_as_requested = contract::button(ui, UiElementId::SaveAs, "Save As").clicked();
                 let document_label = if self.state.unsaved {
                     "Untitled - unsaved".to_owned()
                 } else if self.state.document_dirty
@@ -1331,12 +1566,10 @@ impl eframe::App for LiquidusViewerApp {
                 recalculate = ui
                     .add_enabled(can_calculate, egui::Button::new("Recalculate"))
                     .clicked();
-                if ui.button("Export SVG").clicked() {
-                    self.export_current(OutputFormat::Svg);
-                }
-                if ui.button("Export PNG").clicked() {
-                    self.export_current(OutputFormat::Png);
-                }
+                export_svg_requested =
+                    contract::button(ui, UiElementId::ExportSvg, "Export SVG").clicked();
+                export_png_requested =
+                    contract::button(ui, UiElementId::ExportPng, "Export PNG").clicked();
                 ui.separator();
                 egui::ComboBox::from_id_salt("projection_csv_layer_filter")
                     .selected_text(self.csv_export_filter.label())
@@ -1367,13 +1600,14 @@ impl eframe::App for LiquidusViewerApp {
                             ProjectionCsvLayerFilter::InvariantsOnly.label(),
                         );
                     });
-                if ui.button("Export lines CSV").clicked() {
-                    self.export_lines_csv();
-                }
-                if ui.button("Copy lines CSV").clicked() {
+                export_csv_requested =
+                    contract::button(ui, UiElementId::ExportLinesCsv, "Export lines CSV").clicked();
+                if contract::button(ui, UiElementId::CopyLinesCsv, "Copy lines CSV").clicked() {
                     self.copy_lines_csv(ctx);
                 }
-                if ui.button("Fit").clicked() || ui.button("Reset view").clicked() {
+                if contract::button(ui, UiElementId::Fit, "Fit").clicked()
+                    || contract::button(ui, UiElementId::ResetView, "Reset view").clicked()
+                {
                     fit = true;
                 }
             });
@@ -1384,6 +1618,8 @@ impl eframe::App for LiquidusViewerApp {
             ViewerTab::Plot => {
                 egui::SidePanel::left("viewer_controls")
                     .resizable(true)
+                    .min_width(250.0)
+                    .max_width(480.0)
                     .default_width(270.0)
                     .show(ctx, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -1400,7 +1636,9 @@ impl eframe::App for LiquidusViewerApp {
             }
             ViewerTab::GridInspection => self.show_grid_inspection(ctx),
             ViewerTab::Diagnostics => {
-                egui::CentralPanel::default().show(ctx, |ui| self.show_diagnostics_tab(ctx, ui));
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| self.show_diagnostics_tab(ctx, ui));
+                });
             }
         }
         let shortcuts = ctx.input(|input| {
@@ -1418,15 +1656,38 @@ impl eframe::App for LiquidusViewerApp {
         if shortcuts.3 {
             self.tab = self.tab.next(shortcuts.4);
         }
-        if save_requested || save_as_requested {
-            self.save_document(ctx, save_as_requested);
+        if self.tab != tab_before {
+            self.dispatch_contract(ctx, UiElementId::TabBar, UiAction::TabSelected(self.tab));
+        }
+        if save_requested {
+            self.dispatch_contract(ctx, UiElementId::Save, UiAction::SaveRequested);
+        }
+        if save_as_requested {
+            self.dispatch_contract(ctx, UiElementId::SaveAs, UiAction::SaveAsRequested);
+        }
+        if export_svg_requested {
+            self.dispatch_contract(
+                ctx,
+                UiElementId::ExportSvg,
+                UiAction::ExportRequested(contract::ExportKind::Svg),
+            );
+        }
+        if export_png_requested {
+            self.dispatch_contract(
+                ctx,
+                UiElementId::ExportPng,
+                UiAction::ExportRequested(contract::ExportKind::Png),
+            );
+        }
+        if export_csv_requested {
+            self.dispatch_contract(
+                ctx,
+                UiElementId::ExportLinesCsv,
+                UiAction::ExportRequested(contract::ExportKind::LinesCsv),
+            );
         }
         if open_requested {
-            if self.has_unsaved_changes() {
-                self.open_confirmation = true;
-            } else {
-                self.begin_open_dialog(ctx);
-            }
+            self.dispatch_contract(ctx, UiElementId::Open, UiAction::OpenRequested);
         }
         if self.open_confirmation {
             let mut save_then_open = false;
@@ -1438,21 +1699,35 @@ impl eframe::App for LiquidusViewerApp {
                 .show(ctx, |ui| {
                     ui.label("The current document has unsaved changes.");
                     ui.horizontal(|ui| {
-                        save_then_open = ui.button("Save").clicked();
-                        discard_then_open = ui.button("Discard and open").clicked();
-                        cancel = ui.button("Cancel").clicked();
+                        save_then_open = contract::button(ui, UiElementId::Save, "Save").clicked();
+                        discard_then_open =
+                            contract::button(ui, UiElementId::Open, "Discard and open").clicked();
+                        cancel = contract::button(ui, UiElementId::UnsavedChangesDialog, "Cancel")
+                            .clicked();
                     });
                 });
             if cancel {
                 self.open_confirmation = false;
+                self.dispatch_contract(
+                    ctx,
+                    UiElementId::UnsavedChangesDialog,
+                    UiAction::UnsavedDecisionSelected(contract::UnsavedDecision::Cancel),
+                );
             } else if save_then_open {
-                if self.save_document(ctx, false) {
-                    self.open_confirmation = false;
-                    self.begin_open_dialog(ctx);
-                }
+                self.open_confirmation = false;
+                self.open_after_contract_save = true;
+                self.dispatch_contract(
+                    ctx,
+                    UiElementId::UnsavedChangesDialog,
+                    UiAction::UnsavedDecisionSelected(contract::UnsavedDecision::Save),
+                );
             } else if discard_then_open {
                 self.open_confirmation = false;
-                self.begin_open_dialog(ctx);
+                self.dispatch_contract(
+                    ctx,
+                    UiElementId::UnsavedChangesDialog,
+                    UiAction::UnsavedDecisionSelected(contract::UnsavedDecision::Discard),
+                );
             }
         }
 
@@ -1482,14 +1757,18 @@ impl eframe::App for LiquidusViewerApp {
             self.start_file_calculation();
         }
         if control_change.calculation_changed {
-            if let Some(editor) = self.editor.as_ref() {
-                self.grid_inspection_ui
-                    .recalculate_interpolation_results(editor, &self.state.calculation_options);
-            }
-            self.schedule_recalculation();
+            self.dispatch_contract(
+                ctx,
+                UiElementId::PlotInterpolation,
+                UiAction::CalculationSettingsCommitted,
+            );
         }
         if can_calculate && (recalculate || control_change.recalculate_now) {
-            self.recalculate_now();
+            self.dispatch_contract(
+                ctx,
+                UiElementId::Recalculate,
+                UiAction::RecalculateRequested,
+            );
         }
         self.launch_debounced_recalculation(ctx);
     }

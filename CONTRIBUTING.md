@@ -26,3 +26,22 @@
 ## Validation boundary
 
 Core numerical tests belong in `ternary-contours`. Once the core milestone is merged, run `plotters-ternary` regression tests against the updated dependency before deciding whether a renderer change is needed.
+
+## Adding a GUI element
+
+Viewer controls are contract-driven. A new button, selector, edit box, panel,
+canvas interaction, dialog, table, menu item, shortcut, or status indicator is
+incomplete until it has:
+
+- a stable `UiElementId` and one registry entry;
+- a typed `UiAction`, reducer transition, declared effects, and invalidation;
+- public-state rationale and hazard documentation;
+- an explicit layout and overflow policy;
+- a contract-aware widget wrapper and behavioral tests; and
+- regenerated `docs/gui` inventories.
+
+Run the checked-in documentation guard before submitting a viewer change:
+
+```text
+cargo run -p ternary-contours-cli --features viewer --bin generate-gui-contract-docs -- --check
+```

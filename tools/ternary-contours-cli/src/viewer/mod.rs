@@ -1,6 +1,7 @@
 //! Native interactive viewer for manual liquidus inspection.
 
 mod app;
+pub mod contract;
 mod controls;
 mod data_editor;
 mod grid_inspection;
@@ -15,6 +16,7 @@ use std::{error::Error, path::PathBuf};
 use crate::{ProjectionOptions, RenderOptions, default_regular_dataset};
 
 pub use app::LiquidusViewerApp;
+pub use contract::{EventTrace, GuiContractState, UiAction, UiEffect, UiElementId, ViewerTab};
 pub use hit_test::{SelectedFeature, ViewerTransform};
 pub use save::{
     default_dialog_directory, default_export_directory, default_filename,

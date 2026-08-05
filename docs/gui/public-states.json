@@ -1,0 +1,22 @@
+[
+  {"id":"ActiveTab","owner":"TabBar","default":"Data","rationale":"Separates data editing, diagnostics, grid inspection, and plotting.","hazard":"A stale tab can hide controls needed to recover an error."},
+  {"id":"DocumentFreshness","owner":"GlobalToolbar","default":"Untitled","rationale":"Classified point and declaration edits must be preserved.","hazard":"A false clean state can silently discard edits."},
+  {"id":"DialogState","owner":"GlobalToolbar","default":"Closed","rationale":"Prevents concurrent conflicting native dialogs.","hazard":"Two dialogs can target the wrong path."},
+  {"id":"ProjectionFreshness","owner":"PlotCanvas","default":"None","rationale":"Exports and selection require honest numerical provenance.","hazard":"Old geometry can be shown as current."},
+  {"id":"QueryFreshness","owner":"InterpolationResultsTable","default":"Empty","rationale":"The results pane supports Excel-copyable numerical inspection.","hazard":"Copied values can disagree with the selected field."},
+  {"id":"DatasetRevision","owner":"DataPanel","default":"0","rationale":"Async calculations must identify the dataset they used.","hazard":"A stale worker can replace a newer document."},
+  {"id":"EditorRevision","owner":"DataPanel","default":"0","rationale":"Draft and active data are intentionally separated.","hazard":"Dirty markers can fail to represent pending edits."},
+  {"id":"InterpolationSettingsRevision","owner":"PlotInterpolation","default":"0","rationale":"Plot and inspection share one interpolation configuration.","hazard":"Query rows can use another interpolation method."},
+  {"id":"CalculationSettingsRevision","owner":"PlotSettings","default":"0","rationale":"Contour levels and sampling affect derived topology.","hazard":"A stale calculation can be accepted."},
+  {"id":"ProjectionRevision","owner":"PlotCanvas","default":"0","rationale":"Render and hit geometry depend on it.","hazard":"Selection can address a different projection."},
+  {"id":"RenderSettingsRevision","owner":"PlotSettings","default":"0","rationale":"Legend and labels should not rerun numerical tracing.","hazard":"Texture can ignore visible layer choices."},
+  {"id":"ViewTransformRevision","owner":"PlotCanvas","default":"0","rationale":"Hit geometry is screen/view dependent.","hazard":"Clicks select the wrong feature."},
+  {"id":"TextureRevision","owner":"PlotCanvas","default":"0","rationale":"Texture is derived from projection and render settings.","hazard":"A prior document remains visible."},
+  {"id":"HitGeometryRevision","owner":"PlotCanvas","default":"0","rationale":"Hover and click must use current geometry.","hazard":"Selection describes stale lines or nodes."},
+  {"id":"RegisteredQueryRevision","owner":"InterpolationResultsTable","default":"0","rationale":"Settings changes recalculate existing clicks without duplicates.","hazard":"Rows can silently retain obsolete settings."},
+  {"id":"WindowLayoutRevision","owner":"MainWindow","default":"0","rationale":"Panel changes and explicit restoration are persistent choices.","hazard":"A stale layout can make controls inaccessible."},
+  {"id":"WindowLogicalGeometry","owner":"MainWindow","default":"1280 x 800","rationale":"Logical size remains sensible across monitors.","hazard":"Double scaling grows or shrinks the window."},
+  {"id":"WindowScaleFactor","owner":"MainWindow","default":"1000","rationale":"Physical size is logical size times scale only once.","hazard":"Monitor transitions can repeatedly resize the window."},
+  {"id":"PanelVisibility","owner":"GridResults","default":"visible","rationale":"Side panes may collapse at constrained sizes.","hazard":"Hidden controls can retain focus."},
+  {"id":"PanelWidth","owner":"GridResults","default":"configured","rationale":"Canvas and results share finite window space.","hazard":"A zero-sized visible panel is unreachable."}
+]
