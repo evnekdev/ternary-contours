@@ -16,6 +16,7 @@ struct TcqtGrid { std::uint32_t index; std::uint32_t kind; std::uint32_t subdivi
 struct TcqtField { std::uint32_t index; std::uint32_t phase_id; char property[128]; char column_name[128]; };
 struct TcqtRow { double a; double b; double c; };
 struct TcqtCell { std::uint32_t state; bool has_value; double value; char note[128]; };
+struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; char line_id[128]; };
 
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);
@@ -44,5 +45,9 @@ TcqtStatus tcqt_set_irregular_composition(std::uint32_t grid_index, std::uint32_
 TcqtStatus tcqt_undo();
 TcqtStatus tcqt_redo();
 TcqtCalculationResult tcqt_calculate_current();
+TcqtStatus tcqt_projection_record_count(std::uint32_t* output);
+TcqtStatus tcqt_projection_record_at(std::uint32_t index, TcqtProjectionRecord* output);
+TcqtStatus tcqt_export_plot(const char* path, std::uint32_t format);
+TcqtStatus tcqt_export_lines_csv(const char* path);
 TcqtCalculationResult tcqt_run_feasibility_calculation(std::uint32_t subdivisions, std::uint64_t dataset_revision);
 }

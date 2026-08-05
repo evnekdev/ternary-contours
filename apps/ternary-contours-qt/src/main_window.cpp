@@ -6,6 +6,7 @@
 #include "ui_add_grid_dialog.h"
 #include "ui_main_window.h"
 
+#include <QAbstractItemView>
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
@@ -29,6 +30,7 @@ QString statusText(const TcqtStatus& status) { return text(status.message); }
 QString calculationText(const TcqtCalculationResult& result) { return text(result.message); }
 QStandardItem* node(const QString& label, NodeKind kind, std::uint32_t id = 0) {
     auto* item = new QStandardItem(label);
+    item->setEditable(false);
     item->setData(static_cast<int>(kind), node_kind_role);
     item->setData(id, node_id_role);
     return item;
@@ -41,6 +43,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     tree_model_ = new QStandardItemModel(ui_->treeProject);
     tree_model_->setHorizontalHeaderLabels({tr("Project")});
     ui_->treeProject->setModel(tree_model_);
+    ui_->treeProject->setEditTriggers(QAbstractItemView::NoEditTriggers);
     grid_model_ = new GridTableModel(ui_->tableGridValues);
     ui_->tableGridValues->setModel(grid_model_);
     auto* results_model = new QStandardItemModel(0, 10, ui_->tableInterpolationResults);
@@ -52,6 +55,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionFileOpen, &QAction::triggered, this, &MainWindow::openDocument);
     connect(ui_->actionFileSave, &QAction::triggered, this, &MainWindow::saveDocument);
     connect(ui_->actionFileSaveAs, &QAction::triggered, this, &MainWindow::saveDocumentAs);
+    connect(ui_->actionExportPng, &QAction::triggered, this, &MainWindow::exportPng);
+    connect(ui_->actionExportSvg, &QAction::triggered, this, &MainWindow::exportSvg);
+    connect(ui_->actionExportLinesCsv, &QAction::triggered, this, &MainWindow::exportLinesCsv);
     connect(ui_->actionQuit, &QAction::triggered, this, &QWidget::close);
     connect(ui_->actionAboutQt, &QAction::triggered, qApp, &QApplication::aboutQt);
     connect(ui_->actionGridAddRegular, &QAction::triggered, this, [this] { addGrid(true); });
@@ -92,7 +98,12 @@ void MainWindow::rebuildFromRust(std::uint32_t preferred_grid) {
     ui_->editProjectTitle->setText(text(summary.title)); ui_->editCornerA->setText(text(summary.component_a));
     ui_->editCornerB->setText(text(summary.component_b)); ui_->editCornerC->setText(text(summary.component_c));
     selected_grid_ = summary.grid_count == 0 ? 0 : qMin(preferred_grid, summary.grid_count - 1);
-    grid_model_->load(selected_grid_, {text(summary.component_a), text(summary.component_b), text(summary.component_c)});
+    const QStringList component_names{text(summary.component_a), text(summary.component_b), text(summary.component_c)};
+    if (summary.grid_count == 0) {
+        grid_model_->clear();
+    } else {
+        grid_model_->load(selected_grid_, component_names);
+    }
     synchronizing_ = false;
     rebuildTree(); updateWindowTitle(); updateActionState();
     const QStringList components{text(summary.component_a), text(summary.component_b), text(summary.component_c)};
@@ -134,19 +145,23 @@ void MainWindow::rebuildTree() {
     project->appendRow(grids); tree_model_->appendRow(project); ui_->treeProject->expandAll();
 }
 void MainWindow::updateActionState() {
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
     const auto selected = ui_->treeProject->currentIndex();
     const auto kind = selected.data(node_kind_role).toInt();
-    const auto grid_selected = kind == static_cast<int>(NodeKind::Grid);
+    const bool grid_selected = kind == static_cast<int>(NodeKind::Grid);
+    const bool phase_selected = kind == static_cast<int>(NodeKind::Phase);
     ui_->actionGridRemove->setEnabled(grid_selected);
     ui_->actionGridDuplicate->setEnabled(grid_selected);
     ui_->actionGridRename->setEnabled(grid_selected);
-    ui_->buttonRemovePhase->setEnabled(kind == static_cast<int>(NodeKind::Phase));
-    ui_->buttonAddIrregularRow->setEnabled(!grid_model_->isRegular());
-    ui_->actionGridValidate->setEnabled(true); ui_->actionGridRecalculate->setEnabled(true);
-    ui_->actionGridCopy->setEnabled(true); ui_->actionGridPaste->setEnabled(true);
-}
-
-void MainWindow::updateWindowTitle() {
+    ui_->buttonRemovePhase->setEnabled(phase_selected);
+    ui_->buttonAddIrregularRow->setEnabled(grid_selected && !grid_model_->isRegular());
+    ui_->actionGridValidate->setEnabled(grid_selected);
+    ui_->actionGridRecalculate->setEnabled(grid_selected);
+    ui_->actionGridCopy->setEnabled(grid_selected);
+    ui_->actionGridPaste->setEnabled(grid_selected);
+    ui_->buttonRunRustCalculation->setEnabled(summary.phase_count > 0 && summary.grid_count > 0);
+}void MainWindow::updateWindowTitle() {
     TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
     const auto path = text(summary.path); const auto document_name = path.isEmpty() ? tr("Untitled") : QFileInfo(path).fileName();
     setWindowTitle(tr("Ternary Contours — %1%2").arg(document_name, summary.dirty ? QStringLiteral(" *") : QString()));
@@ -186,7 +201,18 @@ void MainWindow::saveDocumentAs() {
     if (!path.isEmpty()) saveToPath(path);
 }
 
-void MainWindow::addGrid(bool regular) {
+void MainWindow::exportPng() {
+    const auto path = QFileDialog::getSaveFileName(this, tr("Export PNG"), {}, tr("PNG image (*.png)"));
+    if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_plot(encoded.constData(), 0); reportBridgeStatus(statusText(result), result.success);
+}
+void MainWindow::exportSvg() {
+    const auto path = QFileDialog::getSaveFileName(this, tr("Export SVG"), {}, tr("SVG image (*.svg)"));
+    if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_plot(encoded.constData(), 1); reportBridgeStatus(statusText(result), result.success);
+}
+void MainWindow::exportLinesCsv() {
+    const auto path = QFileDialog::getSaveFileName(this, tr("Export contour lines CSV"), {}, tr("CSV files (*.csv)"));
+    if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_lines_csv(encoded.constData()); reportBridgeStatus(statusText(result), result.success);
+}void MainWindow::addGrid(bool regular) {
     QDialog dialog(this); Ui::AddGridDialog form; form.setupUi(&dialog);
     form.radioAddRegularGrid->setChecked(regular); form.spinAddGridSubdivisions->setEnabled(regular);
     connect(form.radioAddRegularGrid, &QRadioButton::toggled, form.spinAddGridSubdivisions, &QWidget::setEnabled);

@@ -10,6 +10,7 @@ class GridTableModel final : public QAbstractTableModel {
 public:
     explicit GridTableModel(QObject* parent = nullptr);
     void load(std::uint32_t grid_index, const QStringList& component_names);
+    void clear();
     std::uint32_t gridIndex() const;
     bool isRegular() const;
 
@@ -25,7 +26,6 @@ signals:
 
 private:
     struct Row { double a; double b; double c; QVector<QString> fields; };
-    void clear();
     QString tokenForCell(std::uint32_t state, bool has_value, double value, const char* note) const;
 
     std::uint32_t grid_index_ = 0;

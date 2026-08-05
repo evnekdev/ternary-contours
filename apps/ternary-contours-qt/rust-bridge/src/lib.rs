@@ -14,11 +14,13 @@ use std::{
 
 use ternary_contours::{RegularTernaryGrid, StablePhaseId};
 use ternary_contours_cli::{
-    CompositionColumns, GridType, IrregularTabulatedGrid, PhaseDefinition, ProjectionOptions,
-    PropertyDefinition, RegularTabulatedGrid, RowOrder, SourceRange, TabulatedField, TabulatedGrid,
-    TabulatedTernaryDataset, TabulatedValue, TabulatedValueState, TctSerializeOptions,
-    calculate_projection, default_regular_dataset, parse_path, parse_tabulated_value_token,
-    save_tct_atomic, serialize_tct,
+    CompositionColumns, GridType, IrregularTabulatedGrid, LiquidusProjection, OutputFormat,
+    PhaseDefinition, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
+    PropertyDefinition, RegularTabulatedGrid, RenderOptions, RowOrder, SourceRange, TabulatedField,
+    TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
+    TctSerializeOptions, calculate_projection, empty_project_dataset, parse_path,
+    parse_tabulated_value_token, projection_csv_records, render_to_path, save_tct_atomic,
+    serialize_projection_csv, serialize_tct,
 };
 use ternary_contours_gui_core::{GuiContractState, Revision, UiAction, UiEffect, update};
 
@@ -95,6 +97,20 @@ pub struct TcqtCell {
     pub note: [u8; NAME],
 }
 
+/// A projected polyline point exported by the Rust calculation pipeline.
+///
+/// `point_index` is the position within `line_id`; it lets the Qt canvas retain
+/// the exact path boundaries rather than inferring them from coordinates.
+#[repr(C)]
+pub struct TcqtProjectionRecord {
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub point_index: u32,
+    pub line_type: u32,
+    pub line_id: [u8; NAME],
+}
+
 #[derive(Clone)]
 struct ProjectDocument {
     dataset: TabulatedTernaryDataset,
@@ -104,17 +120,21 @@ struct ProjectDocument {
     undo: Vec<TabulatedTernaryDataset>,
     redo: Vec<TabulatedTernaryDataset>,
     contract: GuiContractState,
+    projection: Option<LiquidusProjection>,
+    projection_records: Vec<ProjectionCsvRecord>,
 }
 impl ProjectDocument {
     fn new() -> Self {
         Self {
-            dataset: default_regular_dataset(),
+            dataset: empty_project_dataset(),
             path: None,
             dirty: false,
             revision: 1,
             undo: Vec::new(),
             redo: Vec::new(),
             contract: GuiContractState::default(),
+            projection: None,
+            projection_records: Vec::new(),
         }
     }
     fn mutate(
@@ -123,7 +143,14 @@ impl ProjectDocument {
     ) -> Result<(), String> {
         let prior = self.dataset.clone();
         edit(&mut self.dataset)?;
-        if let Err(error) = self.dataset.validate_structure() {
+        // A new document is intentionally allowed to be incomplete while the
+        // user adds its first phase and grid. Once both collections exist, use
+        // the normal dataset validator so loaded/populated projects retain all
+        // declaration and field invariants.
+        if !self.dataset.phases.is_empty()
+            && !self.dataset.grids.is_empty()
+            && let Err(error) = self.dataset.validate_structure()
+        {
             self.dataset = prior;
             return Err(error);
         }
@@ -152,6 +179,8 @@ impl ProjectDocument {
         self.undo.clear();
         self.redo.clear();
         self.contract = GuiContractState::default();
+        self.projection = None;
+        self.projection_records.clear();
         self.contract.revisions.dataset = Revision(self.revision);
         Ok(())
     }
@@ -537,9 +566,6 @@ pub extern "C" fn tcqt_remove_phase(id: u32) -> TcqtStatus {
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?
             .mutate(|dataset| {
-                if dataset.phases.len() <= 1 {
-                    return Err("a project must retain at least one phase".into());
-                }
                 if !dataset.phases.iter().any(|phase| phase.id.0 == id) {
                     return Err("phase ID is out of range".into());
                 }
@@ -685,9 +711,6 @@ pub extern "C" fn tcqt_remove_grid(index: u32) -> TcqtStatus {
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?
             .mutate(|dataset| {
-                if dataset.grids.len() <= 1 {
-                    return Err("a project must retain at least one grid".into());
-                }
                 if index as usize >= dataset.grids.len() {
                     return Err("grid index is out of range".into());
                 }
@@ -780,7 +803,7 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
 }
 #[unsafe(no_mangle)]
 pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
-    let calculated = (|| {
+    let request = (|| {
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
@@ -793,36 +816,162 @@ pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
                 _ => None,
             })
             .unwrap_or_default();
-        let projection = calculate_projection(&state.dataset, &ProjectionOptions::default())
-            .map_err(|error| error.to_string())?;
-        Ok::<_, String>((
-            request_id,
-            state
-                .dataset
-                .grids
-                .iter()
-                .map(|grid| grid.compositions().len())
-                .sum::<usize>() as u32,
-            format!(
-                "Calculated {} phases, {} contour paths",
-                projection.input_summary.phase_count, projection.diagnostics.contour_path_count
-            ),
-        ))
+        Ok::<_, String>((state.dataset.clone(), state.revision, request_id))
     })();
-    match calculated {
-        Ok((request_id, vertex_count, text)) => TcqtCalculationResult {
+    let (dataset, revision, request_id) = match request {
+        Ok(request) => request,
+        Err(error) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id: 0,
+                vertex_count: 0,
+                message: bytes(&error),
+            };
+        }
+    };
+    let projection = match calculate_projection(&dataset, &ProjectionOptions::default()) {
+        Ok(projection) => projection,
+        Err(error) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id,
+                vertex_count: 0,
+                message: bytes(&format!("Calculation failed: {error}")),
+            };
+        }
+    };
+    let projection_records = projection_csv_records(
+        &dataset,
+        Some(&projection),
+        None,
+        &RenderOptions::default(),
+        ProjectionCsvOptions::default(),
+    )
+    .unwrap_or_default();
+    let summary = format!(
+        "Calculated {} phases, {} contour paths",
+        projection.input_summary.phase_count, projection.diagnostics.contour_path_count
+    );
+    let vertex_count = dataset
+        .grids
+        .iter()
+        .map(|grid| grid.compositions().len())
+        .sum::<usize>() as u32;
+    let saved = (|| {
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        if state.revision != revision {
+            return Err("project changed while the calculation was running".to_owned());
+        }
+        state.projection = Some(projection);
+        state.projection_records = projection_records;
+        Ok::<_, String>(())
+    })();
+    match saved {
+        Ok(()) => TcqtCalculationResult {
             success: true,
             request_id,
             vertex_count,
-            message: bytes(&text),
+            message: bytes(&summary),
         },
         Err(error) => TcqtCalculationResult {
             success: false,
-            request_id: 0,
+            request_id,
             vertex_count: 0,
-            message: bytes(&format!("Calculation failed: {error}")),
+            message: bytes(&error),
         },
     }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_projection_record_count(output_value: *mut u32) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "projection record count") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        *output_value = state.projection_records.len() as u32;
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_projection_record_at(
+    index: u32,
+    output_value: *mut TcqtProjectionRecord,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "projection record") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let record = state
+            .projection_records
+            .get(index as usize)
+            .ok_or("projection record index is out of range")?;
+        *output_value = TcqtProjectionRecord {
+            a: record.composition[0],
+            b: record.composition[1],
+            c: record.composition[2],
+            point_index: record.point_index as u32,
+            line_type: match record.line_type {
+                ternary_contours_cli::ProjectionLineType::StableIsotherm => 0,
+                ternary_contours_cli::ProjectionLineType::StableUnivariant => 1,
+                ternary_contours_cli::ProjectionLineType::BinaryInvariant => 2,
+                ternary_contours_cli::ProjectionLineType::InteriorInvariant => 3,
+                ternary_contours_cli::ProjectionLineType::StableBoundaryContact => 4,
+            },
+            line_id: bytes(&record.line_id),
+        };
+        Ok(())
+    })())
+}
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_export_plot(path: *const c_char, format: u32) -> TcqtStatus {
+    status((|| {
+        let path = PathBuf::from(unsafe { input(path, "export path") }?);
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let projection = state
+            .projection
+            .as_ref()
+            .ok_or("calculate a projection before exporting it")?;
+        let format = match format {
+            0 => OutputFormat::Png,
+            1 => OutputFormat::Svg,
+            _ => return Err("unsupported plot export format".into()),
+        };
+        render_to_path(
+            &path,
+            &state.dataset,
+            projection,
+            &RenderOptions::default(),
+            Some(format),
+        )
+        .map_err(|error| error.to_string())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_export_lines_csv(path: *const c_char) -> TcqtStatus {
+    status((|| {
+        let path = PathBuf::from(unsafe { input(path, "export path") }?);
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let records = projection_csv_records(
+            &state.dataset,
+            state.projection.as_ref(),
+            None,
+            &RenderOptions::default(),
+            ProjectionCsvOptions::default(),
+        )
+        .map_err(|error| error.to_string())?;
+        let contents = serialize_projection_csv(&records).map_err(|error| error.to_string())?;
+        std::fs::write(path, contents).map_err(|error| error.to_string())
+    })())
 }
 /// Original feasibility entrypoint retained for existing callers. The application
 /// now uses `tcqt_calculate_current` against the active dataset.
@@ -969,9 +1118,28 @@ pub extern "C" fn tcqt_duplicate_grid(index: u32) -> TcqtStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_document_has_empty_phase_and_grid_collections() {
+        let state = ProjectDocument::new();
+        assert_eq!(
+            state.dataset.components.map(|component| component.name),
+            ["A", "B", "C"]
+        );
+        assert!(state.dataset.phases.is_empty());
+        assert!(state.dataset.grids.is_empty());
+        assert_eq!(state.dataset.properties.len(), 1);
+        assert_eq!(state.dataset.properties[0].name, "T");
+        assert!(state.dataset.properties[0].required);
+        assert_eq!(state.dataset.properties[0].unit, "C");
+    }
+
     #[test]
     fn starter_cells_are_typed_missing() {
-        let state = ProjectDocument::new();
+        let state = ProjectDocument {
+            dataset: ternary_contours_cli::default_regular_dataset(),
+            ..ProjectDocument::new()
+        };
         assert_eq!(state.dataset.grids[0].compositions().len(), 66);
         assert!(
             state.dataset.grids[0]
@@ -981,9 +1149,13 @@ mod tests {
                 .all(|value| value.state == TabulatedValueState::Missing && value.value.is_none())
         );
     }
+
     #[test]
     fn a_regular_grid_has_canonical_rows_and_fields() {
-        let state = ProjectDocument::new();
+        let state = ProjectDocument {
+            dataset: ternary_contours_cli::default_regular_dataset(),
+            ..ProjectDocument::new()
+        };
         let mut grid = TabulatedGrid::Regular(RegularTabulatedGrid {
             name: "next".into(),
             source: SourceRange {

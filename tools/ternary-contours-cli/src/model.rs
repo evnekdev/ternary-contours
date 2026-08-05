@@ -346,6 +346,43 @@ pub struct TabulatedTernaryDataset {
     pub warnings: Vec<String>,
 }
 
+/// Construct an empty project for a new desktop document.
+///
+/// This is intentionally different from [`default_regular_dataset`], which is
+/// the populated editing fixture used by the headless/viewer workflows. A new
+/// Qt document starts with declarations only: users add phases and grids.
+pub fn empty_project_dataset() -> TabulatedTernaryDataset {
+    TabulatedTernaryDataset {
+        source_path: None,
+        version: FormatVersion { major: 1, minor: 0 },
+        title: Some("Untitled ternary system".into()),
+        composition_units: None,
+        missing_tokens: vec!["NA".into()],
+        components: [
+            ComponentDefinition {
+                name: "A".into(),
+                line: 0,
+            },
+            ComponentDefinition {
+                name: "B".into(),
+                line: 0,
+            },
+            ComponentDefinition {
+                name: "C".into(),
+                line: 0,
+            },
+        ],
+        phases: Vec::new(),
+        properties: vec![PropertyDefinition {
+            name: "T".into(),
+            required: true,
+            unit: "C".into(),
+            line: 0,
+        }],
+        grids: Vec::new(),
+        warnings: Vec::new(),
+    }
+}
 /// Construct the editable dataset shown when the viewer starts without a file.
 ///
 /// The required T property is declared for every phase, but its values are
@@ -652,6 +689,26 @@ mod tests {
                 .state,
             TabulatedValueState::Missing
         );
+    }
+
+    #[test]
+    fn empty_project_dataset_has_only_required_declarations() {
+        let dataset = empty_project_dataset();
+        assert_eq!(dataset.title.as_deref(), Some("Untitled ternary system"));
+        assert_eq!(
+            dataset
+                .components
+                .iter()
+                .map(|component| component.name.as_str())
+                .collect::<Vec<_>>(),
+            ["A", "B", "C"]
+        );
+        assert!(dataset.phases.is_empty());
+        assert!(dataset.grids.is_empty());
+        assert_eq!(dataset.properties.len(), 1);
+        assert_eq!(dataset.properties[0].name, "T");
+        assert!(dataset.properties[0].required);
+        assert_eq!(dataset.properties[0].unit, "C");
     }
 
     #[test]

@@ -22,6 +22,9 @@ private slots:
     void openDocument();
     void saveDocument();
     void saveDocumentAs();
+    void exportPng();
+    void exportSvg();
+    void exportLinesCsv();
     void addGrid(bool regular);
     void removeSelectedGrid();
     void duplicateSelectedGrid();
