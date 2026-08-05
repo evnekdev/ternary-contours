@@ -14,13 +14,20 @@ use std::{
     sync::{Mutex, OnceLock},
 };
 
-use ternary_contours::{RegularTernaryGrid, StablePhaseId};
+use ternary_contours::{
+    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, RegularTernaryGrid,
+    StablePhaseId,
+};
 use ternary_contours_cli::{
     CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, LiquidusProjection,
     OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvOptions, ProjectionCsvRecord,
     ProjectionOptions, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RowOrder,
     SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
-    TabulatedValueState, TctSerializeOptions, calculate_projection, empty_project_dataset,
+    TabulatedValueState, TctSerializeOptions, automatic_iso_levels, calculate_projection,
+    empty_project_dataset,
+    interpolation_inspection::{
+        FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
+    },
     parse_path, parse_tabulated_value_token, projection_csv_records, render_to_path,
     save_tct_atomic, serialize_projection_csv, serialize_tct,
     validate_new_regular_grid_subdivisions,
@@ -42,6 +49,74 @@ pub struct TcqtCalculationResult {
     pub request_id: u64,
     pub vertex_count: u32,
     pub message: [u8; 128],
+}
+/// Numerical configuration shared by the Qt Viewer and the Rust projection.
+/// Enum values are deliberately explicit across the C ABI; invalid values are
+/// rejected by the bridge instead of falling back silently.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TcqtViewerCalculationOptions {
+    pub automatic_range: bool,
+    pub minimum: f64,
+    pub maximum: f64,
+    pub level_step: f64,
+    pub sampling_subdivisions: u32,
+    pub regularize: bool,
+    pub regularization_spacing: f64,
+    /// 0 = linear, 1 = cubic alpha.
+    pub source_interpolation: u32,
+    /// 0 = Akima, 1 = Makima, 2 = PCHIP, 3 = Steffen.
+    pub cubic_method: u32,
+    /// 0 = strict, 1 = one-sided, 2 = one-sided then linear,
+    /// 3 = linear near boundaries.
+    pub partial_domain_policy: u32,
+    /// 0 = raw barycentric, 1 = Muggianu, 2 = Kohler.
+    pub continuation: u32,
+}
+
+#[repr(C)]
+pub struct TcqtProjectionSummary {
+    pub available: bool,
+    pub source_minimum: f64,
+    pub source_maximum: f64,
+    pub automatic_minimum: f64,
+    pub automatic_used_invariant: bool,
+    pub level_count: u32,
+    pub invariant_count: u32,
+    pub univariant_count: u32,
+    pub contour_path_count: u32,
+    pub message: [u8; MESSAGE],
+}
+
+/// Result of a single authoritative source-field interpolation query. Source
+/// rows are zero-based at the ABI and are presented as one-based rows by Qt.
+#[repr(C)]
+pub struct TcqtInspectionResult {
+    pub success: bool,
+    /// 0 defined, 1 missing, 2 non-existing, 3 cut-off, 4 triangle
+    /// unavailable, 5 outside domain, 6 evaluation error.
+    pub state: u32,
+    pub has_value: bool,
+    pub value: f64,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub triangle_index: u32,
+    pub has_local_barycentric: bool,
+    pub lambda0: f64,
+    pub lambda1: f64,
+    pub lambda2: f64,
+    pub has_contributions: bool,
+    pub linear_part: f64,
+    pub excess_part: f64,
+    pub has_source_rows: bool,
+    pub source_row0: u32,
+    pub source_row1: u32,
+    pub source_row2: u32,
+    /// 0 cubic, 1 one-sided cubic, 2 linear fallback, 3 undefined.
+    pub local_mode: u32,
+    pub unit: [u8; NAME],
+    pub message: [u8; MESSAGE],
 }
 #[repr(C)]
 pub struct TcqtProjectSummary {
@@ -142,7 +217,6 @@ pub struct TcqtProjectionRecord {
     pub line_id: [u8; NAME],
 }
 
-#[derive(Clone)]
 struct ProjectDocument {
     dataset: TabulatedTernaryDataset,
     saved_dataset: TabulatedTernaryDataset,
@@ -155,6 +229,8 @@ struct ProjectDocument {
     contract: GuiContractState,
     projection: Option<LiquidusProjection>,
     projection_records: Vec<ProjectionCsvRecord>,
+    inspection_cache: FieldInspectionCache,
+    calculation_generation: u64,
 }
 impl ProjectDocument {
     fn new() -> Self {
@@ -170,7 +246,15 @@ impl ProjectDocument {
             contract: GuiContractState::default(),
             projection: None,
             projection_records: Vec::new(),
+            inspection_cache: FieldInspectionCache::default(),
+            calculation_generation: 0,
         }
+    }
+    fn invalidate_calculation(&mut self) {
+        self.projection = None;
+        self.projection_records.clear();
+        self.inspection_cache.invalidate();
+        self.calculation_generation = self.calculation_generation.saturating_add(1);
     }
     fn mark_revision_changed(&mut self) {
         self.revision = self.revision.saturating_add(1);
@@ -196,6 +280,7 @@ impl ProjectDocument {
             self.undo.remove(0);
         }
         self.redo.clear();
+        self.invalidate_calculation();
         self.mark_revision_changed();
         let _ = update(&mut self.contract, UiAction::DatasetEdited);
         Ok(())
@@ -216,8 +301,7 @@ impl ProjectDocument {
         self.undo.clear();
         self.redo.clear();
         self.contract = GuiContractState::default();
-        self.projection = None;
-        self.projection_records.clear();
+        self.invalidate_calculation();
         self.contract.revisions.dataset = Revision(self.revision);
         Ok(())
     }
@@ -242,6 +326,96 @@ fn status(result: Result<(), String>) -> TcqtStatus {
             success: false,
             message: bytes(&error),
         },
+    }
+}
+fn viewer_options(raw: &TcqtViewerCalculationOptions) -> Result<ProjectionOptions, String> {
+    let source_interpolation = match raw.source_interpolation {
+        0 => ternary_contours_cli::SourceInterpolation::Linear,
+        1 => ternary_contours_cli::SourceInterpolation::CubicAlpha {
+            method: match raw.cubic_method {
+                0 => CubicAlphaMethod::Akima,
+                1 => CubicAlphaMethod::Makima,
+                2 => CubicAlphaMethod::Pchip,
+                3 => CubicAlphaMethod::Steffen,
+                _ => return Err("unsupported cubic slope method".into()),
+            },
+            continuation: match raw.continuation {
+                0 => BinaryExtrapolation::RawBarycentric,
+                1 => BinaryExtrapolation::Muggianu,
+                2 => BinaryExtrapolation::Kohler,
+                _ => return Err("unsupported ternary continuation".into()),
+            },
+        },
+        _ => return Err("unsupported source interpolation".into()),
+    };
+    let partial_domain_policy = match raw.partial_domain_policy {
+        0 => CubicPartialDomainPolicy::Strict,
+        1 => CubicPartialDomainPolicy::OneSided,
+        2 => CubicPartialDomainPolicy::OneSidedThenLinear,
+        3 => CubicPartialDomainPolicy::LinearNearDomain,
+        _ => return Err("unsupported partial-domain policy".into()),
+    };
+    if !raw.level_step.is_finite() || raw.level_step <= 0.0 {
+        return Err("isotherm step must be finite and positive".into());
+    }
+    let levels = if raw.automatic_range {
+        Vec::new()
+    } else {
+        automatic_iso_levels(raw.minimum, raw.maximum, raw.level_step)
+            .map_err(|error| format!("invalid manual isotherm range: {error}"))?
+    };
+    if raw.regularization_spacing.is_finite() && raw.regularization_spacing <= 0.0 {
+        return Err("regularization spacing must be positive when supplied".into());
+    }
+    Ok(ProjectionOptions {
+        levels,
+        automatic_level_step: raw.automatic_range.then_some(raw.level_step),
+        sampling_subdivisions: (raw.sampling_subdivisions != 0)
+            .then_some(raw.sampling_subdivisions as usize),
+        regularize: raw.regularize,
+        regularization_spacing: (raw.regularization_spacing > 0.0)
+            .then_some(raw.regularization_spacing),
+        source_interpolation,
+        partial_domain_policy,
+    })
+}
+
+fn default_viewer_options() -> TcqtViewerCalculationOptions {
+    TcqtViewerCalculationOptions {
+        automatic_range: true,
+        minimum: 0.0,
+        maximum: 0.0,
+        level_step: 100.0,
+        sampling_subdivisions: 0,
+        regularize: true,
+        regularization_spacing: 0.0,
+        source_interpolation: 0,
+        cubic_method: 3,
+        partial_domain_policy: 2,
+        continuation: 1,
+    }
+}
+
+fn inspection_state(state: &InterpolatedResultState) -> u32 {
+    match state {
+        InterpolatedResultState::Defined => 0,
+        InterpolatedResultState::UndefinedMissing => 1,
+        InterpolatedResultState::UndefinedNonExisting => 2,
+        InterpolatedResultState::UndefinedCutOff => 3,
+        InterpolatedResultState::TriangleUnavailable => 4,
+        InterpolatedResultState::OutsideDomain => 5,
+        InterpolatedResultState::Error(_) => 6,
+    }
+}
+
+fn local_mode(mode: Option<ternary_contours::LocalInterpolationMode>) -> u32 {
+    use ternary_contours::LocalInterpolationMode;
+    match mode {
+        Some(LocalInterpolationMode::Linear) => 2,
+        Some(LocalInterpolationMode::Cubic) => 0,
+        Some(LocalInterpolationMode::OneSidedCubic) => 1,
+        Some(LocalInterpolationMode::LinearFallback) => 2,
+        Some(LocalInterpolationMode::Undefined) | None => 3,
     }
 }
 fn save_result(outcome: u32, message: impl AsRef<str>, path: impl AsRef<str>) -> TcqtSaveResult {
@@ -972,8 +1146,7 @@ pub unsafe extern "C" fn tcqt_paste_grid_tsv(
         state.undo.remove(0);
     }
     state.redo.clear();
-    state.projection = None;
-    state.projection_records.clear();
+    state.invalidate_calculation();
     state.mark_revision_changed();
     let _ = update(&mut state.contract, UiAction::DatasetEdited);
     paste_success(rows, columns, appended, header_skipped, &grid_name)
@@ -1268,6 +1441,7 @@ pub extern "C" fn tcqt_undo() -> TcqtStatus {
         let prior = state.undo.pop().ok_or("nothing to undo")?;
         let current = std::mem::replace(&mut state.dataset, prior);
         state.redo.push(current);
+        state.invalidate_calculation();
         state.mark_revision_changed();
         Ok(())
     })())
@@ -1281,6 +1455,7 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
         let next = state.redo.pop().ok_or("nothing to redo")?;
         let current = std::mem::replace(&mut state.dataset, next);
         state.undo.push(current);
+        state.invalidate_calculation();
         state.mark_revision_changed();
         Ok(())
     })())
@@ -1317,7 +1492,9 @@ pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
             };
         }
     };
-    let projection = match calculate_projection(&dataset, &ProjectionOptions::default()) {
+    let options =
+        viewer_options(&default_viewer_options()).expect("default viewer options are valid");
+    let projection = match calculate_projection(&dataset, &options) {
         Ok(projection) => projection,
         Err(error) => {
             return TcqtCalculationResult {
@@ -1372,6 +1549,368 @@ pub extern "C" fn tcqt_calculate_current() -> TcqtCalculationResult {
     }
 }
 
+/// Runs the exact existing CLI projection pipeline with Viewer-owned options.
+/// The calculation is accepted only when both the document revision and caller
+/// request generation still match, so a stale worker cannot replace a newer
+/// canvas.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_calculate_viewer(
+    raw_options: *const TcqtViewerCalculationOptions,
+    expected_revision: u64,
+    request_id: u64,
+) -> TcqtCalculationResult {
+    let raw_options = match unsafe { out(raw_options.cast_mut(), "viewer calculation options") } {
+        Ok(value) => *value,
+        Err(error) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id,
+                vertex_count: 0,
+                message: bytes(&error),
+            };
+        }
+    };
+    let options = match viewer_options(&raw_options) {
+        Ok(options) => options,
+        Err(error) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id,
+                vertex_count: 0,
+                message: bytes(&error),
+            };
+        }
+    };
+    let dataset = match document().lock() {
+        Ok(mut state) => {
+            if state.revision != expected_revision {
+                return TcqtCalculationResult {
+                    success: false,
+                    request_id,
+                    vertex_count: 0,
+                    message: bytes("project changed before calculation started"),
+                };
+            }
+            if let Err(error) = state.dataset.validate_calculation_readiness() {
+                return TcqtCalculationResult {
+                    success: false,
+                    request_id,
+                    vertex_count: 0,
+                    message: bytes(&format!("Calculation unavailable: {error}")),
+                };
+            }
+            state.calculation_generation = request_id;
+            state.dataset.clone()
+        }
+        Err(_) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id,
+                vertex_count: 0,
+                message: bytes("project lock is unavailable"),
+            };
+        }
+    };
+    let projection = match calculate_projection(&dataset, &options) {
+        Ok(projection) => projection,
+        Err(error) => {
+            return TcqtCalculationResult {
+                success: false,
+                request_id,
+                vertex_count: 0,
+                message: bytes(&format!("Calculation failed: {error}")),
+            };
+        }
+    };
+    let records = projection_csv_records(
+        &dataset,
+        Some(&projection),
+        None,
+        &RenderOptions::default(),
+        ProjectionCsvOptions::default(),
+    )
+    .unwrap_or_default();
+    let vertex_count = dataset
+        .grids
+        .iter()
+        .map(|grid| grid.compositions().len())
+        .sum::<usize>() as u32;
+    let summary = format!(
+        "Calculated {} invariants, {} univariant paths, and {} isotherm paths",
+        projection.diagnostics.invariant_count,
+        projection.diagnostics.univariant_count,
+        projection.diagnostics.contour_path_count,
+    );
+    match document().lock() {
+        Ok(mut state)
+            if state.revision == expected_revision
+                && state.calculation_generation == request_id =>
+        {
+            state.projection = Some(projection);
+            state.projection_records = records;
+            TcqtCalculationResult {
+                success: true,
+                request_id,
+                vertex_count,
+                message: bytes(&summary),
+            }
+        }
+        Ok(_) => TcqtCalculationResult {
+            success: false,
+            request_id,
+            vertex_count: 0,
+            message: bytes("calculation result became stale and was discarded"),
+        },
+        Err(_) => TcqtCalculationResult {
+            success: false,
+            request_id,
+            vertex_count: 0,
+            message: bytes("project lock is unavailable"),
+        },
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_projection_summary(
+    output_value: *mut TcqtProjectionSummary,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "projection summary") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let Some(projection) = state.projection.as_ref() else {
+            *output_value = TcqtProjectionSummary {
+                available: false,
+                source_minimum: 0.0,
+                source_maximum: 0.0,
+                automatic_minimum: 0.0,
+                automatic_used_invariant: false,
+                level_count: 0,
+                invariant_count: 0,
+                univariant_count: 0,
+                contour_path_count: 0,
+                message: bytes("No projection has been calculated."),
+            };
+            return Ok(());
+        };
+        let automatic = projection.automatic_iso_range;
+        *output_value = TcqtProjectionSummary {
+            available: true,
+            source_minimum: projection.input_summary.temperature_range[0],
+            source_maximum: projection.input_summary.temperature_range[1],
+            automatic_minimum: automatic
+                .map_or(projection.input_summary.temperature_range[0], |range| {
+                    range.minimum
+                }),
+            automatic_used_invariant: automatic.is_some_and(|range| range.used_invariant_minimum),
+            level_count: projection.levels.len() as u32,
+            invariant_count: projection.diagnostics.invariant_count as u32,
+            univariant_count: projection.diagnostics.univariant_count as u32,
+            contour_path_count: projection.diagnostics.contour_path_count as u32,
+            message: bytes("Projection is current."),
+        };
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_evaluate_field(
+    grid_index: u32,
+    phase_id: u32,
+    property: *const c_char,
+    raw_options: *const TcqtViewerCalculationOptions,
+    a: f64,
+    b: f64,
+    c: f64,
+    query_index: u64,
+    output_value: *mut TcqtInspectionResult,
+) -> TcqtStatus {
+    status((|| {
+        let property = unsafe { input(property, "field property") }?;
+        let raw_options = *unsafe { out(raw_options.cast_mut(), "viewer calculation options") }?;
+        let options = viewer_options(&raw_options)?;
+        if [a, b, c]
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+            || (a + b + c - 1.0).abs() > 1.0e-8
+        {
+            return Err("query composition must be finite, non-negative, and sum to one".into());
+        }
+        let output_value = unsafe { out(output_value, "inspection result") }?;
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let dataset = state.dataset.clone();
+        let identity = InspectionFieldIdentity {
+            grid_index: grid_index as usize,
+            phase_id: StablePhaseId(phase_id),
+            property,
+        };
+        let result = state.inspection_cache.evaluate(
+            &dataset,
+            &identity,
+            &options,
+            [a, b, c],
+            query_index as usize,
+            query_index,
+        );
+        let lambdas = result.local_barycentric.unwrap_or([0.0; 3]);
+        let rows = result.triangle_vertex_indices.unwrap_or([0; 3]);
+        *output_value = TcqtInspectionResult {
+            success: !matches!(result.state, InterpolatedResultState::Error(_)),
+            state: inspection_state(&result.state),
+            has_value: result.value.is_some(),
+            value: result.value.unwrap_or(0.0),
+            a,
+            b,
+            c,
+            triangle_index: result.triangle_index.map_or(u32::MAX, |index| index as u32),
+            has_local_barycentric: result.local_barycentric.is_some(),
+            lambda0: lambdas[0],
+            lambda1: lambdas[1],
+            lambda2: lambdas[2],
+            has_contributions: result.linear_part.is_some() && result.excess_part.is_some(),
+            linear_part: result.linear_part.unwrap_or(0.0),
+            excess_part: result.excess_part.unwrap_or(0.0),
+            has_source_rows: result.triangle_vertex_indices.is_some(),
+            source_row0: rows[0] as u32,
+            source_row1: rows[1] as u32,
+            source_row2: rows[2] as u32,
+            local_mode: local_mode(result.local_mode),
+            unit: bytes(&result.unit),
+            message: bytes(match &result.state {
+                InterpolatedResultState::Error(error) => error,
+                state => state.label(),
+            }),
+        };
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_set_field_vertex(
+    grid_index: u32,
+    phase_id: u32,
+    property: *const c_char,
+    row_index: u32,
+    token: *const c_char,
+) -> TcqtStatus {
+    status((|| {
+        let property = unsafe { input(property, "field property") }?;
+        let token = unsafe { input(token, "vertex value") }?;
+        document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?
+            .mutate(|dataset| {
+                let value = parse_tabulated_value_token(&token, &dataset.missing_tokens, false)?;
+                let grid = dataset
+                    .grids
+                    .get_mut(grid_index as usize)
+                    .ok_or("grid index is out of range")?;
+                let field = fields_mut(grid)
+                    .iter_mut()
+                    .find(|field| field.phase_id.0 == phase_id && field.property == property)
+                    .ok_or("selected phase/property field no longer exists")?;
+                *field
+                    .values
+                    .get_mut(row_index as usize)
+                    .ok_or("vertex row is out of range")? = value;
+                Ok(())
+            })
+    })())
+}
+
+fn state_value(code: u32) -> Result<TabulatedValueState, String> {
+    match code {
+        1 => Ok(TabulatedValueState::NonExisting),
+        2 => Ok(TabulatedValueState::CutOff),
+        3 => Ok(TabulatedValueState::Missing),
+        _ => Err("bulk edits may set only Missing, Non-existing, or Cut-off".into()),
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_bulk_set_field_state(
+    grid_index: u32,
+    phase_id: u32,
+    property: *const c_char,
+    rows: *const u32,
+    row_count: u32,
+    state_code: u32,
+) -> TcqtStatus {
+    status((|| {
+        let property = unsafe { input(property, "field property") }?;
+        let state_value = state_value(state_code)?;
+        if rows.is_null() && row_count != 0 {
+            return Err("selected vertex rows are unavailable".into());
+        }
+        // SAFETY: the C++ caller supplies row_count contiguous u32 entries.
+        let rows = unsafe { std::slice::from_raw_parts(rows, row_count as usize) };
+        document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?
+            .mutate(|dataset| {
+                let grid = dataset
+                    .grids
+                    .get_mut(grid_index as usize)
+                    .ok_or("grid index is out of range")?;
+                let field = fields_mut(grid)
+                    .iter_mut()
+                    .find(|field| field.phase_id.0 == phase_id && field.property == property)
+                    .ok_or("selected phase/property field no longer exists")?;
+                if rows.iter().any(|row| *row as usize >= field.values.len()) {
+                    return Err("a selected vertex row is out of range".into());
+                }
+                for row in rows {
+                    field.values[*row as usize] = TabulatedValue {
+                        state: state_value,
+                        value: None,
+                        note: None,
+                    };
+                }
+                Ok(())
+            })
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_clear_field_notes(
+    grid_index: u32,
+    phase_id: u32,
+    property: *const c_char,
+    rows: *const u32,
+    row_count: u32,
+) -> TcqtStatus {
+    status((|| {
+        let property = unsafe { input(property, "field property") }?;
+        if rows.is_null() && row_count != 0 {
+            return Err("selected vertex rows are unavailable".into());
+        }
+        // SAFETY: the C++ caller supplies row_count contiguous u32 entries.
+        let rows = unsafe { std::slice::from_raw_parts(rows, row_count as usize) };
+        document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?
+            .mutate(|dataset| {
+                let grid = dataset
+                    .grids
+                    .get_mut(grid_index as usize)
+                    .ok_or("grid index is out of range")?;
+                let field = fields_mut(grid)
+                    .iter_mut()
+                    .find(|field| field.phase_id.0 == phase_id && field.property == property)
+                    .ok_or("selected phase/property field no longer exists")?;
+                if rows.iter().any(|row| *row as usize >= field.values.len()) {
+                    return Err("a selected vertex row is out of range".into());
+                }
+                for row in rows {
+                    field.values[*row as usize].note = None;
+                }
+                Ok(())
+            })
+    })())
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_projection_record_count(output_value: *mut u32) -> TcqtStatus {
     status((|| {
@@ -1743,6 +2282,43 @@ mod tests {
         );
     }
 
+    #[test]
+    fn viewer_vertex_mutation_is_one_revision_one_undo_and_invalidates_projection() {
+        let mut state = ProjectDocument {
+            dataset: ternary_contours_cli::default_regular_dataset(),
+            ..ProjectDocument::new()
+        };
+        state.projection_records.push(ProjectionCsvRecord {
+            line_id: "previous".into(),
+            point_index: 0,
+            composition: [1.0, 0.0, 0.0],
+            temperature: None,
+            line_type: ternary_contours_cli::ProjectionLineType::StableIsotherm,
+            phase: None,
+            phase_1: None,
+            phase_2: None,
+            level: None,
+            path_source: ternary_contours_cli::ProjectionPathSource::Raw,
+            closed: false,
+        });
+        let revision = state.revision;
+        state
+            .mutate(|dataset| {
+                let field = &mut fields_mut(&mut dataset.grids[0])[0];
+                field.values[0] =
+                    TabulatedValue::calculated(1_250.0).map_err(|error| error.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.revision, revision + 1);
+        assert_eq!(state.undo.len(), 1);
+        assert!(state.dirty);
+        assert!(state.projection_records.is_empty());
+        assert_eq!(
+            state.dataset.grids[0].fields()[0].values[0].value,
+            Some(1_250.0)
+        );
+    }
     #[test]
     fn a_regular_grid_has_canonical_rows_and_fields() {
         let state = ProjectDocument {

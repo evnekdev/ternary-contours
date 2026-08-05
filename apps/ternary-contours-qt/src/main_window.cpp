@@ -13,6 +13,15 @@
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QFormLayout>
+#include <QGuiApplication>
+#include <QLabel>
+#include <QScreen>
+#include <QSignalBlocker>
+#include <QSpinBox>
 #include <QClipboard>
 #include <QMenu>
 #include <QFileDialog>
@@ -92,6 +101,7 @@ QString normalizeTctPath(QString path) {
     return path;
 }
 TcqtCalculationResult calculateOnWorker() { return tcqt_calculate_current(); }
+QString fieldProperty(const TcqtField& field) { return text(field.property); }
 }
 
 MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_unique<Ui::MainWindow>()) {
@@ -109,6 +119,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     results_model->setHorizontalHeaderLabels({tr("Index"), tr("A"), tr("B"), tr("C"), tr("Value"), tr("State"), tr("Grid"), tr("Phase"), tr("Property"), tr("Method")});
     ui_->tableInterpolationResults->setModel(results_model);
     ui_->buttonRunRustCalculation->setText(tr("Calculate projection"));
+    ui_->actionViewSourceVertices->setChecked(true);
 
     connect(ui_->actionFileNew, &QAction::triggered, this, &MainWindow::newDocument);
     connect(ui_->actionFileOpen, &QAction::triggered, this, &MainWindow::openDocument);
@@ -134,13 +145,36 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->buttonAddProperty, &QPushButton::clicked, this, &MainWindow::addProperty);
     connect(ui_->buttonAddIrregularRow, &QPushButton::clicked, this, &MainWindow::addIrregularRow);
     connect(ui_->buttonRunRustCalculation, &QPushButton::clicked, this, &MainWindow::runRustCalculation);
-    connect(ui_->actionViewPlot, &QAction::toggled, ui_->canvasTernary, &TernaryCanvas::setPlotVisible);
-    connect(ui_->actionViewGrid, &QAction::toggled, ui_->canvasTernary, &TernaryCanvas::setGridVisible);
-    connect(ui_->actionViewFit, &QAction::triggered, ui_->canvasTernary, &TernaryCanvas::fitTriangleToView);
-    connect(ui_->actionViewReset, &QAction::triggered, ui_->canvasTernary, &TernaryCanvas::fitTriangleToView);
+    connect(ui_->actionViewPlot, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetPlotLayer); });
+    connect(ui_->actionViewGrid, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetGridLayer); });
+    connect(ui_->actionViewSourceVertices, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetSourceVertices); });
+    connect(ui_->actionViewQueryPoints, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetQueryPoints); });
+    connect(ui_->actionViewResultsTable, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetResultsVisible); });
+    connect(ui_->actionViewFit, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::Fit); });
+    connect(ui_->actionViewReset, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::Reset); });
+    connect(ui_->actionViewRestoreLayout, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::RestoreLayout); });
+    connect(ui_->actionViewerClearSelectedQuery, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::RemoveSelectedQuery); });
+    connect(ui_->actionViewerClearAllQueries, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::RemoveAllQueries); });
+    connect(ui_->actionViewerResetAutomaticRange, &QAction::triggered, this, [this] { dispatchViewerAction(ViewerAction::ResetAutomaticRange); });
+    for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants, ui_->actionViewAxisLabels, ui_->actionViewCornerNames, ui_->actionViewLegend}) {
+        connect(action, &QAction::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetPlotLayer); });
+    }
+    connect(ui_->comboViewerGrid, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerAction(ViewerAction::SelectGrid); });
+    connect(ui_->comboViewerPhase, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerAction(ViewerAction::SelectPhase); });
+    connect(ui_->comboViewerProperty, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerAction(ViewerAction::SelectProperty); });
+    connect(ui_->comboViewerMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerAction(ViewerAction::SetInteractionMode); });
+    for (auto* toggle : {ui_->checkViewerCalculated, ui_->checkViewerNonExisting, ui_->checkViewerCutOff, ui_->checkViewerMissing}) {
+        connect(toggle, &QCheckBox::toggled, this, [this] { dispatchViewerAction(ViewerAction::SetVertexFilter); });
+    }
+    connect(ui_->spinViewerMarkerSize, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerAction(ViewerAction::SetMarkerSize); });
     connect(ui_->canvasTernary, &TernaryCanvas::compositionSelected, this, &MainWindow::updateComposition);
+    connect(ui_->canvasTernary, &TernaryCanvas::vertexSelected, this, &MainWindow::selectViewerVertex);
+    connect(ui_->canvasTernary, &TernaryCanvas::vertexDoubleClicked, this, &MainWindow::editViewerVertex);
+    connect(ui_->canvasTernary, &TernaryCanvas::vertexContextRequested, this, &MainWindow::showViewerVertexContextMenu);
+    connect(ui_->canvasTernary, &TernaryCanvas::interpolationRequested, this, &MainWindow::addInterpolationQuery);
     connect(ui_->treeProject->selectionModel(), &QItemSelectionModel::currentChanged, this, &MainWindow::selectProjectNode);
     connect(grid_model_, &GridTableModel::bridgeStatus, this, [this](const QString& message, bool success) { reportBridgeStatus(message, success); if (!success) editor_commit_failed_ = true; });
+    connect(grid_model_, &GridTableModel::documentMutated, this, [this] { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); });
     connect(ui_->editProjectTitle, &QLineEdit::editingFinished, this, &MainWindow::commitTitle);
     connect(ui_->editCornerA, &QLineEdit::editingFinished, this, &MainWindow::commitComponentA);
     connect(ui_->editCornerB, &QLineEdit::editingFinished, this, &MainWindow::commitComponentB);
@@ -182,6 +216,12 @@ void MainWindow::rebuildFromRust(std::uint32_t preferred_grid) {
         }
     }
     ui_->canvasTernary->setSourceVertices(vertices);
+    refreshViewerFieldSelectors();
+    refreshViewerVertices();
+    refreshViewerQueries();
+    refreshProjectionCanvas();
+    updateViewerActionState();
+    scheduleViewerCalculation();
 }
 
 void MainWindow::rebuildTree() {
@@ -361,6 +401,7 @@ void MainWindow::updateActionState() {
     ui_->buttonRunRustCalculation->setToolTip(summary.calculation_available
         ? tr("Calculate the current liquidus projection.")
         : tr("Calculation is unavailable: %1\nThe draft can still be saved.").arg(text(summary.blocking_reason)));
+    updateViewerActionState();
 }
 void MainWindow::updateDocumentPresentation() {
     TcqtProjectSummary summary{};
@@ -754,19 +795,269 @@ void MainWindow::showGridContextMenu(const QPoint& position) {
 }
 
 void MainWindow::runRustCalculation() {
-    TcqtProjectSummary summary{}; if (!tcqt_project_summary(&summary).success) return;
-    const auto revision = summary.revision; ui_->buttonRunRustCalculation->setEnabled(false); ui_->statusMain->showMessage(tr("Calculating projection on Rust worker…"));
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success || !summary.calculation_available || viewer_.calculation_running) return;
+    const auto revision = summary.revision;
+    const auto generation = ++viewer_.calculation_generation;
+    const auto options = viewer_.options;
+    viewer_.calculation_running = true;
+    updateViewerActionState();
+    ui_->statusMain->showMessage(tr("Recalculating topology and iso-plots on the Rust worker…"));
     auto* watcher = new QFutureWatcher<TcqtCalculationResult>(this);
-    connect(watcher, &QFutureWatcher<TcqtCalculationResult>::finished, this, [this, watcher, revision] {
+    connect(watcher, &QFutureWatcher<TcqtCalculationResult>::finished, this, [this, watcher, revision, generation] {
         TcqtProjectSummary latest{}; tcqt_project_summary(&latest); const auto result = watcher->result();
-        if (latest.revision != revision) reportBridgeStatus(tr("Ignored stale calculation result; the project changed."), false);
-        else reportBridgeStatus(calculationText(result), result.success);
-        ui_->buttonRunRustCalculation->setEnabled(true); watcher->deleteLater();
+        viewer_.calculation_running = false;
+        if (latest.revision != revision || generation != viewer_.calculation_generation) {
+            reportBridgeStatus(tr("Ignored stale calculation result."), false);
+        } else if (result.success) {
+            viewer_.has_last_valid_projection = true;
+            refreshProjectionCanvas();
+            TcqtProjectionSummary projection{};
+            if (tcqt_projection_summary(&projection).success && projection.available) {
+                const auto source = QLocale::c();
+                ui_->statusMain->showMessage(
+                    tr("%1 Automatic range: %2–%3, %4 levels.")
+                        .arg(calculationText(result), source.toString(projection.automatic_minimum, 'g', 8), source.toString(projection.source_maximum, 'g', 8))
+                        .arg(projection.level_count), 10000);
+            } else reportBridgeStatus(calculationText(result), true);
+            refreshViewerQueries();
+        } else {
+            reportBridgeStatus(tr("%1 Previous valid plot remains visible.").arg(calculationText(result)), false);
+        }
+        updateViewerActionState(); watcher->deleteLater();
     });
-    watcher->setFuture(QtConcurrent::run(calculateOnWorker));
-}
-void MainWindow::updateComposition(double a, double b, double c) { ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4)); }
+    watcher->setFuture(QtConcurrent::run([options, revision, generation] { return tcqt_calculate_viewer(&options, revision, generation); }));
+}void MainWindow::updateComposition(double a, double b, double c) { ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4)); }
 
+void MainWindow::refreshViewerFieldSelectors() {
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+    const QSignalBlocker grid_blocker(ui_->comboViewerGrid);
+    const QSignalBlocker phase_blocker(ui_->comboViewerPhase);
+    const QSignalBlocker property_blocker(ui_->comboViewerProperty);
+    ui_->comboViewerGrid->clear();
+    for (std::uint32_t index = 0; index < summary.grid_count; ++index) {
+        TcqtGrid grid{};
+        if (tcqt_grid_at(index, &grid).success) ui_->comboViewerGrid->addItem(text(grid.name), index);
+    }
+    if (summary.grid_count == 0) {
+        viewer_.grid_index = 0; viewer_.phase_id = 0; viewer_.field_index = 0; viewer_.property.clear();
+        ui_->comboViewerPhase->clear(); ui_->comboViewerProperty->clear();
+        return;
+    }
+    viewer_.grid_index = qMin(viewer_.grid_index, summary.grid_count - 1);
+    ui_->comboViewerGrid->setCurrentIndex(ui_->comboViewerGrid->findData(viewer_.grid_index));
+    TcqtGrid grid{};
+    if (!tcqt_grid_at(viewer_.grid_index, &grid).success) return;
+    QVector<TcqtField> fields;
+    for (std::uint32_t field_index = 0; field_index < grid.field_count; ++field_index) {
+        TcqtField field{};
+        if (tcqt_grid_field_at(viewer_.grid_index, field_index, &field).success) fields.append(field);
+    }
+    ui_->comboViewerPhase->clear();
+    QSet<std::uint32_t> known_phases;
+    for (const auto& field : fields) if (!known_phases.contains(field.phase_id)) {
+        known_phases.insert(field.phase_id);
+        QString name = tr("Phase %1").arg(field.phase_id);
+        for (std::uint32_t phase_index = 0; phase_index < summary.phase_count; ++phase_index) {
+            TcqtPhase phase{}; if (tcqt_phase_at(phase_index, &phase).success && phase.id == field.phase_id) { name = text(phase.name); break; }
+        }
+        ui_->comboViewerPhase->addItem(tr("[%1] %2").arg(field.phase_id).arg(name), field.phase_id);
+    }
+    if (ui_->comboViewerPhase->count() == 0) { viewer_.phase_id = 0; viewer_.property.clear(); ui_->comboViewerProperty->clear(); return; }
+    if (ui_->comboViewerPhase->findData(viewer_.phase_id) < 0) viewer_.phase_id = ui_->comboViewerPhase->itemData(0).toUInt();
+    ui_->comboViewerPhase->setCurrentIndex(ui_->comboViewerPhase->findData(viewer_.phase_id));
+    ui_->comboViewerProperty->clear();
+    for (const auto& field : fields) if (field.phase_id == viewer_.phase_id) ui_->comboViewerProperty->addItem(fieldProperty(field), field.index);
+    int preferred = -1;
+    for (int index = 0; index < ui_->comboViewerProperty->count(); ++index) {
+        if (ui_->comboViewerProperty->itemText(index) == viewer_.property) preferred = index;
+        if (preferred < 0 && ui_->comboViewerProperty->itemText(index) == QStringLiteral("T")) preferred = index;
+    }
+    if (preferred < 0) preferred = 0;
+    ui_->comboViewerProperty->setCurrentIndex(preferred);
+    viewer_.field_index = ui_->comboViewerProperty->currentData().toUInt();
+    viewer_.property = ui_->comboViewerProperty->currentText();
+}
+
+void MainWindow::refreshViewerVertices() {
+    QVector<CanvasVertex> vertices;
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success || viewer_.grid_index >= summary.grid_count || viewer_.property.isEmpty()) {
+        ui_->canvasTernary->setInspectionVertices(vertices); return;
+    }
+    TcqtGrid grid{};
+    if (!tcqt_grid_at(viewer_.grid_index, &grid).success) return;
+    vertices.reserve(static_cast<qsizetype>(grid.row_count));
+    for (std::uint32_t row = 0; row < grid.row_count; ++row) {
+        TcqtRow composition{}; TcqtCell cell{};
+        if (!tcqt_grid_row_at(viewer_.grid_index, row, &composition).success
+            || !tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success) continue;
+        CanvasVertex vertex; vertex.composition = QPointF(composition.a, composition.b); vertex.row = row; vertex.state = cell.state;
+        const auto note = text(cell.note); const auto token = cell.has_value ? QLocale::c().toString(cell.value, 'g', 8) : cell.state == 1 ? QStringLiteral("NE") : cell.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+        vertex.label = note.isEmpty() ? token : token + QStringLiteral(":") + note;
+        vertices.append(vertex);
+    }
+    ui_->canvasTernary->setInspectionVertices(vertices);
+    ui_->canvasTernary->setSourceVerticesVisible(viewer_.show_source_vertices);
+    ui_->canvasTernary->setVertexVisibility(viewer_.show_calculated, viewer_.show_non_existing, viewer_.show_cut_off, viewer_.show_missing);
+    ui_->canvasTernary->setMarkerSize(viewer_.marker_size);
+    ui_->canvasTernary->setSelectedRows(viewer_.selected_rows);
+}
+
+void MainWindow::refreshProjectionCanvas() {
+    std::uint32_t count = 0;
+    if (!tcqt_projection_record_count(&count).success) return;
+    QMap<QString, CanvasPath> paths;
+    for (std::uint32_t index = 0; index < count; ++index) {
+        TcqtProjectionRecord record{};
+        if (!tcqt_projection_record_at(index, &record).success) continue;
+        if ((record.line_type == 0 && !ui_->actionViewStableIsotherms->isChecked())
+            || (record.line_type == 1 && !ui_->actionViewStableUnivariants->isChecked())
+            || (record.line_type == 2 && !ui_->actionViewBinaryInvariants->isChecked())
+            || (record.line_type == 3 && !ui_->actionViewInteriorInvariants->isChecked())) continue;
+        const auto key = QString::number(record.line_type) + QStringLiteral(":") + text(record.line_id);
+        auto& path = paths[key]; path.type = record.line_type; path.compositions.append(QPointF(record.a, record.b));
+    }
+    QVector<CanvasPath> output;
+    for (auto it = paths.cbegin(); it != paths.cend(); ++it) output.append(it.value());
+    ui_->canvasTernary->setProjectionPaths(output);
+}
+
+void MainWindow::refreshViewerQueries() {
+    auto* model = qobject_cast<QStandardItemModel*>(ui_->tableInterpolationResults->model());
+    if (!model) return;
+    model->removeRows(0, model->rowCount());
+    for (auto& query : viewer_.queries) {
+        const auto property = viewer_.property.toUtf8();
+        TcqtInspectionResult result{};
+        const auto status = tcqt_evaluate_field(viewer_.grid_index, viewer_.phase_id, property.constData(), &viewer_.options, query.a, query.b, query.c, query.id, &result);
+        if (status.success) { query.grid_index = viewer_.grid_index; query.phase_id = viewer_.phase_id; query.property = viewer_.property; query.result = result; }
+        QList<QStandardItem*> row;
+        row << new QStandardItem(QString::number(query.id)) << new QStandardItem(QLocale::c().toString(query.a, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.b, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.c, 'g', 10));
+        row << new QStandardItem(result.has_value ? QLocale::c().toString(result.value, 'g', 12) : (result.state == 2 ? QStringLiteral("NE") : result.state == 3 ? QStringLiteral("CO") : QStringLiteral("NA")));
+        row << new QStandardItem(text(result.message)) << new QStandardItem(QString::number(viewer_.grid_index)) << new QStandardItem(QString::number(viewer_.phase_id)) << new QStandardItem(viewer_.property) << new QStandardItem(result.local_mode == 0 ? tr("Cubic") : result.local_mode == 1 ? tr("One-sided cubic") : result.local_mode == 2 ? tr("Linear") : tr("Undefined"));
+        model->appendRow(row);
+    }
+    QVector<CanvasQuery> queries;
+    for (const auto& query : viewer_.queries) queries.append({query.id, QPointF(query.a, query.b), query.result.state, false});
+    ui_->canvasTernary->setQueries(queries);
+}
+
+void MainWindow::dispatchViewerAction(ViewerAction action) {
+    if (synchronizing_) return;
+    switch (action) {
+    case ViewerAction::SelectGrid:
+        viewer_.grid_index = ui_->comboViewerGrid->currentData().toUInt(); viewer_.phase_id = 0; viewer_.property.clear(); viewer_.selected_rows.clear(); refreshViewerFieldSelectors(); refreshViewerVertices(); refreshViewerQueries(); break;
+    case ViewerAction::SelectPhase:
+        viewer_.phase_id = ui_->comboViewerPhase->currentData().toUInt(); viewer_.property.clear(); viewer_.selected_rows.clear(); refreshViewerFieldSelectors(); refreshViewerVertices(); refreshViewerQueries(); break;
+    case ViewerAction::SelectProperty:
+        viewer_.field_index = ui_->comboViewerProperty->currentData().toUInt(); viewer_.property = ui_->comboViewerProperty->currentText(); viewer_.selected_rows.clear(); refreshViewerVertices(); refreshViewerQueries(); break;
+    case ViewerAction::SetInteractionMode:
+        viewer_.interaction_mode = ui_->comboViewerMode->currentIndex(); ui_->canvasTernary->setInteractionMode(viewer_.interaction_mode); break;    case ViewerAction::SetVertexFilter:
+        viewer_.show_calculated = ui_->checkViewerCalculated->isChecked();
+        viewer_.show_non_existing = ui_->checkViewerNonExisting->isChecked();
+        viewer_.show_cut_off = ui_->checkViewerCutOff->isChecked();
+        viewer_.show_missing = ui_->checkViewerMissing->isChecked();
+        refreshViewerVertices();
+        break;
+    case ViewerAction::SetMarkerSize:
+        viewer_.marker_size = ui_->spinViewerMarkerSize->value();
+        ui_->canvasTernary->setMarkerSize(viewer_.marker_size);
+        break;
+    case ViewerAction::SetPlotLayer:
+        viewer_.show_plot_layer = ui_->actionViewPlot->isChecked(); ui_->canvasTernary->setPlotVisible(viewer_.show_plot_layer); ui_->canvasTernary->setComponentNamesVisible(ui_->actionViewCornerNames->isChecked()); ui_->canvasTernary->setAxisLabelsVisible(ui_->actionViewAxisLabels->isChecked()); ui_->canvasTernary->setLegendVisible(ui_->actionViewLegend->isChecked()); refreshProjectionCanvas(); break;
+    case ViewerAction::SetGridLayer:
+        viewer_.show_grid_layer = ui_->actionViewGrid->isChecked(); ui_->canvasTernary->setGridVisible(viewer_.show_grid_layer); break;
+    case ViewerAction::SetSourceVertices:
+        viewer_.show_source_vertices = ui_->actionViewSourceVertices->isChecked(); ui_->canvasTernary->setSourceVerticesVisible(viewer_.show_source_vertices); break;
+    case ViewerAction::SetQueryPoints:
+        viewer_.show_query_points = ui_->actionViewQueryPoints->isChecked(); ui_->canvasTernary->setQueryPointsVisible(viewer_.show_query_points); break;
+    case ViewerAction::SetResultsVisible:
+        viewer_.show_results_table = ui_->actionViewResultsTable->isChecked(); ui_->tableInterpolationResults->setVisible(viewer_.show_results_table); break;
+    case ViewerAction::Fit: ui_->canvasTernary->fitTriangleToView(); break;
+    case ViewerAction::Reset: ui_->canvasTernary->resetView(); break;
+    case ViewerAction::RestoreLayout: restoreWindowLayout(); break;
+    case ViewerAction::RemoveSelectedQuery:
+        if (const auto current = ui_->tableInterpolationResults->currentIndex(); current.isValid()) viewer_.queries.removeAt(current.row()); refreshViewerQueries(); break;
+    case ViewerAction::RemoveAllQueries: viewer_.queries.clear(); refreshViewerQueries(); break;
+    case ViewerAction::ResetAutomaticRange: viewer_.options.automatic_range = true; scheduleViewerCalculation(); break;
+    default: break;
+    }
+    updateViewerActionState();
+}
+
+void MainWindow::updateViewerActionState() {
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+    const bool field_available = !viewer_.property.isEmpty() && viewer_.grid_index < summary.grid_count;
+    ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
+    ui_->comboViewerPhase->setEnabled(field_available);
+    ui_->comboViewerProperty->setEnabled(field_available);
+    ui_->comboViewerMode->setEnabled(field_available);
+    ui_->actionViewSourceVertices->setEnabled(field_available);
+    ui_->actionViewQueryPoints->setEnabled(!viewer_.queries.isEmpty());
+    ui_->actionViewerClearSelectedQuery->setEnabled(ui_->tableInterpolationResults->currentIndex().isValid());
+    ui_->actionViewerClearAllQueries->setEnabled(!viewer_.queries.isEmpty());
+    ui_->actionViewStableIsotherms->setEnabled(summary.calculation_available);
+    ui_->actionViewStableUnivariants->setEnabled(summary.calculation_available);
+    ui_->actionViewBinaryInvariants->setEnabled(summary.calculation_available);
+    ui_->actionViewInteriorInvariants->setEnabled(summary.calculation_available);
+    ui_->buttonRunRustCalculation->setEnabled(summary.calculation_available && !viewer_.calculation_running);
+    ui_->buttonRunRustCalculation->setToolTip(summary.calculation_available ? tr("Calculate automatically with current Viewer numerical settings.") : tr("Calculation requires valid participating phases, grids, and finite Temperature values."));
+}
+
+void MainWindow::scheduleViewerCalculation() {
+    TcqtProjectSummary summary{};
+    if (tcqt_project_summary(&summary).success && summary.calculation_available && !viewer_.calculation_running) runRustCalculation();
+}
+
+void MainWindow::addInterpolationQuery(double a, double b, double c) {
+    if (viewer_.property.isEmpty()) { reportBridgeStatus(tr("Select a grid, phase, and property before adding a query."), false); return; }
+    ViewerQuery query; query.id = viewer_.next_query_id++; query.a = a; query.b = b; query.c = c;
+    viewer_.queries.append(query); refreshViewerQueries(); updateViewerActionState();
+}
+
+void MainWindow::selectViewerVertex(std::uint32_t row, bool additive) {
+    if (!additive) viewer_.selected_rows.clear();
+    if (additive && viewer_.selected_rows.contains(row)) viewer_.selected_rows.remove(row); else viewer_.selected_rows.insert(row);
+    ui_->canvasTernary->setSelectedRows(viewer_.selected_rows);
+    updateViewerActionState();
+}
+
+void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_position) {
+    if (viewer_.property.isEmpty()) return;
+    TcqtCell existing{};
+    if (!tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &existing).success) return;
+    QDialog dialog(this, Qt::Tool); dialog.setWindowTitle(tr("Vertex %1 — %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
+    auto* layout = new QFormLayout(&dialog); auto* state = new QComboBox(&dialog); state->addItem(tr("Calculated"), 0); state->addItem(tr("Missing (NA)"), 3); state->addItem(tr("Non-existing (NE)"), 1); state->addItem(tr("Cut-off (CO)"), 2); state->setCurrentIndex(state->findData(existing.state));
+    auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog); auto* note = new QLineEdit(text(existing.note), &dialog); auto* error = new QLabel(&dialog); error->setStyleSheet(QStringLiteral("color: #b03030"));
+    layout->addRow(tr("State"), state); layout->addRow(tr("Value"), value); layout->addRow(tr("Note"), note); layout->addRow(error);
+    auto commit = [&]() {
+        const auto code = state->currentData().toUInt(); QString token;
+        if (code == 0) { bool ok = false; const auto scalar = QLocale::c().toDouble(value->text(), &ok); if (!ok || !std::isfinite(scalar)) { error->setText(tr("Calculated requires one finite numeric value.")); return; } token = QLocale::c().toString(scalar, 'g', 15); }
+        else token = code == 1 ? QStringLiteral("NE") : code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+        if (!note->text().trimmed().isEmpty()) token += QStringLiteral(":") + note->text().trimmed();
+        const auto property = viewer_.property.toUtf8(); const auto encoded = token.toUtf8(); const auto result = tcqt_set_field_vertex(viewer_.grid_index, viewer_.phase_id, property.constData(), row, encoded.constData());
+        if (!result.success) { error->setText(statusText(result)); return; }
+        dialog.accept(); rebuildFromRust(selected_grid_); scheduleViewerCalculation(); reportBridgeStatus(tr("Updated vertex %1: %2").arg(row + 1).arg(token), true);
+    };
+    connect(value, &QLineEdit::returnPressed, &dialog, commit); connect(note, &QLineEdit::returnPressed, &dialog, commit); connect(state, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [=](int) { value->setEnabled(state->currentData().toUInt() == 0); });
+    value->setEnabled(existing.state == 0); const auto screen = QGuiApplication::screenAt(global_position); const auto bounds = screen ? screen->availableGeometry() : geometry(); dialog.adjustSize(); auto pos = global_position + QPoint(12, 12); pos.setX(qBound(bounds.left(), pos.x(), bounds.right() - dialog.width())); pos.setY(qBound(bounds.top(), pos.y(), bounds.bottom() - dialog.height())); dialog.move(pos); value->setFocus(); dialog.exec();
+}
+
+void MainWindow::showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position) {
+    if (viewer_.property.isEmpty()) return; if (!viewer_.selected_rows.contains(row)) { viewer_.selected_rows = {row}; ui_->canvasTernary->setSelectedRows(viewer_.selected_rows); }
+    QMenu menu(this); auto* missing = menu.addAction(tr("Set selected to Missing (NA)")); auto* non_existing = menu.addAction(tr("Set selected to Non-existing (NE)")); auto* cut_off = menu.addAction(tr("Set selected to Cut-off (CO)")); auto* clear_notes = menu.addAction(tr("Clear notes"));
+    const auto selected = menu.exec(global_position); if (!selected) return; const auto property = viewer_.property.toUtf8(); QVector<std::uint32_t> rows = viewer_.selected_rows.values(); TcqtStatus result{};
+    if (selected == clear_notes) result = tcqt_clear_field_notes(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size());
+    else { const auto state = selected == non_existing ? 1U : selected == cut_off ? 2U : 3U; result = tcqt_bulk_set_field_state(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size(), state); }
+    reportBridgeStatus(statusText(result), result.success); if (result.success) { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); }
+}
+
+bool MainWindow::commitViewerNumber(QLineEdit* editor, double* target, const QString& label) {
+    bool ok = false; const auto value = QLocale::c().toDouble(editor->text(), &ok); if (!ok || !std::isfinite(value)) { editor->setToolTip(tr("%1 must be a finite number.").arg(label)); return false; } *target = value; return true;
+}
 void MainWindow::closeEvent(QCloseEvent* event) { if (!confirmDocumentReplacement(tr("closing"))) { event->ignore(); return; } saveWindowLayout(); event->accept(); }
 void MainWindow::restoreWindowLayout() {
     QSettings settings("evnekdev", "ternary-contours-qt"); const auto geometry = settings.value("window/geometry").toByteArray();

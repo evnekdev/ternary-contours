@@ -178,6 +178,11 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "tableInterpolationResults" => UiElementId::InterpolationResultsTable,
         "statusMain" => UiElementId::Status,
         "buttonRunRustCalculation" => UiElementId::Recalculate,
+        "checkViewerCalculated"
+        | "checkViewerNonExisting"
+        | "checkViewerCutOff"
+        | "checkViewerMissing" => UiElementId::GridStateFilter,
+        "spinViewerMarkerSize" => UiElementId::GridPointEditor,
         "actionFileOpen" => UiElementId::Open,
         "actionFileSave" => UiElementId::Save,
         "actionFileSaveAs" => UiElementId::SaveAs,
@@ -257,6 +262,16 @@ pub enum QtUiAction {
     FitView,
     ResetView,
     RestoreDefaultLayout,
+    ToggleStableIsotherms,
+    ToggleStableUnivariants,
+    ToggleBinaryInvariants,
+    ToggleInteriorInvariants,
+    ToggleAxisLabels,
+    ToggleCornerNames,
+    ToggleLegend,
+    ClearSelectedQuery,
+    ClearAllQueries,
+    ResetAutomaticIsoRange,
     ShowApplicationAbout,
     ShowDocumentation,
     ShowLicences,
@@ -296,6 +311,16 @@ pub const fn qt_ui_action(id: QtUiElementId) -> Option<QtUiAction> {
         QtUiElementId::ActionViewFit => QtUiAction::FitView,
         QtUiElementId::ActionViewReset => QtUiAction::ResetView,
         QtUiElementId::ActionViewRestoreLayout => QtUiAction::RestoreDefaultLayout,
+        QtUiElementId::ActionViewStableIsotherms => QtUiAction::ToggleStableIsotherms,
+        QtUiElementId::ActionViewStableUnivariants => QtUiAction::ToggleStableUnivariants,
+        QtUiElementId::ActionViewBinaryInvariants => QtUiAction::ToggleBinaryInvariants,
+        QtUiElementId::ActionViewInteriorInvariants => QtUiAction::ToggleInteriorInvariants,
+        QtUiElementId::ActionViewAxisLabels => QtUiAction::ToggleAxisLabels,
+        QtUiElementId::ActionViewCornerNames => QtUiAction::ToggleCornerNames,
+        QtUiElementId::ActionViewLegend => QtUiAction::ToggleLegend,
+        QtUiElementId::ActionViewerClearSelectedQuery => QtUiAction::ClearSelectedQuery,
+        QtUiElementId::ActionViewerClearAllQueries => QtUiAction::ClearAllQueries,
+        QtUiElementId::ActionViewerResetAutomaticRange => QtUiAction::ResetAutomaticIsoRange,
         QtUiElementId::ActionAboutApplication => QtUiAction::ShowApplicationAbout,
         QtUiElementId::ActionAboutDocumentation => QtUiAction::ShowDocumentation,
         QtUiElementId::ActionAboutLicenses => QtUiAction::ShowLicences,
@@ -2150,6 +2175,50 @@ mod tests {
             qt_ui_action(QtUiElementId::ActionFileOpen),
             Some(QtUiAction::OpenDocument)
         );
+    }
+    #[test]
+    fn visible_qt_viewer_commands_use_the_shared_dispatch_path() {
+        let source = std::fs::read_to_string(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../apps/ternary-contours-qt/src/main_window.cpp"),
+        )
+        .unwrap();
+        for object_name in [
+            "actionViewPlot",
+            "actionViewGrid",
+            "actionViewSourceVertices",
+            "actionViewQueryPoints",
+            "actionViewResultsTable",
+            "actionViewFit",
+            "actionViewReset",
+            "actionViewRestoreLayout",
+            "actionViewStableIsotherms",
+            "actionViewStableUnivariants",
+            "actionViewBinaryInvariants",
+            "actionViewInteriorInvariants",
+            "actionViewAxisLabels",
+            "actionViewCornerNames",
+            "actionViewLegend",
+            "actionViewerClearSelectedQuery",
+            "actionViewerClearAllQueries",
+            "actionViewerResetAutomaticRange",
+            "comboViewerGrid",
+            "comboViewerPhase",
+            "comboViewerProperty",
+            "comboViewerMode",
+            "checkViewerCalculated",
+            "checkViewerNonExisting",
+            "checkViewerCutOff",
+            "checkViewerMissing",
+            "spinViewerMarkerSize",
+        ] {
+            assert!(
+                source.contains(object_name),
+                "missing Qt receiver for {object_name}"
+            );
+        }
+        assert!(source.contains("dispatchViewerAction"));
+        assert!(source.contains("updateViewerActionState"));
     }
     #[test]
     fn designer_inventory_has_two_primary_tabs_and_required_view_models() {

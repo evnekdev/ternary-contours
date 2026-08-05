@@ -23,6 +23,7 @@ public:
 
 signals:
     void bridgeStatus(const QString& message, bool success);
+    void documentMutated();
 
 private:
     struct FieldCell {

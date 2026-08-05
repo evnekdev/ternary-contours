@@ -5,6 +5,8 @@
 //! module adapts it to `ternary-contours` only at calculation time.
 
 pub mod editor;
+#[path = "viewer/interpolation_inspection.rs"]
+pub mod interpolation_inspection;
 pub mod model;
 pub mod parser;
 pub mod projection;
@@ -20,8 +22,8 @@ pub use editor::*;
 pub use model::*;
 pub use parser::{TctError, parse_path, parse_str};
 pub use projection::{
-    LiquidusProjection, ProjectionOptions, SourceInterpolation, calculate_projection,
-    parse_level_spec,
+    AutomaticIsoRange, LiquidusProjection, ProjectionOptions, SourceInterpolation,
+    automatic_iso_levels, automatic_iso_range, calculate_projection, parse_level_spec,
 };
 pub use projection_csv::{
     ProjectionCsvError, ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,

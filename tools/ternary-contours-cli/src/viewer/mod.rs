@@ -6,7 +6,6 @@ mod controls;
 mod data_editor;
 mod grid_inspection;
 mod hit_test;
-mod interpolation_inspection;
 mod save;
 mod state;
 mod texture;

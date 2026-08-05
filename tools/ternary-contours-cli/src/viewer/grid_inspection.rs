@@ -8,15 +8,12 @@ use ternary_contours::StablePhaseId;
 use crate::{
     DatasetEditorState, NumericFormat, PLOT_BACKGROUND_RGB, ProjectionOptions, TabulatedGrid,
     TabulatedValue, TabulatedValueState, TernaryRenderTransform,
-};
-
-use super::{
-    controls,
-    hit_test::ViewerTransform,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResult, InterpolatedResultState,
     },
 };
+
+use super::{controls, hit_test::ViewerTransform};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GridInspectionAction {

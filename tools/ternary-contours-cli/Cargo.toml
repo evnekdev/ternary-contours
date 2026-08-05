@@ -12,7 +12,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-viewer = ["dep:eframe", "dep:egui", "dep:rfd", "ternary-contours/cubic-alpha"]
+inspection = ["ternary-contours/cubic-alpha"]
+viewer = ["dep:eframe", "dep:egui", "dep:rfd", "inspection"]
 
 [dependencies]
 clap = { version = "4.5.48", features = ["derive"] }

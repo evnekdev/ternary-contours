@@ -53,6 +53,10 @@ impl SourceInterpolation {
 #[derive(Clone, Debug, Default)]
 pub struct ProjectionOptions {
     pub levels: Vec<f64>,
+    /// When present, derive levels from stable topology: the lowest finite
+    /// invariant temperature (or the calculated-source minimum) through the
+    /// calculated-source maximum at this positive finite step.
+    pub automatic_level_step: Option<f64>,
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
     pub regularization_spacing: Option<f64>,
@@ -60,6 +64,14 @@ pub struct ProjectionOptions {
     /// Policy used when cubic-alpha source fields contain classified undefined
     /// samples. The viewer defaults to one-sided cubic followed by linear.
     pub partial_domain_policy: CubicPartialDomainPolicy,
+}
+
+/// Authoritative range used by automatic Viewer isotherms.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutomaticIsoRange {
+    pub minimum: f64,
+    pub maximum: f64,
+    pub used_invariant_minimum: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +98,8 @@ pub struct ProjectionDiagnostics {
 #[derive(Clone, Debug)]
 pub struct LiquidusProjection {
     pub levels: Vec<f64>,
+    /// Present only when levels were generated from automatic Viewer range.
+    pub automatic_iso_range: Option<AutomaticIsoRange>,
     pub stable_contours: StableContourSet,
     pub stable_boundaries: StableBoundaryNetwork,
     pub input_summary: InputSummary,
@@ -417,12 +431,7 @@ pub fn calculate_projection(
         .copied()
         .reduce(f64::max)
         .expect("minimum is present");
-    let levels = if options.levels.is_empty() {
-        default_levels(minimum, maximum)
-    } else {
-        validate_levels(&options.levels)?;
-        options.levels.clone()
-    };
+
     let source_models = dataset
         .phases
         .iter()
@@ -504,6 +513,34 @@ pub fn calculate_projection(
         error,
         details: source_coverage.join("; "),
     })?;
+    // Stable topology is independent of requested isotherm levels. Build it
+    // first so automatic Viewer ranges use authoritative invariant values.
+    let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
+        regularization: options.regularize.then_some(PathRegularizationOptions {
+            spacing: options.regularization_spacing.unwrap_or(0.02),
+            protected_endpoint_distance: 0.0,
+            ..PathRegularizationOptions::default()
+        }),
+        ..StableBoundaryOptions::default()
+    })?;
+    let automatic_range = options
+        .automatic_level_step
+        .map(|step| automatic_iso_range(&stable_boundaries, minimum, maximum, step))
+        .transpose()?;
+    let levels = match automatic_range {
+        Some(range) => automatic_iso_levels(
+            range.minimum,
+            range.maximum,
+            options
+                .automatic_level_step
+                .expect("automatic range carries a step"),
+        )?,
+        None if options.levels.is_empty() => default_levels(minimum, maximum),
+        None => {
+            validate_levels(&options.levels)?;
+            options.levels.clone()
+        }
+    };
     let stable_contours =
         prepared
             .contours(&levels)
@@ -528,14 +565,6 @@ pub fn calculate_projection(
                 .unwrap_or_default(),
         });
     }
-    let stable_boundaries = prepared.stable_boundaries(StableBoundaryOptions {
-        regularization: options.regularize.then_some(PathRegularizationOptions {
-            spacing: options.regularization_spacing.unwrap_or(0.02),
-            protected_endpoint_distance: 0.0,
-            ..PathRegularizationOptions::default()
-        }),
-        ..StableBoundaryOptions::default()
-    })?;
     let diagnostics = ProjectionDiagnostics {
         sampling_subdivisions,
         regularized: options.regularize,
@@ -551,6 +580,7 @@ pub fn calculate_projection(
     };
     Ok(LiquidusProjection {
         levels,
+        automatic_iso_range: automatic_range,
         stable_contours,
         stable_boundaries,
         input_summary: InputSummary {
@@ -575,6 +605,71 @@ fn tabulated_state_counts(values: &[TabulatedValue]) -> [usize; 4] {
     })
 }
 
+/// Derive the Viewer automatic range from stable invariant topology and finite
+/// calculated source extrema. The source minimum is used only when topology
+/// did not produce a finite invariant temperature.
+pub fn automatic_iso_range(
+    boundaries: &StableBoundaryNetwork,
+    source_minimum: f64,
+    source_maximum: f64,
+    step: f64,
+) -> Result<AutomaticIsoRange, ProjectionError> {
+    if !source_minimum.is_finite() || !source_maximum.is_finite() || source_maximum < source_minimum
+    {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm range requires finite calculated source extrema".into(),
+        ));
+    }
+    if !step.is_finite() || step <= 0.0 {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm step must be finite and positive".into(),
+        ));
+    }
+    let invariant_minimum = boundaries
+        .nodes
+        .iter()
+        .map(|node| node.temperature())
+        .filter(|temperature| temperature.is_finite())
+        .reduce(f64::min);
+    Ok(AutomaticIsoRange {
+        minimum: invariant_minimum.unwrap_or(source_minimum),
+        maximum: source_maximum,
+        used_invariant_minimum: invariant_minimum.is_some(),
+    })
+}
+
+/// Generate deterministic automatic levels beginning at the exact calculated
+/// minimum. The final value never exceeds the calculated maximum.
+pub fn automatic_iso_levels(
+    minimum: f64,
+    maximum: f64,
+    step: f64,
+) -> Result<Vec<f64>, ProjectionError> {
+    if !minimum.is_finite() || !maximum.is_finite() || maximum < minimum {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm range must be finite with Tmax >= Tmin".into(),
+        ));
+    }
+    if !step.is_finite() || step <= 0.0 {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm step must be finite and positive".into(),
+        ));
+    }
+    let mut levels = Vec::new();
+    let mut level = minimum;
+    while level <= maximum + step.abs() * 1.0e-12 {
+        levels.push(level.min(maximum));
+        if levels.len() > 10_000 {
+            return Err(ProjectionError::Levels(
+                "automatic isotherm range has too many levels".into(),
+            ));
+        }
+        level += step;
+    }
+    levels.dedup_by(|left, right| (*left - *right).abs() <= step.abs() * 1.0e-12);
+    validate_levels(&levels)?;
+    Ok(levels)
+}
 fn default_levels(minimum: f64, maximum: f64) -> Vec<f64> {
     if (maximum - minimum).abs() <= f64::EPSILON {
         vec![minimum]
@@ -759,6 +854,19 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn automatic_levels_start_at_exact_minimum_and_never_exceed_maximum() {
+        let levels = automatic_iso_levels(742.5, 1_042.5, 100.0).unwrap();
+        assert_eq!(levels, vec![742.5, 842.5, 942.5, 1_042.5]);
+        assert!(levels.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(levels.iter().all(|level| *level <= 1_042.5));
+    }
+
+    #[test]
+    fn automatic_levels_reject_non_positive_or_non_finite_steps() {
+        assert!(automatic_iso_levels(1.0, 2.0, 0.0).is_err());
+        assert!(automatic_iso_levels(1.0, 2.0, f64::NAN).is_err());
+    }
     #[test]
     fn out_of_range_levels_have_an_explicit_empty_contour_error() {
         let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();

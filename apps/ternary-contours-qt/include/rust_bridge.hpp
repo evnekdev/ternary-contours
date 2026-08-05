@@ -5,7 +5,25 @@
 extern "C" {
 struct TcqtStatus { bool success; char message[512]; };
 struct TcqtCalculationResult { bool success; std::uint64_t request_id; std::uint32_t vertex_count; char message[128]; };
-struct TcqtProjectSummary {
+struct TcqtViewerCalculationOptions {
+    bool automatic_range; double minimum; double maximum; double level_step;
+    std::uint32_t sampling_subdivisions; bool regularize; double regularization_spacing;
+    std::uint32_t source_interpolation; std::uint32_t cubic_method;
+    std::uint32_t partial_domain_policy; std::uint32_t continuation;
+};
+struct TcqtProjectionSummary {
+    bool available; double source_minimum; double source_maximum; double automatic_minimum;
+    bool automatic_used_invariant; std::uint32_t level_count; std::uint32_t invariant_count;
+    std::uint32_t univariant_count; std::uint32_t contour_path_count; char message[512];
+};
+struct TcqtInspectionResult {
+    bool success; std::uint32_t state; bool has_value; double value;
+    double a; double b; double c; std::uint32_t triangle_index;
+    bool has_local_barycentric; double lambda0; double lambda1; double lambda2;
+    bool has_contributions; double linear_part; double excess_part;
+    bool has_source_rows; std::uint32_t source_row0; std::uint32_t source_row1; std::uint32_t source_row2;
+    std::uint32_t local_mode; char unit[128]; char message[512];
+};struct TcqtProjectSummary {
     char title[128]; char path[512]; char component_a[128]; char component_b[128]; char component_c[128];
     std::uint32_t phase_count; std::uint32_t property_count; std::uint32_t grid_count;
     bool dirty; std::uint64_t revision; std::uint64_t saved_revision;
@@ -62,6 +80,12 @@ TcqtStatus tcqt_set_irregular_composition(std::uint32_t grid_index, std::uint32_
 TcqtStatus tcqt_undo();
 TcqtStatus tcqt_redo();
 TcqtCalculationResult tcqt_calculate_current();
+TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t request_id);
+TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
+TcqtStatus tcqt_evaluate_field(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const TcqtViewerCalculationOptions* options, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);
+TcqtStatus tcqt_set_field_vertex(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, std::uint32_t row_index, const char* token);
+TcqtStatus tcqt_bulk_set_field_state(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const std::uint32_t* rows, std::uint32_t row_count, std::uint32_t state_code);
+TcqtStatus tcqt_clear_field_notes(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const std::uint32_t* rows, std::uint32_t row_count);
 TcqtStatus tcqt_projection_record_count(std::uint32_t* output);
 TcqtStatus tcqt_projection_record_at(std::uint32_t index, TcqtProjectionRecord* output);
 TcqtStatus tcqt_export_plot(const char* path, std::uint32_t format);
