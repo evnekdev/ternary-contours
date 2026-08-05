@@ -76,7 +76,7 @@ recorded afterward so an accepted trace always has a lifecycle end event.
 | `source_preparation` | `phase_field_located`, `source_coverage_computed`, `partial_source_prepared` | phase, grid/property identity, calculated/NE/CO/NA counts |
 | `interpolation` | `interpolation_triangle_located`, `one_sided_cubic_selected`, `linear_fallback_selected` | semantic composition, triangle/source rows, local barycentric coordinates |
 | `stable_selection` | `phase_value_evaluated`, `stable_winner_selected`, `stable_tie_detected` | candidates, defined values, undefined reasons |
-| `binary_boundary` | `binary_transition_bracketed`, `binary_root_iteration`, `binary_invariant_emitted` | AB/BC/CA parameter bracket, pair residual, stable phase set |
+| `binary_boundary` | `binary_transition_bracketed`, `binary_transition_unavailable`, `binary_root_iteration`, `binary_invariant_emitted` | AB/BC/CA parameter bracket, pair residual, stable phase set, typed unavailable-source reason |
 | `interior_invariant` | `interior_solve_started`, `interior_invariant_accepted` | sampling triangle, phase set, composition, residual |
 | `univariant` | `pending_end_created`, `univariant_triangle_entered`, `univariant_trace_completed` | pending end, phase pair, node/path IDs, termination |
 | `contour` | `contour_level_started`, `contour_path_completed`, `contour_level_completed` | level, phase, path/junction identity, open/closed state |

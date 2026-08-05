@@ -126,6 +126,7 @@ pub enum NumericalTraceEventKind {
     BinaryStableRegionDetected,
     BinaryTransitionDetected,
     BinaryTransitionBracketed,
+    BinaryTransitionUnavailable,
     BinaryIntermediatePhaseInserted,
     BinaryRootIteration,
     BinaryRootConverged,

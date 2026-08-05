@@ -1069,6 +1069,33 @@ mod tests {
     }
 
     #[test]
+    fn cao_pbo_zno_fixture_reports_unsupported_binary_transitions_without_losing_contours() {
+        let dataset = parse_str(include_str!("../../../calculations/CaO-PbO-ZnO.tct")).unwrap();
+        let options = ProjectionOptions {
+            automatic_level_step: Some(100.0),
+            sampling_subdivisions: Some(20),
+            regularize: true,
+            partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+            ..ProjectionOptions::default()
+        };
+        let projection = calculate_projection(&dataset, &options).unwrap();
+        assert_eq!(projection.stable_boundaries.nodes.len(), 1);
+        assert!(projection.stable_boundaries.univariants.is_empty());
+        assert!(projection.diagnostics.contour_path_count > 0);
+        let unavailable = projection
+            .stable_boundaries
+            .binary_traces
+            .iter()
+            .flat_map(|trace| trace.incomplete_transitions.iter())
+            .collect::<Vec<_>>();
+        assert_eq!(unavailable.len(), 2);
+        assert!(unavailable.iter().all(|transition| matches!(
+            transition.reason,
+            ternary_contours::BinaryTransitionUnavailableReason::NoRootInOverlappingDomain
+        )));
+    }
+
+    #[test]
     fn automatic_levels_start_at_exact_minimum_and_never_exceed_maximum() {
         let levels = automatic_iso_levels(742.5, 1_042.5, 100.0).unwrap();
         assert_eq!(levels, vec![742.5, 842.5, 942.5, 1_042.5]);

@@ -18,9 +18,10 @@ mod tests;
 
 pub use boundary::{
     BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
-    BinaryStableRegion, InteriorInvariantNode, StableBoundaryDiagnostics, StableBoundaryError,
-    StableBoundaryNetwork, StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId,
-    StablePhasePair, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
+    BinaryStableRegion, BinaryTransitionUnavailableReason, InteriorInvariantNode,
+    PartialBinaryTransition, StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork,
+    StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StablePhasePair,
+    StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
     StableUnivariantRegularizationDiagnostics,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};

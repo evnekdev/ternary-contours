@@ -90,6 +90,8 @@ pub struct TraceAnalysis {
     pub event_count: usize,
     pub binary_boundaries_started: usize,
     pub binary_invariants: usize,
+    /// Sampled binary phase transitions unsupported by finite source coverage.
+    pub unavailable_binary_transitions: usize,
     pub interior_invariants: usize,
     pub univariants_completed: usize,
     pub contours_completed: usize,
@@ -152,6 +154,9 @@ pub fn analyze_trace(path: impl AsRef<Path>) -> Result<TraceAnalysis, String> {
                 analysis.binary_boundaries_started += 1
             }
             NumericalTraceEventKind::BinaryInvariantEmitted => analysis.binary_invariants += 1,
+            NumericalTraceEventKind::BinaryTransitionUnavailable => {
+                analysis.unavailable_binary_transitions += 1
+            }
             NumericalTraceEventKind::InteriorInvariantAccepted => analysis.interior_invariants += 1,
             NumericalTraceEventKind::UnivariantTraceCompleted => {
                 analysis.univariants_completed += 1

@@ -559,6 +559,10 @@ fn analyze_trace_command(input: PathBuf) -> Result<(), Box<dyn Error>> {
         "Confirmed invariants: {} binary, {} ternary",
         analysis.binary_invariants, analysis.interior_invariants
     );
+    println!(
+        "Unavailable binary transitions: {}",
+        analysis.unavailable_binary_transitions
+    );
     println!("Completed univariants: {}", analysis.univariants_completed);
     println!("Completed contour paths: {}", analysis.contours_completed);
     for warning in &analysis.warnings {

@@ -197,12 +197,35 @@ pub struct StableUnivariantPath {
     pub regularization: Option<StableUnivariantRegularizationDiagnostics>,
 }
 
+/// Why a sampled binary stable-phase change could not yield a safe invariant.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BinaryTransitionUnavailableReason {
+    /// The two phase fields are never simultaneously defined in the interval.
+    DisjointSourceDomains,
+    /// A shared finite domain exists, but contains no pairwise equality root.
+    NoRootInOverlappingDomain,
+    /// A root refinement step entered a classified or undefined source region.
+    UndefinedDuringRootRefinement,
+}
+
+/// A real sampled stable-phase change that terminates at unavailable source data.
+/// It is diagnostic-only and is never promoted to a binary invariant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PartialBinaryTransition {
+    pub boundary: BinaryBoundary,
+    pub phases: StablePhasePair,
+    pub parameter_bracket: [f64; 2],
+    pub reason: BinaryTransitionUnavailableReason,
+}
+
 /// Ordered discovery result for one outer edge.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BinaryBoundaryTrace {
     pub boundary: BinaryBoundary,
     pub regions: Vec<BinaryStableRegion>,
     pub invariants: Vec<BinaryInvariantNode>,
+    /// Sampled transitions that cannot be resolved because source coverage ends.
+    pub incomplete_transitions: Vec<PartialBinaryTransition>,
     pub diagnostics: BinaryBoundaryTraceDiagnostics,
 }
 
@@ -218,6 +241,7 @@ pub struct BinaryBoundaryTraceDiagnostics {
     pub metastable_pairwise_roots_rejected: usize,
     pub invariants_emitted: usize,
     pub higher_order_invariants: usize,
+    pub incomplete_transitions: usize,
 }
 
 /// Stable-boundary construction controls.
@@ -717,6 +741,8 @@ struct BinaryScanner<'a> {
     samples: BTreeMap<u64, BinaryBoundarySample>,
     phase_evaluations: BTreeMap<(u64, StablePhaseId), StablePhaseEvaluation>,
     diagnostics: BinaryBoundaryTraceDiagnostics,
+    incomplete_transitions: Vec<PartialBinaryTransition>,
+    last_unavailable_reason: Option<BinaryTransitionUnavailableReason>,
 }
 
 impl<'a> BinaryScanner<'a> {
@@ -734,6 +760,8 @@ impl<'a> BinaryScanner<'a> {
             samples: BTreeMap::new(),
             phase_evaluations: BTreeMap::new(),
             diagnostics: BinaryBoundaryTraceDiagnostics::default(),
+            incomplete_transitions: Vec::new(),
+            last_unavailable_reason: None,
         }
     }
 
@@ -906,7 +934,22 @@ impl<'a> BinaryScanner<'a> {
             match self.refine_transition(&pair[0], &pair[1], left_phase, right_phase) {
                 Ok(Some(node)) => invariants.push(node),
                 Ok(None) => {}
-                Err(StableBoundaryError::NoOverlappingStablePhaseDomains { .. }) => {}
+                Err(StableBoundaryError::NoOverlappingStablePhaseDomains {
+                    boundary,
+                    left_phase,
+                    right_phase,
+                    bracket,
+                }) => {
+                    self.diagnostics.incomplete_transitions += 1;
+                    self.incomplete_transitions.push(PartialBinaryTransition {
+                        boundary,
+                        phases: StablePhasePair::new(left_phase, right_phase),
+                        parameter_bracket: bracket,
+                        reason: self.last_unavailable_reason.take().unwrap_or(
+                            BinaryTransitionUnavailableReason::NoRootInOverlappingDomain,
+                        ),
+                    });
+                }
                 Err(error) => return Err(error),
             }
         }
@@ -933,6 +976,7 @@ impl<'a> BinaryScanner<'a> {
             boundary: self.boundary,
             regions,
             invariants,
+            incomplete_transitions: self.incomplete_transitions,
             diagnostics: self.diagnostics,
         })
     }
@@ -963,6 +1007,11 @@ impl<'a> BinaryScanner<'a> {
             opposite_sign.then_some((pair[0], pair[1]))
         });
         let Some((left_pair, right_pair)) = bracket else {
+            self.last_unavailable_reason = Some(if candidates.is_empty() {
+                BinaryTransitionUnavailableReason::DisjointSourceDomains
+            } else {
+                BinaryTransitionUnavailableReason::NoRootInOverlappingDomain
+            });
             return Err(StableBoundaryError::NoOverlappingStablePhaseDomains {
                 boundary: self.boundary,
                 left_phase,
@@ -1041,6 +1090,8 @@ impl<'a> BinaryScanner<'a> {
                 evaluated = self.pair_delta(proposed, phases)?;
             }
             let Some((delta, first, second)) = evaluated else {
+                self.last_unavailable_reason =
+                    Some(BinaryTransitionUnavailableReason::UndefinedDuringRootRefinement);
                 return Err(StableBoundaryError::NoOverlappingStablePhaseDomains {
                     boundary: self.boundary,
                     left_phase: phases.first,
@@ -2737,6 +2788,40 @@ mod tests {
         assert!((invariant.boundary_parameter - 0.5).abs() < 1.0e-9);
         assert!((invariant.temperature - 0.5).abs() < 1.0e-9);
         assert!(ab.diagnostics.cached_evaluations_reused > 0);
+    }
+
+    #[test]
+    fn unavailable_binary_transition_is_retained_as_a_typed_diagnostic() {
+        let left = |[_a, b, _c]: [f64; 3]| defined(1.0 - b);
+        let right = |[_a, b, _c]: [f64; 3]| {
+            if b >= 0.80 { defined(b) } else { undefined() }
+        };
+        let phases = [
+            StablePhaseSource::new(StablePhaseId(10), StableScalarSource::evaluator(&left)),
+            StablePhaseSource::new(StablePhaseId(20), StableScalarSource::evaluator(&right)),
+        ];
+        let prepared = PreparedStablePhaseEnsemble::new(
+            phases,
+            StableContourQuantity::Height,
+            StableGridOptions {
+                subdivisions: 16,
+                ..StableGridOptions::default()
+            },
+        )
+        .unwrap();
+        let traces = prepared
+            .binary_boundary_traces(StableBoundaryOptions::default())
+            .unwrap();
+        let ab = &traces[0];
+        assert!(ab.invariants.is_empty());
+        assert!(ab.incomplete_transitions.iter().any(|transition| {
+            transition.phases == StablePhasePair::new(StablePhaseId(10), StablePhaseId(20))
+                && transition.reason == BinaryTransitionUnavailableReason::NoRootInOverlappingDomain
+        }));
+        assert_eq!(
+            ab.diagnostics.incomplete_transitions,
+            ab.incomplete_transitions.len()
+        );
     }
 
     #[test]

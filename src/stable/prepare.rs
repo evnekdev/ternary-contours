@@ -372,6 +372,25 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                             ),
                         );
                     }
+                    for transition in &binary.incomplete_transitions {
+                        trace.emit(
+                            NumericalTraceLevel::Decisions,
+                            NumericalTraceStage::BinaryBoundary,
+                            decision(
+                                NumericalTraceEventKind::BinaryTransitionUnavailable,
+                                TraceDecision {
+                                    boundary: Some(trace_boundary(transition.boundary)),
+                                    phase_pair: Some([
+                                        transition.phases.first.0,
+                                        transition.phases.second.0,
+                                    ]),
+                                    bracket: Some(transition.parameter_bracket),
+                                    reason: Some(format!("{:?}", transition.reason)),
+                                    ..TraceDecision::default()
+                                },
+                            ),
+                        );
+                    }
                 }
                 for node in &network.nodes {
                     if let super::StableInvariantNode::Interior(interior) = node {

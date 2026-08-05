@@ -1642,6 +1642,51 @@ pub extern "C" fn tcqt_redo() -> TcqtStatus {
         Ok(())
     })())
 }
+/// Calculate the exact projection selected by the Viewer. Trace output is
+/// observation-only, but when configured it is attached to this accepted
+/// calculation rather than a diagnostic-only repeat of it.
+fn calculate_viewer_projection(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    trace_request: &NumericalTraceRequest,
+    context: &NumericalTraceRunContext,
+) -> (Result<LiquidusProjection, String>, Option<String>) {
+    let Some(destination) = trace_request.destination.as_ref() else {
+        return (
+            calculate_projection(dataset, options).map_err(|error| error.to_string()),
+            None,
+        );
+    };
+    let mut sink = match JsonLinesTraceSink::create(destination, trace_request.config()) {
+        Ok(sink) => sink,
+        Err(error) => {
+            return (
+                calculate_projection(dataset, options).map_err(|error| error.to_string()),
+                Some(format!("Numerical trace could not be created: {error}")),
+            );
+        }
+    };
+    let result = calculate_projection_with_trace_context(dataset, options, &mut sink, context)
+        .map_err(|error| error.to_string());
+    let output = sink.finish();
+    let status = match (&result, output.first_error) {
+        (Ok(_), None) => format!(
+            "Numerical trace saved to {} ({} events)",
+            output.path.display(),
+            output.events_written
+        ),
+        (Ok(_), Some(error)) => {
+            format!("Projection remains valid; numerical trace output failed: {error}")
+        }
+        (Err(error), _) => {
+            format!(
+                "Projection failed; numerical trace recorded the same calculation failure: {error}"
+            )
+        }
+    };
+    (result, Some(status))
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_calculate_viewer(
     raw_options: *const TcqtViewerCalculationOptions,
@@ -1703,13 +1748,31 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
 
     // Retain both authoritative geometries.  Display mode is render-only and
     // selects this cache without re-running the numerical pipeline.
+    let trace_context = NumericalTraceRunContext {
+        input_identifier: dataset
+            .source_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        dataset_revision: Some(expected_revision),
+        options_revision: Some(options_revision),
+        request_id: Some(request_id),
+        ..NumericalTraceRunContext::default()
+    };
     let mut raw_options = projection_options.clone();
     raw_options.regularize = false;
-    let raw_projection = match calculate_projection(&dataset, &raw_options) {
+    let (raw_projection, raw_trace_status) = if abi_options.regularize {
+        (
+            calculate_projection(&dataset, &raw_options).map_err(|error| error.to_string()),
+            None,
+        )
+    } else {
+        calculate_viewer_projection(&dataset, &raw_options, &trace_request, &trace_context)
+    };
+    let raw_projection = match raw_projection {
         Ok(projection) => projection,
         Err(error) => {
             return failure(
-                format!("Calculation failed while tracing raw paths: {error}"),
+                format!("Calculation failed while preparing raw paths: {error}"),
                 expected_revision,
                 options_revision,
             );
@@ -1717,54 +1780,30 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
     };
     let mut regularized_options = projection_options.clone();
     regularized_options.regularize = true;
-    let regularized_projection = match calculate_projection(&dataset, &regularized_options) {
+    let (regularized_projection, regularized_trace_status) = if abi_options.regularize {
+        calculate_viewer_projection(
+            &dataset,
+            &regularized_options,
+            &trace_request,
+            &trace_context,
+        )
+    } else {
+        (
+            calculate_projection(&dataset, &regularized_options).map_err(|error| error.to_string()),
+            None,
+        )
+    };
+    let regularized_projection = match regularized_projection {
         Ok(projection) => projection,
         Err(error) => {
             return failure(
-                format!("Calculation failed while tracing regularized paths: {error}"),
+                format!("Calculation failed while preparing regularized paths: {error}"),
                 expected_revision,
                 options_revision,
             );
         }
     };
-    // Trace output is observation-only. It uses the exact complete options
-    // snapshot and cannot turn a valid projection into a numerical failure.
-    let trace_status = trace_request.destination.as_ref().map(|destination| {
-        let mut sink = match JsonLinesTraceSink::create(destination, trace_request.config()) {
-            Ok(sink) => sink,
-            Err(error) => return format!("Numerical trace could not be created: {error}"),
-        };
-        let context = NumericalTraceRunContext {
-            input_identifier: dataset
-                .source_path
-                .as_ref()
-                .map(|path| path.display().to_string()),
-            dataset_revision: Some(expected_revision),
-            options_revision: Some(options_revision),
-            request_id: Some(request_id),
-            ..NumericalTraceRunContext::default()
-        };
-        let result = calculate_projection_with_trace_context(
-            &dataset,
-            &projection_options,
-            &mut sink,
-            &context,
-        );
-        let output = sink.finish();
-        match (result, output.first_error) {
-            (Ok(_), None) => format!(
-                "Numerical trace saved to {} ({} events)",
-                output.path.display(),
-                output.events_written
-            ),
-            (Ok(_), Some(error)) => {
-                format!("Projection remains valid; numerical trace output failed: {error}")
-            }
-            (Err(error), _) => {
-                format!("Projection remains valid; numerical trace calculation failed: {error}")
-            }
-        }
-    });
+    let trace_status = raw_trace_status.or(regularized_trace_status);
     let selected_projection = if abi_options.regularize {
         regularized_projection.clone()
     } else {
@@ -2716,6 +2755,56 @@ mod tests {
             assert!(saw_phase_pair);
         }
     }
+    #[test]
+    fn viewer_trace_observes_the_accepted_projection_request() {
+        let _guard = test_document_lock().lock().unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tools/ternary-contours-cli/fixtures/interior-invariant.tct");
+        let path = std::ffi::CString::new(fixture.to_string_lossy().as_bytes()).unwrap();
+        let trace_path = std::env::temp_dir().join(format!(
+            "ternary-contours-viewer-request-{}.jsonl",
+            std::process::id()
+        ));
+        let trace_path_c = std::ffi::CString::new(trace_path.to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            assert!(tcqt_open_document(path.as_ptr()).success);
+            let options = TcqtViewerCalculationOptions {
+                automatic_range: true,
+                minimum: 0.0,
+                maximum: 0.0,
+                level_step: 25.0,
+                sampling_subdivisions: 17,
+                regularize: false,
+                regularization_spacing: 0.01,
+                source_interpolation: ABI_SOURCE_LINEAR,
+                cubic_method: ABI_CUBIC_STEFFEN,
+                partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
+                continuation: ABI_CONTINUATION_KOHLER,
+            };
+            assert!(tcqt_set_viewer_calculation_options(&options).success);
+            assert!(tcqt_set_numerical_trace(2, trace_path_c.as_ptr()).success);
+            let mut document_summary = std::mem::zeroed::<TcqtProjectSummary>();
+            let mut state = std::mem::zeroed::<TcqtViewerCalculationState>();
+            assert!(tcqt_project_summary(&mut document_summary).success);
+            assert!(tcqt_viewer_calculation_state(&mut state).success);
+            assert!(
+                tcqt_calculate_viewer(
+                    &state.options,
+                    document_summary.revision,
+                    state.options_revision,
+                    92,
+                )
+                .success
+            );
+            assert!(tcqt_set_numerical_trace(0, std::ptr::null()).success);
+        }
+        let trace = std::fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("\"request_id\":92"));
+        assert!(trace.contains("\"sampling_subdivisions\":17"));
+        assert!(trace.contains("\"regularization\":false"));
+        std::fs::remove_file(trace_path).unwrap();
+    }
+
     #[test]
     fn rust_projection_scene_style_distinguishes_each_calculated_layer() {
         assert_ne!(

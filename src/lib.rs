@@ -155,13 +155,14 @@ pub use metrics::{
 pub use path::PathRegularizationOptions;
 pub use stable::{
     BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
-    BinaryStableRegion, InteriorInvariantNode, PreparedStablePhaseEnsemble,
-    StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork, StableBoundaryOptions,
-    StableContourDiagnostics, StableContourError, StableContourJunction, StableContourJunctionKind,
-    StableContourLevel, StableContourPath, StableContourQuantity, StableContourSet,
-    StableGridOptions, StableGridVerification, StableInvariantNode, StableInvariantNodeId,
-    StableJunctionId, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair,
-    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
+    BinaryStableRegion, BinaryTransitionUnavailableReason, InteriorInvariantNode,
+    PartialBinaryTransition, PreparedStablePhaseEnsemble, StableBoundaryDiagnostics,
+    StableBoundaryError, StableBoundaryNetwork, StableBoundaryOptions, StableContourDiagnostics,
+    StableContourError, StableContourJunction, StableContourJunctionKind, StableContourLevel,
+    StableContourPath, StableContourQuantity, StableContourSet, StableGridOptions,
+    StableGridVerification, StableInvariantNode, StableInvariantNodeId, StableJunctionId,
+    StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair, StablePhaseSource,
+    StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
     StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
     StableUnivariantRegularizationDiagnostics, StableVerificationPassDiagnostics,
 };
