@@ -53,6 +53,14 @@
              </layout>
             </item>
             <item>
+             <widget class="QLabel" name="labelGridValueTokens">
+              <property name="text"><string>Allowed values: number, NA (Missing), NE (Non-existing), CO (Cut-off)</string></property>
+              <property name="toolTip"><string>NA — Missing: not calculated or unavailable. NE — Non-existing: the phase does not exist at this composition. CO — Cut-off: an explicit cutoff or limit was reached. Optional notes may be added, for example CO:3000.</string></property>
+              <property name="accessibleName"><string>Supported grid-value tokens</string></property>
+              <property name="accessibleDescription"><string>Explains the supported numeric and classified grid-value tokens.</string></property>
+             </widget>
+            </item>
+            <item>
              <widget class="QTableView" name="tableGridValues">
               <property name="minimumSize"><size><width>320</width><height>180</height></size></property>
               <property name="horizontalScrollBarPolicy"><enum>Qt::ScrollBarAsNeeded</enum></property>

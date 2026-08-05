@@ -33,7 +33,11 @@ void GridTableModel::load(std::uint32_t grid_index, const QStringList& component
         Row row{source.a, source.b, source.c, {}};
         for (std::uint32_t field_index = 0; field_index < grid.field_count; ++field_index) {
             TcqtCell cell{}; const auto cell_status = tcqt_grid_cell_at(grid_index, field_index, row_index, &cell);
-            row.fields.append(cell_status.success ? tokenForCell(cell.state, cell.has_value, cell.value, cell.note) : tr("NA"));
+            if (cell_status.success) {
+                row.fields.append(FieldCell{tokenForCell(cell.state, cell.has_value, cell.value, cell.note), cell.state, cText(cell.note)});
+            } else {
+                row.fields.append(FieldCell{tr("NA"), 3, {}});
+            }
         }
         rows_.append(std::move(row));
     }
@@ -51,10 +55,21 @@ QVariant GridTableModel::data(const QModelIndex& index, int role) const {
     const auto composition = index.column() < 3;
     if (role == Qt::DisplayRole || role == Qt::EditRole) {
         if (composition) return QLocale::c().toString(index.column() == 0 ? row.a : index.column() == 1 ? row.b : row.c, 'f', 6);
-        return row.fields.value(index.column() - 3);
+        return row.fields.value(index.column() - 3).token;
     }
     if (role == Qt::BackgroundRole && composition && regular_) return QBrush(Qt::lightGray);
-    if (role == Qt::ToolTipRole && !composition) return tr("Classified scalar input: number, NA, NE, or CO[:note]");
+    if (role == Qt::ToolTipRole && !composition) {
+        const auto& cell = row.fields.at(index.column() - 3);
+        if (cell.state == 1) {
+            return cell.note.isEmpty() ? tr("NE\nNon-existing — the phase is absent at this composition.") : tr("NE:%1\nNon-existing — %1").arg(cell.note);
+        }
+        if (cell.state == 2) {
+            return cell.note.isEmpty() ? tr("CO\nCut-off — the value is beyond an explicit cutoff or limit.") : tr("CO:%1\nCut-off — %1").arg(cell.note);
+        }
+        if (cell.state == 3) {
+            return cell.note.isEmpty() ? tr("NA\nMissing — no numeric value is available.") : tr("NA:%1\nMissing — %1").arg(cell.note);
+        }
+    }
     return {};
 }
 
@@ -83,6 +98,10 @@ bool GridTableModel::setData(const QModelIndex& index, const QVariant& value, in
         auto row = rows_.at(index.row());
         if (index.column() == 0) row.a = numeric; else if (index.column() == 1) row.b = numeric; else row.c = numeric;
         status = tcqt_set_irregular_composition(grid_index_, static_cast<std::uint32_t>(index.row()), row.a, row.b, row.c);
+    }
+    if (!status.success && index.column() >= 3) {
+        emit bridgeStatus(tr("Invalid value. Enter a finite number, NA, NE, or CO. (%1)").arg(statusText(status)), false);
+        return false;
     }
     emit bridgeStatus(statusText(status), status.success);
     if (!status.success) return false;

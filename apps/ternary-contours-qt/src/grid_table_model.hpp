@@ -25,7 +25,12 @@ signals:
     void bridgeStatus(const QString& message, bool success);
 
 private:
-    struct Row { double a; double b; double c; QVector<QString> fields; };
+    struct FieldCell {
+        QString token;
+        std::uint32_t state = 3;
+        QString note;
+    };
+    struct Row { double a; double b; double c; QVector<FieldCell> fields; };
     QString tokenForCell(std::uint32_t state, bool has_value, double value, const char* note) const;
 
     std::uint32_t grid_index_ = 0;
