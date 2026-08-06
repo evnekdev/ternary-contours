@@ -126,8 +126,10 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | actionViewSourceVertices | main_window.ui | QAction | PlotSettings |
 | actionViewStableIsotherms | main_window.ui | QAction | PlotSettings |
 | actionViewStableUnivariants | main_window.ui | QAction | PlotSettings |
-| actionViewerClearAllQueries | main_window.ui | QAction | PlotSettings |
-| actionViewerClearSelectedQuery | main_window.ui | QAction | PlotSettings |
+| actionViewerClearAllQueries | main_window.ui | QAction | InterpolationResultsClear |
+| actionViewerClearSelectedQuery | main_window.ui | QAction | InterpolationResultsClear |
+| actionViewerCopyInvariantPoints | main_window.ui | QAction | GridResults |
+| actionViewerCopyQueries | main_window.ui | QAction | InterpolationResultsCopy |
 | actionViewerResetAutomaticRange | main_window.ui | QAction | PlotSettings |
 | addGridButtonBox | add_grid_dialog.ui | QDialogButtonBox | DataGridEditor |
 | addGridDialog | add_grid_dialog.ui | QDialog | DataGridEditor |
@@ -135,6 +137,10 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | buttonAddPhase | main_window.ui | QPushButton | DataPhases |
 | buttonAddProperty | main_window.ui | QPushButton | DataProperties |
 | buttonBoxInterpolationPoint | interpolation_point_dialog.ui | QDialogButtonBox | GridInterpolation |
+| buttonInterpolationClearAll | main_window.ui | QPushButton | InterpolationResultsClear |
+| buttonInterpolationCopy | main_window.ui | QPushButton | InterpolationResultsCopy |
+| buttonInterpolationRemoveSelected | main_window.ui | QPushButton | InterpolationResultsClear |
+| buttonInvariantCopy | main_window.ui | QPushButton | GridResults |
 | buttonRemovePhase | main_window.ui | QPushButton | DataPhases |
 | buttonViewerExtrapolatePhase | main_window.ui | QPushButton | GridPointEditor |
 | buttonViewerResetAutomaticRange | main_window.ui | QPushButton | PlotLevels |
@@ -212,10 +218,12 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | splitterData | main_window.ui | QSplitter | DataPanel |
 | splitterViewerControls | main_window.ui | QSplitter | PlotSettings |
 | splitterViewerOuter | main_window.ui | QSplitter | PlotSettings |
+| splitterViewerResultTables | main_window.ui | QSplitter | GridResults |
 | splitterViewerRight | main_window.ui | QSplitter | GridResults |
 | statusMain | main_window.ui | QStatusBar | Status |
 | tabData | main_window.ui | QWidget | TabData |
 | tabViewer | main_window.ui | QWidget | TabPlot |
 | tableGridValues | main_window.ui | QTableView | DataGridEditor |
 | tableInterpolationResults | main_window.ui | QTableView | InterpolationResultsTable |
+| tableInvariantPoints | main_window.ui | QTableView | GridResults |
 | treeProject | main_window.ui | QTreeView | DataGridList |

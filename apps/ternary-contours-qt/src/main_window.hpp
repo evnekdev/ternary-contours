@@ -17,6 +17,7 @@ class QStandardItemModel;
 class QCloseEvent;
 class QModelIndex;
 class QLineEdit;
+class QAbstractItemView;
 
 namespace Ui { class MainWindow; }
 
@@ -160,6 +161,15 @@ private:
     void refreshViewerFieldSelectors();
     void refreshViewerVertices();
     void refreshViewerQueries();
+    void refreshQueryCanvas();
+    void refreshInvariantPoints();
+    void clearInvariantPoints(const QString& status);
+    QString selectedRowsAsTsv(const QAbstractItemView* view, bool include_headers) const;
+    void copySelectedRows(QAbstractItemView* view, bool include_headers);
+    void removeSelectedInterpolationQueries();
+    void clearAllInterpolationQueries();
+    void showInterpolationResultsContextMenu(const QPoint& position);
+    void showInvariantPointsContextMenu(const QPoint& position);
     bool refreshProjectionCanvas(bool accept_empty = false);
     void scheduleViewerCalculation();
     void addInterpolationQuery(double a, double b, double c);

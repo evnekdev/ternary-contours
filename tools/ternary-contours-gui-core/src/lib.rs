@@ -175,9 +175,21 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "splitterData" => UiElementId::DataPanel,
         "splitterViewerOuter" => UiElementId::PlotSettings,
         "splitterViewerControls" => UiElementId::PlotSettings,
-        "splitterViewerRight" => UiElementId::GridResults,
+        "splitterViewerRight"
+        | "resultTablesPane"
+        | "splitterViewerResultTables"
+        | "groupInterpolationResults"
+        | "groupInvariantPoints"
+        | "tableInvariantPoints"
+        | "labelInterpolationResultsStatus"
+        | "labelInvariantPointsStatus"
+        | "buttonInvariantCopy" => UiElementId::GridResults,
         "canvasTernary" => UiElementId::PlotCanvas,
         "tableInterpolationResults" => UiElementId::InterpolationResultsTable,
+        "buttonInterpolationCopy" => UiElementId::InterpolationResultsCopy,
+        "buttonInterpolationRemoveSelected" | "buttonInterpolationClearAll" => {
+            UiElementId::InterpolationResultsClear
+        }
         "statusMain" => UiElementId::Status,
         "buttonViewerResetAutomaticRange" => UiElementId::PlotLevels,
         "buttonViewerExtrapolatePhase" => UiElementId::GridPointEditor,
@@ -235,6 +247,11 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "actionGridCopy" => UiElementId::DataCopyGrid,
         "actionGridPaste" => UiElementId::DataPasteApply,
         "actionGridRecalculate" => UiElementId::Recalculate,
+        "actionViewerCopyQueries" => UiElementId::InterpolationResultsCopy,
+        "actionViewerClearSelectedQuery" | "actionViewerClearAllQueries" => {
+            UiElementId::InterpolationResultsClear
+        }
+        "actionViewerCopyInvariantPoints" => UiElementId::GridResults,
         "actionGridValidate" => UiElementId::DataGridEditor,
         name if name.starts_with("actionGrid") => UiElementId::DataGridEditor,
         name if name.starts_with("actionFile")
@@ -317,8 +334,10 @@ pub enum QtUiAction {
     ToggleAxisLabels,
     ToggleCornerNames,
     ToggleLegend,
+    CopyInterpolationResults,
     ClearSelectedQuery,
     ClearAllQueries,
+    CopyInvariantPoints,
     ResetAutomaticIsoRange,
     ShowApplicationAbout,
     ShowDocumentation,
@@ -367,8 +386,10 @@ pub const fn qt_ui_action(id: QtUiElementId) -> Option<QtUiAction> {
         QtUiElementId::ActionViewAxisLabels => QtUiAction::ToggleAxisLabels,
         QtUiElementId::ActionViewCornerNames => QtUiAction::ToggleCornerNames,
         QtUiElementId::ActionViewLegend => QtUiAction::ToggleLegend,
+        QtUiElementId::ActionViewerCopyQueries => QtUiAction::CopyInterpolationResults,
         QtUiElementId::ActionViewerClearSelectedQuery => QtUiAction::ClearSelectedQuery,
         QtUiElementId::ActionViewerClearAllQueries => QtUiAction::ClearAllQueries,
+        QtUiElementId::ActionViewerCopyInvariantPoints => QtUiAction::CopyInvariantPoints,
         QtUiElementId::ActionViewerResetAutomaticRange => QtUiAction::ResetAutomaticIsoRange,
         QtUiElementId::ActionAboutApplication => QtUiAction::ShowApplicationAbout,
         QtUiElementId::ActionAboutDocumentation => QtUiAction::ShowDocumentation,
@@ -2396,7 +2417,16 @@ mod tests {
             "groupIsoPlots",
             "splitterViewerRight",
             "canvasTernary",
+            "resultTablesPane",
+            "splitterViewerResultTables",
+            "groupInterpolationResults",
             "tableInterpolationResults",
+            "groupInvariantPoints",
+            "tableInvariantPoints",
+            "buttonInterpolationCopy",
+            "buttonInterpolationRemoveSelected",
+            "buttonInterpolationClearAll",
+            "buttonInvariantCopy",
         ] {
             assert!(
                 QT_UI_ELEMENTS
@@ -2416,7 +2446,21 @@ mod tests {
         assert_eq!(parent("scrollVertexInspection"), "splitterViewerControls");
         assert_eq!(parent("scrollIsoPlots"), "splitterViewerControls");
         assert_eq!(parent("canvasTernary"), "splitterViewerRight");
-        assert_eq!(parent("tableInterpolationResults"), "splitterViewerRight");
+        assert_eq!(parent("resultTablesPane"), "splitterViewerRight");
+        assert_eq!(
+            parent("splitterViewerResultTables"),
+            "layoutViewerResultTablesPane"
+        );
+        assert_eq!(
+            parent("groupInterpolationResults"),
+            "splitterViewerResultTables"
+        );
+        assert_eq!(parent("groupInvariantPoints"), "splitterViewerResultTables");
+        assert_eq!(
+            parent("tableInterpolationResults"),
+            "layoutInterpolationResults"
+        );
+        assert_eq!(parent("tableInvariantPoints"), "layoutInvariantPoints");
         assert!(!QT_UI_ELEMENTS.iter().any(|element| matches!(
             element.object_name,
             "viewerControls" | "groupViewerPresentation" | "buttonRunRustCalculation"
@@ -2445,6 +2489,45 @@ mod tests {
         }
         assert!(!ui.contains("<string>Inspect</string>"));
         assert!(!ui.contains("<string>Edit</string>"));
+    }
+
+    #[test]
+    fn viewer_result_tables_are_sortable_and_use_stable_ids() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/ternary-contours-qt");
+        let ui = std::fs::read_to_string(root.join("ui/main_window.ui")).unwrap();
+        let window = std::fs::read_to_string(root.join("src/main_window.cpp")).unwrap();
+        for required in [
+            "resultTablesPane",
+            "splitterViewerResultTables",
+            "tableInvariantPoints",
+            "buttonInterpolationCopy",
+            "buttonInterpolationRemoveSelected",
+            "buttonInterpolationClearAll",
+            "actionViewerCopyQueries",
+            "actionViewerCopyInvariantPoints",
+        ] {
+            assert!(
+                ui.contains(required),
+                "missing Viewer result-table object {required}"
+            );
+        }
+        for required in [
+            "TypedResultSortProxyModel",
+            "query_id_role",
+            "invariant_id_role",
+            "selectedRowsAsTsv",
+            "removeSelectedInterpolationQueries",
+            "clearAllInterpolationQueries",
+            "tcqt_invariant_point_count",
+            "tcqt_invariant_point_at",
+            "splitter/viewer-result-tables",
+        ] {
+            assert!(
+                window.contains(required),
+                "missing result-table wiring {required}"
+            );
+        }
     }
 
     #[test]
@@ -2479,7 +2562,12 @@ mod tests {
                 "comboViewerMode",
                 "buttonViewerExtrapolatePhase",
                 "canvasTernary",
-                "tableInterpolationResults"
+                "buttonInterpolationCopy",
+                "buttonInterpolationRemoveSelected",
+                "buttonInterpolationClearAll",
+                "tableInterpolationResults",
+                "buttonInvariantCopy",
+                "tableInvariantPoints"
             ]
         );
         for (child, parent) in [("menuExport", "menuFile"), ("menuAddGrid", "menuGrid")] {

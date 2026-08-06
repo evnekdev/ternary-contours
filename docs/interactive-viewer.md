@@ -206,3 +206,11 @@ first Save action is Save As.
 
 cargo run -p ternary-contours-cli --features viewer --
 cargo run -p ternary-contours-cli --features viewer -- view
+
+## Result tables
+
+The lower Viewer pane contains two independently resizable, read-only tables. **Interpolation results** is session-only Viewer state: Copy exports selected rows as C-locale TSV with headers, Remove selected (including `Delete` while that table has focus) removes only the stable query IDs selected, and Clear all removes every query after confirmation when more than one exists. These commands remove canvas markers but never dirty a TCT document, change a dataset revision, create document undo, or schedule projection work.
+
+**Invariant points** is calculated state, not a second numerical calculation. Its rows come directly from the accepted Rust stable-boundary graph, in stable invariant-node ID order, and include binary/interior type, composition, temperature, phase IDs and names, binary boundary metadata, and incident complete-univariant degree. During recalculation or failure the table keeps its last accepted rows and displays a stale status; a newly opened or created document clears it until a projection is accepted. Trace-only configuration is observational and does not alter invariant rows.
+
+Both result tables sort all columns through typed sort values rather than formatted display text. Numeric values sort numerically, text is case-insensitive and locale-aware, and unavailable values remain last in either direction. Table sorting, selection, canvas query highlighting, deletion, and TSV export are keyed by stable query/invariant identity, so sorting cannot change an operation's target. The active sort column and direction persist with Viewer layout settings; Restore Layout resets each table to ascending ID order.

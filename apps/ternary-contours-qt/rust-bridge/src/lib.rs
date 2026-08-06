@@ -15,8 +15,8 @@ use std::{
 };
 
 use ternary_contours::{
-    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, IrregularTernaryMesh,
-    IrregularTriangleId, NumericalTraceConfig, NumericalTraceLevel,
+    BinaryBoundary, BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy,
+    IrregularTernaryMesh, IrregularTriangleId, NumericalTraceConfig, NumericalTraceLevel,
     RegularMeshExtrapolationOptions, RegularTernaryGrid, StableInvariantNode, StablePhaseId,
     composition_from_local_barycentric, normalize_ternary_triplet,
 };
@@ -284,6 +284,27 @@ pub struct TcqtProjectionSummary {
     pub selected_projection_regularized: bool,
     pub domain_truncated_univariant_count: u32,
     pub message: [u8; MESSAGE],
+}
+
+/// One invariant node from the currently accepted projection graph.
+#[repr(C)]
+pub struct TcqtInvariantPoint {
+    pub id: u32,
+    /// 0 = binary, 1 = interior.
+    pub kind: u32,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub temperature: f64,
+    /// 0 = AB, 1 = BC, 2 = CA; the value is ignored for interior nodes.
+    pub boundary: u32,
+    pub boundary_parameter: f64,
+    pub incident_univariant_count: u32,
+    pub phases: [u8; 256],
+    pub boundary_name: [u8; 32],
+    pub dataset_revision: u64,
+    pub options_revision: u64,
+    pub request_id: u64,
 }
 
 /// Result of a single authoritative source-field interpolation query. Source
@@ -2792,6 +2813,128 @@ pub unsafe extern "C" fn tcqt_projection_summary(
         Ok(())
     })())
 }
+fn format_invariant_phases(dataset: &TabulatedTernaryDataset, phases: &[StablePhaseId]) -> String {
+    let mut ordered = phases.to_vec();
+    ordered.sort_unstable();
+    ordered
+        .iter()
+        .map(|id| {
+            let name = dataset
+                .phases
+                .iter()
+                .find(|phase| phase.id == *id)
+                .map(|phase| phase.name.as_str())
+                .unwrap_or("unknown");
+            format!("[{}] {}", id.0, name)
+        })
+        .collect::<Vec<_>>()
+        .join(" / ")
+}
+
+fn invariant_point(
+    dataset: &TabulatedTernaryDataset,
+    projection: &LiquidusProjection,
+    node: &StableInvariantNode,
+    dataset_revision: u64,
+    options_revision: u64,
+    request_id: u64,
+) -> TcqtInvariantPoint {
+    let [a, b, c] = node.point().as_array();
+    let degree = projection
+        .stable_boundaries
+        .incident_univariants(node.id())
+        .map_or(0, |paths| paths.len()) as u32;
+    let (kind, boundary, boundary_parameter, boundary_name, phases) = match node {
+        StableInvariantNode::Binary(node) => {
+            let (boundary, name) = match node.boundary {
+                BinaryBoundary::Ab => (0, "AB"),
+                BinaryBoundary::Bc => (1, "BC"),
+                BinaryBoundary::Ca => (2, "CA"),
+            };
+            (
+                0,
+                boundary,
+                node.boundary_parameter,
+                name,
+                node.phases.as_slice(),
+            )
+        }
+        StableInvariantNode::Interior(node) => (1, 0, 0.0, "", node.phases.as_slice()),
+    };
+    TcqtInvariantPoint {
+        id: node.id().0 as u32,
+        kind,
+        a,
+        b,
+        c,
+        temperature: node.temperature(),
+        boundary,
+        boundary_parameter,
+        incident_univariant_count: degree,
+        phases: bytes(&format_invariant_phases(dataset, phases)),
+        boundary_name: bytes(boundary_name),
+        dataset_revision,
+        options_revision,
+        request_id,
+    }
+}
+
+fn accepted_invariant_nodes(projection: &LiquidusProjection) -> Vec<&StableInvariantNode> {
+    let mut nodes = projection
+        .stable_boundaries
+        .nodes
+        .iter()
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.id());
+    nodes
+}
+
+/// Return the number of invariant nodes in the currently accepted projection.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_invariant_point_count(output_value: *mut u32) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "invariant point count") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        *output_value = state.projection.as_ref().map_or(0, |projection| {
+            projection.stable_boundaries.nodes.len() as u32
+        });
+        Ok(())
+    })())
+}
+
+/// Return one invariant node from the currently accepted projection in stable ID order.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_invariant_point_at(
+    index: u32,
+    output_value: *mut TcqtInvariantPoint,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "invariant point") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let projection = state
+            .projection
+            .as_ref()
+            .ok_or_else(|| "no accepted projection is available".to_owned())?;
+        let nodes = accepted_invariant_nodes(projection);
+        let node = nodes
+            .get(index as usize)
+            .ok_or_else(|| "invariant point index is outside the accepted projection".to_owned())?;
+        *output_value = invariant_point(
+            &state.dataset,
+            projection,
+            node,
+            state.revision,
+            state.projection_options_revision,
+            state.projection_request_id,
+        );
+        Ok(())
+    })())
+}
+
 /// Validate a finite, non-negative coordinate triplet without normalizing or
 /// changing a document. The dialog uses this on ordinary focus loss.
 #[unsafe(no_mangle)]
@@ -3823,6 +3966,30 @@ mod tests {
     }
 
     #[test]
+    fn invariant_point_reads_are_empty_without_an_accepted_projection_and_do_not_mutate() {
+        let _guard = test_document_lock().lock().unwrap();
+        let revision = {
+            let mut state = document().lock().unwrap();
+            state.projection = None;
+            state.revision = 77;
+            state.options_revision = 23;
+            state.projection_options_revision = 0;
+            state.projection_request_id = 0;
+            state.revision
+        };
+        let mut count = u32::MAX;
+        unsafe {
+            assert!(tcqt_invariant_point_count(&mut count).success);
+            assert_eq!(count, 0);
+            let mut point = std::mem::zeroed::<TcqtInvariantPoint>();
+            assert!(!tcqt_invariant_point_at(0, &mut point).success);
+        }
+        let state = document().lock().unwrap();
+        assert_eq!(state.revision, revision);
+        assert!(state.projection.is_none());
+    }
+
+    #[test]
     fn bridge_calculation_uses_the_complete_authoritative_option_snapshot() {
         let _guard = test_document_lock().lock().unwrap();
         let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -3908,6 +4075,26 @@ mod tests {
             assert_eq!(projection.effective_continuation, ABI_CONTINUATION_MUGGIANU);
             assert_eq!(projection.options_revision, state.options_revision);
             assert_eq!(projection.request_id, 91);
+            let mut invariant_count = 0;
+            assert!(tcqt_invariant_point_count(&mut invariant_count).success);
+            assert_eq!(invariant_count, direct.stable_boundaries.nodes.len() as u32);
+            let mut prior_id = None;
+            for index in 0..invariant_count {
+                let mut invariant = std::mem::zeroed::<TcqtInvariantPoint>();
+                assert!(tcqt_invariant_point_at(index, &mut invariant).success);
+                assert!(prior_id.is_none_or(|prior| invariant.id > prior));
+                prior_id = Some(invariant.id);
+                assert_eq!(invariant.dataset_revision, projection.dataset_revision);
+                assert_eq!(invariant.options_revision, projection.options_revision);
+                assert_eq!(invariant.request_id, projection.request_id);
+                assert!(invariant.temperature.is_finite());
+                assert!(invariant.phases.iter().any(|byte| *byte != 0));
+                if invariant.kind == 0 {
+                    assert!(invariant.boundary_name.iter().any(|byte| *byte != 0));
+                } else {
+                    assert!(invariant.boundary_name.iter().all(|byte| *byte == 0));
+                }
+            }
             let mut record_count = 0;
             assert!(tcqt_projection_record_count(&mut record_count).success);
             assert!(record_count > 0);

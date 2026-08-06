@@ -5,8 +5,8 @@ Qt 6 desktop application while the established CLI remains supported.
 
 The application has two primary tabs: `Data` and `Viewer`.  The Viewer uses a
 Designer-owned split layout: vertically stacked **Vertex inspection** and
-**Iso-plots** controls on the left; the ternary canvas above its interpolation
-results table on the right.
+**Iso-plots** controls on the left; the ternary canvas above independently
+resizable **Interpolation results** and **Invariant points** tables on the right.
 
 ## Build
 
@@ -59,7 +59,8 @@ only for the matching document revision and generation.
 | Iso range, sampling, interpolation, cubic method, fallback, continuation, regularization and path controls | corresponding `Commit...` or `Set...` command | Rust `TcqtViewerCalculationOptions`; schedules a revision-checked calculation. |
 | View-menu and layer checkboxes | distinct `SetMasterPlotVisible`, `SetStable...`, `Set...Invariants`, `SetSourceVerticesVisible`, and related commands | Shared render-only visibility state; menu and panel remain synchronized. |
 | Fit, Reset, Restore Layout | `Fit`, `Reset`, `RestoreLayout` | Canvas transform or splitter visibility/geometry only. |
-| Results-table selection and clear actions | `RemoveSelectedQuery`, `RemoveAllQueries` | Persistent query markers/results; selecting a result highlights its marker. |
+| Interpolation results commands | `actionViewerCopyQueries`, `RemoveSelectedQuery`, `RemoveAllQueries` | Transient query TSV export/removal by stable query ID; never changes the TCT document. |
+| Invariant points table | `tcqt_invariant_point_count`, `tcqt_invariant_point_at` | Read-only stable-boundary graph nodes from one accepted Rust projection snapshot. |
 | Vertex popup and bulk context actions | bridge vertex/bulk mutation | One Rust mutation/transaction updates undo, revision, dirty presentation, Data, Viewer and automatic calculation. |
 
 The source test `visible_qt_viewer_controls_use_the_thin_adapter_and_rust_bridge`

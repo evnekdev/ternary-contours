@@ -24,6 +24,17 @@ struct TcqtProjectionSummary {
     std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id;
     bool raw_projection_available; bool regularized_projection_available; bool selected_projection_regularized; std::uint32_t domain_truncated_univariant_count; char message[512];
 };
+struct TcqtInvariantPoint {
+    std::uint32_t id;
+    // 0 = Binary, 1 = Interior.
+    std::uint32_t kind;
+    double a; double b; double c; double temperature;
+    // 0 = AB, 1 = BC, 2 = CA. Ignored for interior invariants.
+    std::uint32_t boundary; double boundary_parameter;
+    std::uint32_t incident_univariant_count;
+    char phases[256]; char boundary_name[32];
+    std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id;
+};
 struct TcqtInspectionResult {
     bool success; std::uint32_t state; bool has_value; double value;
     double a; double b; double c; std::uint32_t triangle_index;
@@ -151,6 +162,8 @@ TcqtStatus tcqt_viewer_calculation_options(TcqtViewerCalculationOptions* output)
 TcqtStatus tcqt_viewer_calculation_state(TcqtViewerCalculationState* output);
 TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t expected_options_revision, std::uint64_t request_id);
 TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
+TcqtStatus tcqt_invariant_point_count(std::uint32_t* output);
+TcqtStatus tcqt_invariant_point_at(std::uint32_t index, TcqtInvariantPoint* output);
 TcqtStatus tcqt_validate_coordinate_triplet(double a, double b, double c);
 TcqtStatus tcqt_locate_grid_point(std::uint32_t grid_index, double a, double b, double c, TcqtLocatedPoint* output);
 TcqtStatus tcqt_locate_grid_local_point(std::uint32_t grid_index, std::uint32_t triangle_index, double lambda0, double lambda1, double lambda2, TcqtLocatedPoint* output);

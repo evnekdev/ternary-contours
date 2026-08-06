@@ -28,7 +28,10 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QClipboard>
+#include <QCollator>
 #include <QMenu>
+#include <QSortFilterProxyModel>
+#include <QTableView>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -56,6 +59,11 @@ constexpr int grid_id_role = Qt::UserRole + 1;
 constexpr int phase_id_role = Qt::UserRole + 2;
 constexpr int property_id_role = Qt::UserRole + 3;
 constexpr int field_id_role = Qt::UserRole + 4;
+constexpr int query_id_role = Qt::UserRole + 20;
+constexpr int invariant_id_role = Qt::UserRole + 21;
+constexpr int typed_sort_value_role = Qt::UserRole + 22;
+constexpr int unavailable_sort_rank_role = Qt::UserRole + 23;
+constexpr int projection_request_id_role = Qt::UserRole + 24;
 enum class NodeKind {
     Project,
     Title,
@@ -73,6 +81,7 @@ constexpr int min_regular_subdivisions = 1;
 constexpr int max_regular_subdivisions = 50;
 constexpr int default_regular_subdivisions = 10;
 constexpr std::uint32_t invalid_viewer_abi = std::numeric_limits<std::uint32_t>::max();
+constexpr qulonglong no_table_id = std::numeric_limits<qulonglong>::max();
 constexpr std::uint32_t mesh_scope_field = 0;
 constexpr std::uint32_t mesh_scope_phase = 1;
 constexpr std::uint32_t mesh_scope_targets = 2;
@@ -89,6 +98,84 @@ constexpr std::uint32_t abi_partial_linear_near_boundaries = 3;
 constexpr std::uint32_t abi_continuation_raw_barycentric = 0;
 constexpr std::uint32_t abi_continuation_muggianu = 1;
 constexpr std::uint32_t abi_continuation_kohler = 2;
+
+class TypedResultSortProxyModel final : public QSortFilterProxyModel {
+public:
+    explicit TypedResultSortProxyModel(QObject* parent = nullptr) : QSortFilterProxyModel(parent) {
+        setDynamicSortFilter(true);
+        setSortCaseSensitivity(Qt::CaseInsensitive);
+    }
+
+    void sort(int column, Qt::SortOrder order = Qt::AscendingOrder) override {
+        requested_order_ = order;
+        QSortFilterProxyModel::sort(column, order);
+    }
+
+protected:
+    bool lessThan(const QModelIndex& left, const QModelIndex& right) const override {
+        const auto left_rank = sourceModel()->data(left, unavailable_sort_rank_role).toInt();
+        const auto right_rank = sourceModel()->data(right, unavailable_sort_rank_role).toInt();
+        if (left_rank != right_rank) {
+            return requested_order_ == Qt::AscendingOrder
+                ? left_rank < right_rank
+                : left_rank > right_rank;
+        }
+        const auto left_value = sourceModel()->data(left, typed_sort_value_role);
+        const auto right_value = sourceModel()->data(right, typed_sort_value_role);
+        if (left_value.canConvert<double>() && right_value.canConvert<double>()
+            && (left_value.metaType().id() != QMetaType::QString
+                || right_value.metaType().id() != QMetaType::QString)) {
+            return left_value.toDouble() < right_value.toDouble();
+        }
+        QCollator collator;
+        collator.setCaseSensitivity(Qt::CaseInsensitive);
+        collator.setNumericMode(false);
+        return collator.compare(left_value.toString(), right_value.toString()) < 0;
+    }
+
+private:
+    Qt::SortOrder requested_order_ = Qt::AscendingOrder;
+};
+
+QStandardItem* resultItem(const QString& display, const QVariant& sort_value = {},
+                          int unavailable_rank = 0) {
+    auto* item = new QStandardItem(display);
+    item->setData(sort_value.isValid() ? sort_value : QVariant(display), typed_sort_value_role);
+    item->setData(unavailable_rank, unavailable_sort_rank_role);
+    return item;
+}
+
+QSet<qulonglong> selectedTableIds(const QTableView* table, int id_role) {
+    QSet<qulonglong> ids;
+    if (!table || !table->selectionModel()) return ids;
+    for (const auto& index : table->selectionModel()->selectedRows(0)) {
+        ids.insert(table->model()->data(index, id_role).toULongLong());
+    }
+    return ids;
+}
+
+qulonglong currentTableId(const QTableView* table, int id_role) {
+    if (!table || !table->currentIndex().isValid()) return no_table_id;
+    return table->model()->data(table->model()->index(table->currentIndex().row(), 0), id_role).toULongLong();
+}
+
+void restoreTableSelection(QTableView* table, int id_role, const QSet<qulonglong>& ids,
+                           qulonglong current_id = no_table_id) {
+    if (!table || !table->selectionModel()) return;
+    QSignalBlocker blocker(table->selectionModel());
+    table->selectionModel()->clearSelection();
+    QModelIndex current;
+    for (int row = 0; row < table->model()->rowCount(); ++row) {
+        const auto index = table->model()->index(row, 0);
+        const auto id = table->model()->data(index, id_role).toULongLong();
+        if (ids.contains(id)) {
+            table->selectionModel()->select(index, QItemSelectionModel::Select | QItemSelectionModel::Rows);
+            if (!current.isValid()) current = index;
+        }
+        if (current_id != no_table_id && id == current_id) current = index;
+    }
+    if (current.isValid()) table->selectionModel()->setCurrentIndex(current, QItemSelectionModel::NoUpdate);
+}
 std::uint32_t sourceInterpolationAbi(int index) {
     switch (index) { case 0: return abi_source_linear; case 1: return abi_source_cubic_alpha; default: return invalid_viewer_abi; }
 }
@@ -165,19 +252,35 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     ui_->tableGridValues->addAction(ui_->actionGridPaste);
     auto* results_model = new QStandardItemModel(0, 11, ui_->tableInterpolationResults);
     results_model->setHorizontalHeaderLabels({tr("Index"), tr("A"), tr("B"), tr("C"), tr("Value"), tr("State"), tr("Grid"), tr("Phase"), tr("Property"), tr("Method"), tr("Source provenance")});
-    ui_->tableInterpolationResults->setModel(results_model);
-    connect(ui_->tableInterpolationResults->selectionModel(), &QItemSelectionModel::currentChanged, this,
-            [this](const QModelIndex& current, const QModelIndex&) {
-        QVector<CanvasQuery> queries;
-        queries.reserve(viewer_.queries.size());
-        for (qsizetype index = 0; index < viewer_.queries.size(); ++index) {
-            const auto& query = viewer_.queries.at(index);
-            queries.append({query.id, QPointF(query.a, query.b), query.result.state,
-                            current.isValid() && current.row() == index, {}});
-        }
-        ui_->canvasTernary->setQueries(queries);
-        updateViewerActionState();
-    });
+    auto* results_proxy = new TypedResultSortProxyModel(ui_->tableInterpolationResults);
+    results_proxy->setSourceModel(results_model);
+    ui_->tableInterpolationResults->setModel(results_proxy);
+    ui_->tableInterpolationResults->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    ui_->tableInterpolationResults->setSelectionBehavior(QAbstractItemView::SelectRows);
+    ui_->tableInterpolationResults->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    ui_->tableInterpolationResults->setSortingEnabled(true);
+    ui_->tableInterpolationResults->sortByColumn(0, Qt::AscendingOrder);
+    ui_->tableInterpolationResults->setContextMenuPolicy(Qt::CustomContextMenu);
+    ui_->tableInterpolationResults->addAction(ui_->actionViewerCopyQueries);
+    ui_->tableInterpolationResults->addAction(ui_->actionViewerClearSelectedQuery);
+
+    auto* invariant_model = new QStandardItemModel(0, 10, ui_->tableInvariantPoints);
+    invariant_model->setHorizontalHeaderLabels({tr("ID"), tr("Type"), tr("A"), tr("B"), tr("C"), tr("Temperature"), tr("Phases"), tr("Boundary"), tr("Parameter"), tr("Degree")});
+    auto* invariant_proxy = new TypedResultSortProxyModel(ui_->tableInvariantPoints);
+    invariant_proxy->setSourceModel(invariant_model);
+    ui_->tableInvariantPoints->setModel(invariant_proxy);
+    ui_->tableInvariantPoints->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    ui_->tableInvariantPoints->setSelectionBehavior(QAbstractItemView::SelectRows);
+    ui_->tableInvariantPoints->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    ui_->tableInvariantPoints->setSortingEnabled(true);
+    ui_->tableInvariantPoints->sortByColumn(0, Qt::AscendingOrder);
+    ui_->tableInvariantPoints->setContextMenuPolicy(Qt::CustomContextMenu);
+    ui_->tableInvariantPoints->addAction(ui_->actionViewerCopyInvariantPoints);
+
+    connect(ui_->tableInterpolationResults->selectionModel(), &QItemSelectionModel::selectionChanged,
+            this, [this] { refreshQueryCanvas(); updateViewerActionState(); });
+    connect(ui_->tableInterpolationResults->selectionModel(), &QItemSelectionModel::currentChanged,
+            this, [this](const QModelIndex&, const QModelIndex&) { refreshQueryCanvas(); updateViewerActionState(); });
     ui_->actionViewSourceVertices->setChecked(true);
     ui_->actionViewQueryPoints->setChecked(true);
 
@@ -289,8 +392,17 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionViewFit, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::Fit); });
     connect(ui_->actionViewReset, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::Reset); });
     connect(ui_->actionViewRestoreLayout, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::RestoreLayout); });
-    connect(ui_->actionViewerClearSelectedQuery, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::RemoveSelectedQuery); });
-    connect(ui_->actionViewerClearAllQueries, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::RemoveAllQueries); });
+    connect(ui_->actionViewerCopyQueries, &QAction::triggered, this, [this] { copySelectedRows(ui_->tableInterpolationResults, true); });
+    connect(ui_->actionViewerClearSelectedQuery, &QAction::triggered, this, &MainWindow::removeSelectedInterpolationQueries);
+    connect(ui_->actionViewerClearAllQueries, &QAction::triggered, this, &MainWindow::clearAllInterpolationQueries);
+    connect(ui_->actionViewerCopyInvariantPoints, &QAction::triggered, this, [this] { copySelectedRows(ui_->tableInvariantPoints, true); });
+    connect(ui_->buttonInterpolationCopy, &QPushButton::clicked, ui_->actionViewerCopyQueries, &QAction::trigger);
+    connect(ui_->buttonInterpolationRemoveSelected, &QPushButton::clicked, ui_->actionViewerClearSelectedQuery, &QAction::trigger);
+    connect(ui_->buttonInterpolationClearAll, &QPushButton::clicked, ui_->actionViewerClearAllQueries, &QAction::trigger);
+    connect(ui_->buttonInvariantCopy, &QPushButton::clicked, ui_->actionViewerCopyInvariantPoints, &QAction::trigger);
+    connect(ui_->tableInterpolationResults, &QTableView::customContextMenuRequested, this, &MainWindow::showInterpolationResultsContextMenu);
+    connect(ui_->tableInvariantPoints, &QTableView::customContextMenuRequested, this, &MainWindow::showInvariantPointsContextMenu);
+    connect(ui_->tableInvariantPoints->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { updateViewerActionState(); });
     connect(ui_->actionViewerResetAutomaticRange, &QAction::triggered, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::ResetAutomaticRange); });
     connect(ui_->buttonViewerResetAutomaticRange, &QPushButton::clicked, ui_->actionViewerResetAutomaticRange, &QAction::trigger);
 
@@ -611,6 +723,7 @@ void MainWindow::newDocument() {
         viewer_.queries.clear();
         ui_->canvasTernary->setProjectionPaths({});
         ui_->canvasTernary->setQueries({});
+        clearInvariantPoints(tr("No invariant calculation is available."));
         rebuildFromRust();
     }
 }
@@ -795,6 +908,7 @@ void MainWindow::addGrid(bool regular) {
         viewer_.queries.clear();
         ui_->canvasTernary->setProjectionPaths({});
         ui_->canvasTernary->setQueries({});
+        clearInvariantPoints(tr("No invariant calculation is available."));
         rebuildFromRust();
     }
 }
@@ -1236,6 +1350,9 @@ void MainWindow::runRustCalculation() {
     if (viewer_.calculation_running) {
         viewer_.pending_recalculation = true;
         viewer_.projection_is_stale = viewer_.has_last_valid_projection;
+        if (ui_->tableInvariantPoints->model()->rowCount() > 0) {
+            ui_->labelInvariantPointsStatus->setText(tr("Recalculating - showing previous result."));
+        }
         setViewerCalculationStatus(tr("Settings changed - recalculation pending"));
         return;
     }
@@ -1256,6 +1373,11 @@ void MainWindow::runRustCalculation() {
     viewer_.calculation_running = true;
     viewer_.pending_recalculation = false;
     viewer_.projection_is_stale = viewer_.has_last_valid_projection;
+    if (ui_->tableInvariantPoints->model()->rowCount() > 0) {
+        ui_->labelInvariantPointsStatus->setText(tr("Recalculating - showing previous result."));
+    } else {
+        ui_->labelInvariantPointsStatus->setText(tr("Recalculating..."));
+    }
     setViewerCalculationStatus(tr("Calculating with sampling %1, %2, step %3...")
         .arg(viewer_.options.sampling_subdivisions)
         .arg(viewer_.options.source_interpolation == abi_source_linear ? tr("Linear") : tr("Cubic alpha"))
@@ -1336,6 +1458,7 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.dataset_revision)
                         .arg(projection.options_revision)
                         .arg(projection.request_id));
+                refreshInvariantPoints();
                 refreshViewerQueries();
                 reportBridgeStatus(text(result.message), true);
             }
@@ -1347,6 +1470,10 @@ void MainWindow::runRustCalculation() {
                     ? tr("Calculation failed - %1. The previous result remains visible.").arg(detail)
                     : tr("Calculation failed - %1").arg(detail),
                 true);
+            ui_->labelInvariantPointsStatus->setText(ui_->tableInvariantPoints->model()->rowCount() > 0
+                ? tr("Previous invariant result retained; latest calculation failed.")
+                : tr("No invariant calculation is available."));
+            ui_->labelInvariantPointsStatus->setToolTip(detail);
             reportBridgeStatus(detail, false);
         }
         const bool restart = viewer_.pending_recalculation;
@@ -1503,32 +1630,68 @@ bool MainWindow::refreshProjectionCanvas(bool accept_empty) {
     return true;
 }
 void MainWindow::refreshViewerQueries() {
-    auto* model = qobject_cast<QStandardItemModel*>(ui_->tableInterpolationResults->model());
+    auto* proxy = qobject_cast<QSortFilterProxyModel*>(ui_->tableInterpolationResults->model());
+    auto* model = proxy ? qobject_cast<QStandardItemModel*>(proxy->sourceModel()) : nullptr;
     if (!model) return;
-    model->removeRows(0, model->rowCount());
-    for (auto& query : viewer_.queries) {
-        const auto property = viewer_.property.toUtf8();
-        TcqtInspectionResult result{};
-        const auto status = tcqt_evaluate_field_current(viewer_.grid_index, viewer_.phase_id, property.constData(), viewer_.options_revision, query.a, query.b, query.c, query.id, &result);
-        if (status.success) { query.grid_index = viewer_.grid_index; query.phase_id = viewer_.phase_id; query.property = viewer_.property; query.result = result; }
-        QList<QStandardItem*> row;
-        row << new QStandardItem(QString::number(query.id)) << new QStandardItem(QLocale::c().toString(query.a, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.b, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.c, 'g', 10));
-        row << new QStandardItem(result.has_value ? QLocale::c().toString(result.value, 'g', 12) : (result.state == 3 ? QStringLiteral("CO") : QStringLiteral("NA")));
-        const auto provenance = result.uses_extrapolated_sources
-            ? tr("EX%1, %2; %3 source row%4")
-                  .arg(result.maximum_extrapolation_layer)
-                  .arg(text(result.extrapolation_methods))
-                  .arg(result.extrapolated_source_row_count)
-                  .arg(result.extrapolated_source_row_count == 1 ? QString() : QStringLiteral("s"))
-            : tr("Calculated sources only");
-        row << new QStandardItem(text(result.message)) << new QStandardItem(QString::number(viewer_.grid_index)) << new QStandardItem(QString::number(viewer_.phase_id)) << new QStandardItem(viewer_.property) << new QStandardItem(result.local_mode == 0 ? tr("Cubic") : result.local_mode == 1 ? tr("One-sided cubic") : result.local_mode == 2 ? tr("Linear") : tr("Undefined")) << new QStandardItem(provenance);
-        model->appendRow(row);
+    const auto selected_ids = selectedTableIds(ui_->tableInterpolationResults, query_id_role);
+    const auto current_id = currentTableId(ui_->tableInterpolationResults, query_id_role);
+    {
+        QSignalBlocker selection_blocker(ui_->tableInterpolationResults->selectionModel());
+        model->removeRows(0, model->rowCount());
+        for (auto& query : viewer_.queries) {
+            const auto property = viewer_.property.toUtf8();
+            TcqtInspectionResult result{};
+            const auto status = tcqt_evaluate_field_current(
+                viewer_.grid_index, viewer_.phase_id, property.constData(),
+                viewer_.options_revision, query.a, query.b, query.c, query.id, &result);
+            if (status.success) {
+                query.grid_index = viewer_.grid_index;
+                query.phase_id = viewer_.phase_id;
+                query.property = viewer_.property;
+                query.result = result;
+            }
+            const auto& displayed = query.result;
+            const auto value_text = displayed.has_value
+                ? QLocale::c().toString(displayed.value, 'g', 12)
+                : (displayed.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA"));
+            const auto provenance = displayed.uses_extrapolated_sources
+                ? tr("EX%1, %2; %3 source row%4")
+                      .arg(displayed.maximum_extrapolation_layer)
+                      .arg(text(displayed.extrapolation_methods))
+                      .arg(displayed.extrapolated_source_row_count)
+                      .arg(displayed.extrapolated_source_row_count == 1 ? QString() : QStringLiteral("s"))
+                : tr("Calculated sources only");
+            QList<QStandardItem*> row;
+            auto* id = resultItem(QString::number(query.id), QVariant::fromValue<qulonglong>(query.id));
+            id->setData(QVariant::fromValue<qulonglong>(query.id), query_id_role);
+            row << id
+                << resultItem(QLocale::c().toString(query.a, 'g', 10), query.a)
+                << resultItem(QLocale::c().toString(query.b, 'g', 10), query.b)
+                << resultItem(QLocale::c().toString(query.c, 'g', 10), query.c)
+                << resultItem(value_text, displayed.has_value ? QVariant(displayed.value) : QVariant(0.0), displayed.has_value ? 0 : 1)
+                << resultItem(text(displayed.message))
+                << resultItem(QString::number(viewer_.grid_index), viewer_.grid_index)
+                << resultItem(QString::number(viewer_.phase_id), viewer_.phase_id)
+                << resultItem(viewer_.property)
+                << resultItem(displayed.local_mode == 0 ? tr("Cubic") : displayed.local_mode == 1 ? tr("One-sided cubic") : displayed.local_mode == 2 ? tr("Linear") : tr("Undefined"))
+                << resultItem(provenance);
+            model->appendRow(row);
+        }
+        restoreTableSelection(ui_->tableInterpolationResults, query_id_role, selected_ids, current_id);
     }
-    const auto current = ui_->tableInterpolationResults->currentIndex();
+    ui_->labelInterpolationResultsStatus->setText(viewer_.queries.isEmpty()
+        ? tr("No interpolation queries. Double-click the diagram in Interpolate mode to add one.")
+        : tr("%1 interpolation quer%2.").arg(viewer_.queries.size()).arg(viewer_.queries.size() == 1 ? QStringLiteral("y") : QStringLiteral("ies")));
+    refreshQueryCanvas();
+    updateViewerActionState();
+}
+
+void MainWindow::refreshQueryCanvas() {
+    const auto selected_ids = selectedTableIds(ui_->tableInterpolationResults, query_id_role);
+    const auto current_id = currentTableId(ui_->tableInterpolationResults, query_id_role);
     QVector<CanvasQuery> queries;
     queries.reserve(viewer_.queries.size());
-    for (qsizetype index = 0; index < viewer_.queries.size(); ++index) {
-        const auto& query = viewer_.queries.at(index);
+    for (const auto& query : viewer_.queries) {
         QPolygonF containing_triangle;
         if (query.result.has_source_rows) {
             for (const auto row_index : {query.result.source_row0, query.result.source_row1, query.result.source_row2}) {
@@ -1539,10 +1702,173 @@ void MainWindow::refreshViewerQueries() {
             }
         }
         queries.append({query.id, QPointF(query.a, query.b), query.result.state,
-                        current.isValid() && current.row() == index, containing_triangle});
+                        selected_ids.contains(query.id), query.id == current_id ? containing_triangle : QPolygonF{}});
     }
     ui_->canvasTernary->setQueries(queries);
-    ui_->canvasTernary->setContainingTriangleVisible(viewer_.show_containing_triangle);
+}
+
+void MainWindow::clearInvariantPoints(const QString& status) {
+    auto* proxy = qobject_cast<QSortFilterProxyModel*>(ui_->tableInvariantPoints->model());
+    auto* model = proxy ? qobject_cast<QStandardItemModel*>(proxy->sourceModel()) : nullptr;
+    if (model) model->removeRows(0, model->rowCount());
+    ui_->labelInvariantPointsStatus->setText(status);
+    ui_->labelInvariantPointsStatus->setStyleSheet(QString());
+}
+
+void MainWindow::refreshInvariantPoints() {
+    TcqtProjectionSummary summary{};
+    const auto summary_status = tcqt_projection_summary(&summary);
+    if (!summary_status.success || !summary.available) {
+        if (ui_->tableInvariantPoints->model()->rowCount() == 0) {
+            clearInvariantPoints(tr("No invariant calculation is available."));
+        } else {
+            ui_->labelInvariantPointsStatus->setText(tr("Recalculating - showing previous result."));
+        }
+        return;
+    }
+    std::uint32_t count = 0;
+    const auto count_status = tcqt_invariant_point_count(&count);
+    if (!count_status.success) {
+        ui_->labelInvariantPointsStatus->setText(tr("Previous invariant result retained; latest calculation failed."));
+        ui_->labelInvariantPointsStatus->setToolTip(statusText(count_status));
+        return;
+    }
+    QVector<TcqtInvariantPoint> points;
+    points.reserve(static_cast<qsizetype>(count));
+    for (std::uint32_t index = 0; index < count; ++index) {
+        TcqtInvariantPoint point{};
+        const auto status = tcqt_invariant_point_at(index, &point);
+        if (!status.success || point.dataset_revision != summary.dataset_revision
+            || point.options_revision != summary.options_revision
+            || point.request_id != summary.request_id) {
+            ui_->labelInvariantPointsStatus->setText(tr("Previous invariant result retained; latest calculation failed."));
+            ui_->labelInvariantPointsStatus->setToolTip(status.success
+                ? tr("Invariant rows did not match the accepted projection snapshot.")
+                : statusText(status));
+            return;
+        }
+        points.append(point);
+    }
+    const auto selected_ids = selectedTableIds(ui_->tableInvariantPoints, invariant_id_role);
+    const auto current_id = currentTableId(ui_->tableInvariantPoints, invariant_id_role);
+    auto* proxy = qobject_cast<QSortFilterProxyModel*>(ui_->tableInvariantPoints->model());
+    auto* model = proxy ? qobject_cast<QStandardItemModel*>(proxy->sourceModel()) : nullptr;
+    if (!model) return;
+    {
+        QSignalBlocker selection_blocker(ui_->tableInvariantPoints->selectionModel());
+        model->removeRows(0, model->rowCount());
+        for (const auto& point : points) {
+            const bool binary = point.kind == 0;
+            const auto dash = QString::fromUtf8("\xE2\x80\x94");
+            QList<QStandardItem*> row;
+            auto* id = resultItem(QString::number(point.id), point.id);
+            id->setData(point.id, invariant_id_role);
+            id->setData(QVariant::fromValue<qulonglong>(point.request_id), projection_request_id_role);
+            row << id
+                << resultItem(binary ? tr("Binary") : tr("Interior"))
+                << resultItem(QLocale::c().toString(point.a, 'g', 12), point.a)
+                << resultItem(QLocale::c().toString(point.b, 'g', 12), point.b)
+                << resultItem(QLocale::c().toString(point.c, 'g', 12), point.c)
+                << resultItem(QLocale::c().toString(point.temperature, 'g', 12), point.temperature)
+                << resultItem(text(point.phases))
+                << resultItem(binary ? text(point.boundary_name) : dash)
+                << resultItem(binary ? QLocale::c().toString(point.boundary_parameter, 'g', 12) : dash,
+                              binary ? QVariant(point.boundary_parameter) : QVariant(0.0), binary ? 0 : 1)
+                << resultItem(QString::number(point.incident_univariant_count), point.incident_univariant_count);
+            model->appendRow(row);
+        }
+        restoreTableSelection(ui_->tableInvariantPoints, invariant_id_role, selected_ids, current_id);
+    }
+    ui_->labelInvariantPointsStatus->setStyleSheet(QString());
+    ui_->labelInvariantPointsStatus->setToolTip(
+        tr("Accepted projection: dataset revision %1, options revision %2, request %3")
+            .arg(summary.dataset_revision).arg(summary.options_revision).arg(summary.request_id));
+    ui_->labelInvariantPointsStatus->setText(count == 0
+        ? tr("No invariant points were found.")
+        : tr("%1 invariant point%2 - accepted projection request %3.")
+              .arg(count).arg(count == 1 ? QString() : QStringLiteral("s")).arg(summary.request_id));
+}
+
+QString MainWindow::selectedRowsAsTsv(const QAbstractItemView* view, bool include_headers) const {
+    const auto* table = qobject_cast<const QTableView*>(view);
+    if (!table || !table->model() || !table->selectionModel()) return {};
+    auto rows = table->selectionModel()->selectedRows(0);
+    std::sort(rows.begin(), rows.end(), [](const QModelIndex& left, const QModelIndex& right) {
+        return left.row() < right.row();
+    });
+    if (rows.isEmpty()) return {};
+    const auto* header = table->horizontalHeader();
+    QStringList lines;
+    const auto line_for_row = [table, header](int row, bool headers) {
+        QStringList values;
+        for (int visual_column = 0; visual_column < header->count(); ++visual_column) {
+            const int column = header->logicalIndex(visual_column);
+            values << (headers
+                ? table->model()->headerData(column, Qt::Horizontal, Qt::DisplayRole).toString()
+                : table->model()->data(table->model()->index(row, column), Qt::DisplayRole).toString());
+        }
+        return values.join(QLatin1Char('\t'));
+    };
+    if (include_headers) lines << line_for_row(0, true);
+    for (const auto& row : rows) lines << line_for_row(row.row(), false);
+    return lines.join(QLatin1Char('\n'));
+}
+
+void MainWindow::copySelectedRows(QAbstractItemView* view, bool include_headers) {
+    const auto data = selectedRowsAsTsv(view, include_headers);
+    if (data.isEmpty()) return;
+    QApplication::clipboard()->setText(data, QClipboard::Clipboard);
+    ui_->statusMain->showMessage(tr("Copied %1 result row%2 as TSV.")
+        .arg(view->selectionModel()->selectedRows(0).size())
+        .arg(view->selectionModel()->selectedRows(0).size() == 1 ? QString() : QStringLiteral("s")), 5000);
+}
+
+void MainWindow::removeSelectedInterpolationQueries() {
+    const auto ids = selectedTableIds(ui_->tableInterpolationResults, query_id_role);
+    if (ids.isEmpty()) return;
+    int adjacent_row = ui_->tableInterpolationResults->currentIndex().isValid()
+        ? ui_->tableInterpolationResults->currentIndex().row() : 0;
+    QVector<ViewerQuery> retained;
+    retained.reserve(viewer_.queries.size());
+    for (const auto& query : viewer_.queries) {
+        if (!ids.contains(query.id)) retained.append(query);
+    }
+    viewer_.queries = std::move(retained);
+    refreshViewerQueries();
+    if (ui_->tableInterpolationResults->model()->rowCount() > 0) {
+        const auto index = ui_->tableInterpolationResults->model()->index(
+            qMin(adjacent_row, ui_->tableInterpolationResults->model()->rowCount() - 1), 0);
+        ui_->tableInterpolationResults->selectionModel()->select(index, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        ui_->tableInterpolationResults->setCurrentIndex(index);
+    }
+    ui_->statusMain->showMessage(tr("Removed %1 interpolation quer%2.")
+        .arg(ids.size()).arg(ids.size() == 1 ? QStringLiteral("y") : QStringLiteral("ies")), 5000);
+}
+
+void MainWindow::clearAllInterpolationQueries() {
+    if (viewer_.queries.isEmpty()) return;
+    if (viewer_.queries.size() > 1
+        && QMessageBox::question(this, tr("Clear all interpolation queries?"),
+            tr("Remove all %1 interpolation queries?").arg(viewer_.queries.size()),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Yes) return;
+    viewer_.queries.clear();
+    refreshViewerQueries();
+    ui_->statusMain->showMessage(tr("Cleared all interpolation queries."), 5000);
+}
+
+void MainWindow::showInterpolationResultsContextMenu(const QPoint& position) {
+    QMenu menu(ui_->tableInterpolationResults);
+    menu.addAction(ui_->actionViewerCopyQueries);
+    menu.addAction(ui_->actionViewerClearSelectedQuery);
+    menu.addSeparator();
+    menu.addAction(ui_->actionViewerClearAllQueries);
+    menu.exec(ui_->tableInterpolationResults->viewport()->mapToGlobal(position));
+}
+
+void MainWindow::showInvariantPointsContextMenu(const QPoint& position) {
+    QMenu menu(ui_->tableInvariantPoints);
+    menu.addAction(ui_->actionViewerCopyInvariantPoints);
+    menu.exec(ui_->tableInvariantPoints->viewport()->mapToGlobal(position));
 }
 
 void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
@@ -1591,7 +1917,10 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::SetSamplingGridVisible: viewer_.show_sampling_grid = ui_->actionViewGrid->isChecked(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetSourceVerticesVisible: viewer_.show_source_vertices = ui_->actionViewSourceVertices->isChecked(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetQueryPointsVisible: viewer_.show_query_points = ui_->actionViewQueryPoints->isChecked(); ui_->canvasTernary->setQueryPointsVisible(viewer_.show_query_points); break;
-    case ViewerWidgetCommand::SetResultsTableVisible: viewer_.show_results_table = ui_->actionViewResultsTable->isChecked(); ui_->tableInterpolationResults->setVisible(viewer_.show_results_table); break;
+    case ViewerWidgetCommand::SetResultsTableVisible:
+        viewer_.show_results_table = ui_->actionViewResultsTable->isChecked();
+        ui_->resultTablesPane->setVisible(viewer_.show_results_table);
+        break;
     case ViewerWidgetCommand::SetStableIsothermsVisible: viewer_.show_stable_isotherms = ui_->actionViewStableIsotherms->isChecked(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetStableUnivariantsVisible: viewer_.show_stable_univariants = ui_->actionViewStableUnivariants->isChecked(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetBinaryInvariantsVisible: viewer_.show_binary_invariants = ui_->actionViewBinaryInvariants->isChecked(); refreshProjectionCanvas(); break;
@@ -1611,10 +1940,20 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::Fit: ui_->canvasTernary->fitTriangleToView(); break;
     case ViewerWidgetCommand::Reset: ui_->canvasTernary->resetView(); break;
     case ViewerWidgetCommand::RestoreLayout:
-        ui_->splitterViewerOuter->setSizes({340, 940}); ui_->splitterViewerControls->setSizes({420, 420}); ui_->splitterViewerRight->setSizes({620, 250}); for (const auto& section : viewer_sections_) section->resetToDefault(); break;
+        ui_->splitterViewerOuter->setSizes({340, 940});
+        ui_->splitterViewerControls->setSizes({420, 420});
+        ui_->splitterViewerRight->setSizes({620, 250});
+        ui_->splitterViewerResultTables->setSizes({550, 450});
+        ui_->tableInterpolationResults->sortByColumn(0, Qt::AscendingOrder);
+        ui_->tableInvariantPoints->sortByColumn(0, Qt::AscendingOrder);
+        for (const auto& section : viewer_sections_) section->resetToDefault();
+        break;
     case ViewerWidgetCommand::RemoveSelectedQuery:
-        if (const auto current = ui_->tableInterpolationResults->currentIndex(); current.isValid() && current.row() < viewer_.queries.size()) viewer_.queries.removeAt(current.row()); refreshViewerQueries(); break;
-    case ViewerWidgetCommand::RemoveAllQueries: viewer_.queries.clear(); refreshViewerQueries(); break;
+        removeSelectedInterpolationQueries();
+        break;
+    case ViewerWidgetCommand::RemoveAllQueries:
+        clearAllInterpolationQueries();
+        break;
     case ViewerWidgetCommand::ResetAutomaticRange:
         viewer_.options.automatic_range = true; schedule_calculation = commitViewerCalculationOptions(action); break;
     default: break;
@@ -1707,7 +2046,8 @@ void MainWindow::syncViewerPanelControls() {
     const auto set_panel = [](QCheckBox* panel, bool checked) { const QSignalBlocker blocker(panel); panel->setChecked(checked); };
     set_checked(ui_->actionViewPlot, viewer_.show_master_plot); set_checked(ui_->actionViewGrid, viewer_.show_sampling_grid);
     set_checked(ui_->actionViewSourceVertices, viewer_.show_source_vertices); set_checked(ui_->actionViewQueryPoints, viewer_.show_query_points);
-    set_checked(ui_->actionViewResultsTable, viewer_.show_results_table); set_checked(ui_->actionViewStableIsotherms, viewer_.show_stable_isotherms);
+    set_checked(ui_->actionViewResultsTable, viewer_.show_results_table); ui_->resultTablesPane->setVisible(viewer_.show_results_table);
+    set_checked(ui_->actionViewStableIsotherms, viewer_.show_stable_isotherms);
     set_checked(ui_->actionViewStableUnivariants, viewer_.show_stable_univariants); set_checked(ui_->actionViewBinaryInvariants, viewer_.show_binary_invariants);
     set_checked(ui_->actionViewInteriorInvariants, viewer_.show_interior_invariants); set_checked(ui_->actionViewAxisLabels, viewer_.show_axis_labels);
     set_checked(ui_->actionViewCornerNames, viewer_.show_corner_names); set_checked(ui_->actionViewLegend, viewer_.show_legend);
@@ -1727,6 +2067,7 @@ void MainWindow::syncViewerPanelControls() {
     { const QSignalBlocker blocker(ui_->editViewerStep); ui_->editViewerStep->setText(QLocale::c().toString(viewer_.options.level_step, 'g', 10)); }
     { const QSignalBlocker blocker(ui_->editViewerRegularizationSpacing); ui_->editViewerRegularizationSpacing->setText(QLocale::c().toString(viewer_.options.regularization_spacing, 'g', 10)); }
 }
+
 void MainWindow::updateViewerActionState() {
     TcqtProjectSummary summary{};
     if (!tcqt_project_summary(&summary).success) return;
@@ -1755,7 +2096,16 @@ void MainWindow::updateViewerActionState() {
     for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerCalculated), static_cast<QWidget*>(ui_->checkViewerExtrapolated), static_cast<QWidget*>(ui_->checkViewerCutOff), static_cast<QWidget*>(ui_->checkViewerMissing), static_cast<QWidget*>(ui_->checkViewerRegularGridEdges), static_cast<QWidget*>(ui_->spinViewerMarkerSize), static_cast<QWidget*>(ui_->comboViewerLabelMode), static_cast<QWidget*>(ui_->spinViewerLabelDecimals), static_cast<QWidget*>(ui_->checkViewerLabelsSelectedOnly)}) control->setEnabled(field_available);
     ui_->actionViewSourceVertices->setEnabled(field_available); ui_->actionViewSourceVertices->setToolTip(field_available ? QString() : tr("Select a grid field first."));
     ui_->actionViewQueryPoints->setEnabled(!viewer_.queries.isEmpty());
-    ui_->actionViewerClearSelectedQuery->setEnabled(ui_->tableInterpolationResults->currentIndex().isValid()); ui_->actionViewerClearAllQueries->setEnabled(!viewer_.queries.isEmpty());
+    const bool has_selected_query = !selectedTableIds(ui_->tableInterpolationResults, query_id_role).isEmpty();
+    const bool has_selected_invariant = !selectedTableIds(ui_->tableInvariantPoints, invariant_id_role).isEmpty();
+    ui_->actionViewerCopyQueries->setEnabled(has_selected_query);
+    ui_->actionViewerClearSelectedQuery->setEnabled(has_selected_query);
+    ui_->actionViewerClearAllQueries->setEnabled(!viewer_.queries.isEmpty());
+    ui_->actionViewerCopyInvariantPoints->setEnabled(has_selected_invariant);
+    ui_->buttonInterpolationCopy->setEnabled(has_selected_query);
+    ui_->buttonInterpolationRemoveSelected->setEnabled(has_selected_query);
+    ui_->buttonInterpolationClearAll->setEnabled(!viewer_.queries.isEmpty());
+    ui_->buttonInvariantCopy->setEnabled(has_selected_invariant);
     for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants}) { action->setEnabled(viewer_.has_last_valid_projection); action->setToolTip(viewer_.has_last_valid_projection ? QString() : unavailable); }
     ui_->buttonViewerResetAutomaticRange->setEnabled(summary.calculation_available);
     for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerAutomaticRange), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->editViewerStep), static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing)}) control->setEnabled(summary.calculation_available);
@@ -1783,6 +2133,9 @@ void MainWindow::scheduleViewerCalculation() {
     viewer_.projection_is_stale = viewer_.has_last_valid_projection;
     if (viewer_.calculation_running) {
         viewer_.pending_recalculation = true;
+        if (ui_->tableInvariantPoints->model()->rowCount() > 0) {
+            ui_->labelInvariantPointsStatus->setText(tr("Recalculating - showing previous result."));
+        }
         setViewerCalculationStatus(tr("Settings changed - recalculation pending"));
         return;
     }
@@ -2031,19 +2384,39 @@ void MainWindow::restoreWindowLayout() {
     QSettings settings("evnekdev", "ternary-contours-qt");
     const auto geometry = settings.value("window/geometry").toByteArray();
     if (!geometry.isEmpty()) QMainWindow::restoreGeometry(geometry);
-    const auto data = settings.value("splitter/data").toByteArray(); if (!data.isEmpty()) ui_->splitterData->restoreState(data);
+    const auto data = settings.value("splitter/data").toByteArray();
+    if (!data.isEmpty()) ui_->splitterData->restoreState(data);
     const auto outer = settings.value("splitter/viewer-outer").toByteArray();
     const auto controls = settings.value("splitter/viewer-controls").toByteArray();
     const auto right = settings.value("splitter/viewer-right").toByteArray();
+    const auto result_tables = settings.value("splitter/viewer-result-tables").toByteArray();
     if (!outer.isEmpty()) ui_->splitterViewerOuter->restoreState(outer); else ui_->splitterViewerOuter->setSizes({340, 940});
     if (!controls.isEmpty()) ui_->splitterViewerControls->restoreState(controls); else ui_->splitterViewerControls->setSizes({420, 420});
     if (!right.isEmpty()) ui_->splitterViewerRight->restoreState(right); else ui_->splitterViewerRight->setSizes({620, 250});
+    if (!result_tables.isEmpty()) ui_->splitterViewerResultTables->restoreState(result_tables); else ui_->splitterViewerResultTables->setSizes({550, 450});
+    const auto restore_sort = [&settings](QTableView* table, const QString& key) {
+        const auto column = qBound(0, settings.value(key + QStringLiteral("/column"), 0).toInt(), table->model()->columnCount() - 1);
+        const auto order = settings.value(key + QStringLiteral("/order"), static_cast<int>(Qt::AscendingOrder)).toInt() == static_cast<int>(Qt::DescendingOrder)
+            ? Qt::DescendingOrder : Qt::AscendingOrder;
+        table->sortByColumn(column, order);
+    };
+    restore_sort(ui_->tableInterpolationResults, QStringLiteral("viewer/interpolation-results-sort"));
+    restore_sort(ui_->tableInvariantPoints, QStringLiteral("viewer/invariant-points-sort"));
     for (const auto& section : viewer_sections_) section->restore();
 }
+
 void MainWindow::saveWindowLayout() {
-    QSettings settings("evnekdev", "ternary-contours-qt"); settings.setValue("window/geometry", QMainWindow::saveGeometry());
+    QSettings settings("evnekdev", "ternary-contours-qt");
+    settings.setValue("window/geometry", QMainWindow::saveGeometry());
     settings.setValue("splitter/data", ui_->splitterData->saveState());
     settings.setValue("splitter/viewer-outer", ui_->splitterViewerOuter->saveState());
     settings.setValue("splitter/viewer-controls", ui_->splitterViewerControls->saveState());
     settings.setValue("splitter/viewer-right", ui_->splitterViewerRight->saveState());
+    settings.setValue("splitter/viewer-result-tables", ui_->splitterViewerResultTables->saveState());
+    const auto save_sort = [&settings](const QTableView* table, const QString& key) {
+        settings.setValue(key + QStringLiteral("/column"), table->horizontalHeader()->sortIndicatorSection());
+        settings.setValue(key + QStringLiteral("/order"), static_cast<int>(table->horizontalHeader()->sortIndicatorOrder()));
+    };
+    save_sort(ui_->tableInterpolationResults, QStringLiteral("viewer/interpolation-results-sort"));
+    save_sort(ui_->tableInvariantPoints, QStringLiteral("viewer/invariant-points-sort"));
 }
