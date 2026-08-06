@@ -7,9 +7,9 @@ use ternary_contours::{
     NumericalTraceSession, NumericalTraceSink, NumericalTraceStage, PathRegularizationOptions,
     PreparedStablePhaseEnsemble, RegularTernaryGrid, RegularTernaryScalarField,
     StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity, StableContourSet,
-    StableGridOptions, StableInvariantNode, StablePhaseEvaluation, StablePhaseEvaluator,
-    StablePhaseId, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, TraceCounts,
-    TraceDecision, TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
+    StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
+    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, TraceCounts, TraceDecision,
+    TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
 };
 
 use crate::{
@@ -1258,13 +1258,13 @@ mod tests {
                 .stable_boundaries
                 .nodes
                 .iter()
-                .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Binary(_)))
                 .count();
             let interior = projection
                 .stable_boundaries
                 .nodes
                 .iter()
-                .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
+                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Interior(_)))
                 .count();
             assert_eq!((binary, interior), (3, 1));
             assert_eq!(projection.stable_boundaries.univariants.len(), 3);
