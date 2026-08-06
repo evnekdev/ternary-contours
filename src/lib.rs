@@ -49,6 +49,8 @@
 pub mod contour;
 mod error;
 pub mod evaluation;
+#[cfg(feature = "cubic-alpha")]
+pub mod extrapolation;
 pub mod field;
 pub mod grid;
 pub mod interpolation;
@@ -117,6 +119,13 @@ pub use evaluation::InterpolatedPartialTernaryField;
 pub use evaluation::{
     FieldEvaluationError, FieldInterpolation, FieldSample, InterpolatedTernaryField,
     InterpolationInspectionResult, InterpolationInspectionState, LocalInterpolationMode,
+};
+#[cfg(feature = "cubic-alpha")]
+pub use extrapolation::{
+    DirectionalEstimate, ExtrapolationDirection, ExtrapolationRejection,
+    RegularMeshExtrapolatedValue, RegularMeshExtrapolationDiagnostics,
+    RegularMeshExtrapolationError, RegularMeshExtrapolationOptions, RegularMeshExtrapolationResult,
+    RejectedExtrapolationVertex, extrapolate_regular_mesh, extrapolate_regular_mesh_with_trace,
 };
 pub use field::{CubicBuildDiagnostics, CubicGridField};
 #[cfg(feature = "cubic-alpha")]

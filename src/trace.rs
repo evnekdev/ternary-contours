@@ -183,6 +183,16 @@ pub enum NumericalTraceEventKind {
     RegularizationSpacingUpdated,
     RegularizationCompleted,
     RegularizationFailed,
+    MeshExtrapolationStarted,
+    ExtrapolationLayerStarted,
+    ExtrapolationDirectionStarted,
+    ExtrapolationSupportCollected,
+    ExtrapolationDirectionAccepted,
+    ExtrapolationDirectionRejected,
+    ExtrapolationVertexAccepted,
+    ExtrapolationVertexRejected,
+    ExtrapolationLayerCompleted,
+    MeshExtrapolationCompleted,
     InvalidOptions,
     NoPhaseDefined,
     BinaryDiscoveryResolutionExhausted,
@@ -213,6 +223,8 @@ pub enum NumericalTraceStage {
     Univariant,
     Contour,
     Regularization,
+    /// Regular-grid, provenance-preserving source extrapolation.
+    Extrapolation,
     Error,
 }
 
