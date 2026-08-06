@@ -252,6 +252,15 @@ struct AuditStableTopologyArgs {
     regularize: bool,
     #[arg(long)]
     regularization_spacing: Option<f64>,
+    /// Source evaluator used by the same projection pipeline as the Viewer.
+    #[arg(long, value_enum, default_value_t = SourceInterpolationArg::CubicAlpha)]
+    source_interpolation: SourceInterpolationArg,
+    #[arg(long, value_enum, default_value_t = CubicMethodArg::Akima)]
+    cubic_method: CubicMethodArg,
+    #[arg(long, value_enum, default_value_t = PartialDomainArg::OneSidedThenLinear)]
+    partial_domain_policy: PartialDomainArg,
+    #[arg(long, value_enum, default_value_t = ContinuationArg::Muggianu)]
+    continuation: ContinuationArg,
 }
 
 #[derive(Args)]
@@ -314,13 +323,13 @@ enum TraceBoundaryArg {
     Ca,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum SourceInterpolationArg {
     Linear,
     CubicAlpha,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum CubicMethodArg {
     Akima,
     Makima,
@@ -328,7 +337,7 @@ enum CubicMethodArg {
     Steffen,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum PartialDomainArg {
     StrictCubic,
     OneSidedCubic,
@@ -336,7 +345,7 @@ enum PartialDomainArg {
     LinearNearBoundaries,
 }
 
-#[derive(Clone, Copy, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 enum ContinuationArg {
     RawBarycentric,
     Muggianu,
@@ -670,26 +679,191 @@ fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<d
     }
     Ok(())
 }
+#[derive(Clone, Debug)]
+struct AuditTopologySignature {
+    exact: String,
+    tolerance_aware: String,
+    topology: String,
+}
+
+fn fnv1a64(bytes: impl IntoIterator<Item = u8>) -> u64 {
+    bytes
+        .into_iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        })
+}
+
+fn audit_logical_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
+    let left = [left[1] + 0.5 * left[2], 0.866_025_403_784_438_6 * left[2]];
+    let right = [
+        right[1] + 0.5 * right[2],
+        0.866_025_403_784_438_6 * right[2],
+    ];
+    (left[0] - right[0]).hypot(left[1] - right[1])
+}
+
+fn phase_signature(node: &StableInvariantNode) -> String {
+    let mut phases = node
+        .phases()
+        .iter()
+        .map(|phase| phase.0)
+        .collect::<Vec<_>>();
+    phases.sort_unstable();
+    phases
+        .into_iter()
+        .map(|phase| phase.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn node_signature(
+    node: &StableInvariantNode,
+    degree: usize,
+    decimal_places: usize,
+    include_geometry: bool,
+) -> String {
+    let kind = if matches!(node, StableInvariantNode::Binary(_)) {
+        "binary"
+    } else {
+        "interior"
+    };
+    let phases = phase_signature(node);
+    if include_geometry {
+        let point = node.point().as_array();
+        format!(
+            "{kind}:{phases}:{degree}:{:.precision$}:{:.precision$}:{:.precision$}:{:.precision$}",
+            point[0],
+            point[1],
+            point[2],
+            node.temperature(),
+            precision = decimal_places,
+        )
+    } else {
+        format!("{kind}:{phases}:{degree}")
+    }
+}
+
+fn stable_topology_signature(
+    projection: &ternary_contours_cli::LiquidusProjection,
+) -> AuditTopologySignature {
+    let boundary = &projection.stable_boundaries;
+    let exact_nodes = boundary
+        .nodes
+        .iter()
+        .map(|node| {
+            node_signature(
+                node,
+                boundary
+                    .incident_univariants(node.id())
+                    .map_or(0, |edges| edges.len()),
+                12,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let tolerance_nodes = boundary
+        .nodes
+        .iter()
+        .map(|node| {
+            node_signature(
+                node,
+                boundary
+                    .incident_univariants(node.id())
+                    .map_or(0, |edges| edges.len()),
+                3,
+                true,
+            )
+        })
+        .collect::<Vec<_>>();
+    let topology_nodes = boundary
+        .nodes
+        .iter()
+        .map(|node| {
+            node_signature(
+                node,
+                boundary
+                    .incident_univariants(node.id())
+                    .map_or(0, |edges| edges.len()),
+                0,
+                false,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let edge_records = |nodes: &[String]| {
+        let mut records = boundary
+            .univariants
+            .iter()
+            .map(|path| {
+                let mut endpoints = [nodes[path.start.0].clone(), nodes[path.end.0].clone()];
+                endpoints.sort();
+                format!(
+                    "{}-{}:{}:{}",
+                    path.phases.first.0, path.phases.second.0, endpoints[0], endpoints[1]
+                )
+            })
+            .collect::<Vec<_>>();
+        records.sort();
+        records
+    };
+    AuditTopologySignature {
+        exact: format!(
+            "{}|{}",
+            exact_nodes.join(";"),
+            edge_records(&exact_nodes).join(";")
+        ),
+        tolerance_aware: format!(
+            "{}|{}",
+            tolerance_nodes.join(";"),
+            edge_records(&tolerance_nodes).join(";")
+        ),
+        topology: format!(
+            "{}|{}",
+            topology_nodes.join(";"),
+            edge_records(&topology_nodes).join(";")
+        ),
+    }
+}
+
+fn audit_interpolation_options(
+    args: &AuditStableTopologyArgs,
+) -> ternary_contours_cli::InterpolationOptions {
+    let source = match args.source_interpolation {
+        SourceInterpolationArg::Linear => ternary_contours_cli::SourceInterpolation::Linear,
+        SourceInterpolationArg::CubicAlpha => {
+            ternary_contours_cli::SourceInterpolation::CubicAlpha {
+                method: args.cubic_method.into(),
+                continuation: args.continuation.into(),
+            }
+        }
+    };
+    ternary_contours_cli::InterpolationOptions {
+        source,
+        partial_domain_policy: args.partial_domain_policy.into(),
+    }
+}
+
 fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Error>> {
     if args.repeat_count == 0 || args.sampling_subdivisions.is_empty() {
         return Err("repeat count and sampling subdivisions must be positive".into());
     }
     std::fs::create_dir_all(&args.output)?;
     let input_bytes = std::fs::read(&args.input)?;
-    let input_hash = input_bytes
-        .iter()
-        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
-            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
+    let input_hash = fnv1a64(input_bytes.iter().copied());
     let dataset = parse_path(&args.input)?;
+    let interpolation = audit_interpolation_options(&args);
     let mut runs = String::from(
-        "sampling\trepeat\tstatus\tsignature\tbinary\tinterior\tunivariants\ttruncated\tregularization_failures\n",
+        "sampling\trepeat\tstatus\texact_hash\ttolerance_hash\ttopology_hash\tbinary\tinterior\tunivariants\ttruncated\tregularization_failures\n",
     );
     let mut invariants =
-        String::from("sampling\trepeat\tkind\tphases\ta\tb\tc\ttemperature\tdegree\n");
-    let mut univariants = String::from("sampling\trepeat\tphases\tstart\tend\traw_points\tstate\n");
+        String::from("sampling\trepeat\tid\tkind\tphases\ta\tb\tc\ttemperature\tdegree\n");
+    let mut univariants = String::from(
+        "sampling\trepeat\tid\tphases\tstart\tend\traw_points\tlogical_length\tstate\n",
+    );
     let mut failures = String::from("sampling\trepeat\tpath\tphases\terror\n");
-    let mut signatures = Vec::new();
+    let mut signatures = Vec::<(usize, usize, AuditTopologySignature)>::new();
+    let mut failures_by_run = 0usize;
     for &sampling in &args.sampling_subdivisions {
         for repeat in 0..args.repeat_count {
             let options = ProjectionOptions {
@@ -697,56 +871,16 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                 sampling_subdivisions: Some(sampling),
                 regularize: args.regularize,
                 regularization_spacing: args.regularization_spacing,
+                interpolation,
                 ..ProjectionOptions::default()
             };
             match calculate_projection(&dataset, &options) {
                 Ok(projection) => {
-                    let mut node_records = projection
-                        .stable_boundaries
-                        .nodes
-                        .iter()
-                        .map(|node| {
-                            let kind = if matches!(node, StableInvariantNode::Binary(_)) {
-                                "binary"
-                            } else {
-                                "interior"
-                            };
-                            let mut phases = node
-                                .phases()
-                                .iter()
-                                .map(|phase| phase.0)
-                                .collect::<Vec<_>>();
-                            phases.sort();
-                            let point = node.point().as_array();
-                            format!(
-                                "{kind}:{phases:?}:{:.10}:{:.10}:{:.10}:{:.8}",
-                                point[0],
-                                point[1],
-                                point[2],
-                                node.temperature()
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    node_records.sort();
-                    let mut edge_records = projection
-                        .stable_boundaries
-                        .univariants
-                        .iter()
-                        .map(|path| {
-                            let mut phases = [path.phases.first.0, path.phases.second.0];
-                            phases.sort();
-                            format!(
-                                "{:?}:{}:{}",
-                                phases,
-                                path.start.0.min(path.end.0),
-                                path.start.0.max(path.end.0)
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    edge_records.sort();
-                    let signature =
-                        format!("{}|{}", node_records.join(";"), edge_records.join(";"));
-                    signatures.push((sampling, repeat, signature.clone()));
+                    let signature = stable_topology_signature(&projection);
+                    let exact_hash = fnv1a64(signature.exact.bytes());
+                    let tolerance_hash = fnv1a64(signature.tolerance_aware.bytes());
+                    let topology_hash = fnv1a64(signature.topology.bytes());
+                    signatures.push((sampling, repeat, signature));
                     let binary = projection
                         .stable_boundaries
                         .nodes
@@ -754,7 +888,12 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                         .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
                         .count();
                     let interior = projection.stable_boundaries.nodes.len() - binary;
-                    runs.push_str(&format!("{sampling}\t{repeat}\tok\t{signature:?}\t{binary}\t{interior}\t{}\t{}\t{}\n", projection.stable_boundaries.univariants.len(), projection.stable_boundaries.truncated_univariants.len(), projection.stable_boundaries.regularization_failures.len()));
+                    runs.push_str(&format!(
+                        "{sampling}\t{repeat}\tok\t{exact_hash:016x}\t{tolerance_hash:016x}\t{topology_hash:016x}\t{binary}\t{interior}\t{}\t{}\t{}\n",
+                        projection.stable_boundaries.univariants.len(),
+                        projection.stable_boundaries.truncated_univariants.len(),
+                        projection.stable_boundaries.regularization_failures.len(),
+                    ));
                     for node in &projection.stable_boundaries.nodes {
                         let kind = if matches!(node, StableInvariantNode::Binary(_)) {
                             "binary"
@@ -762,17 +901,19 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                             "interior"
                         };
                         let point = node.point().as_array();
-                        let phases = node
-                            .phases()
-                            .iter()
-                            .map(|phase| phase.0.to_string())
-                            .collect::<Vec<_>>()
-                            .join(",");
                         let degree = projection
                             .stable_boundaries
                             .incident_univariants(node.id())?
                             .len();
-                        invariants.push_str(&format!("{sampling}\t{repeat}\t{kind}\t{phases}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\n",point[0],point[1],point[2],node.temperature()));
+                        invariants.push_str(&format!(
+                            "{sampling}\t{repeat}\t{}\t{kind}\t{}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\n",
+                            node.id().0,
+                            phase_signature(node),
+                            point[0],
+                            point[1],
+                            point[2],
+                            node.temperature(),
+                        ));
                     }
                     for path in &projection.stable_boundaries.univariants {
                         let state = match projection
@@ -786,13 +927,21 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                                 "raw_fallback"
                             }
                         };
+                        let logical_length = path
+                            .points
+                            .windows(2)
+                            .map(|points| {
+                                audit_logical_distance(points[0].as_array(), points[1].as_array())
+                            })
+                            .sum::<f64>();
                         univariants.push_str(&format!(
-                            "{sampling}\t{repeat}\t{},{}\t{}\t{}\t{}\t{state}\n",
+                            "{sampling}\t{repeat}\t{}\t{},{}\t{}\t{}\t{}\t{logical_length:.16}\t{state}\n",
+                            path.id.0,
                             path.phases.first.0,
                             path.phases.second.0,
                             path.start.0,
                             path.end.0,
-                            path.points.len()
+                            path.points.len(),
                         ));
                     }
                     for failure in &projection.stable_boundaries.regularization_failures {
@@ -801,35 +950,76 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                             failure.path.0,
                             failure.phases.first.0,
                             failure.phases.second.0,
-                            failure.error
+                            failure.error,
                         ));
                     }
                 }
-                Err(error) => runs.push_str(&format!(
-                    "{sampling}\t{repeat}\terror\t{:?}\t0\t0\t0\t0\t0\n",
-                    error.to_string()
-                )),
+                Err(error) => {
+                    failures_by_run += 1;
+                    runs.push_str(&format!(
+                        "{sampling}\t{repeat}\terror\t\t\t\t0\t0\t0\t0\t0\t{}\n",
+                        error.to_string().replace(['\t', '\n'], " "),
+                    ));
+                }
             }
         }
     }
-    let repeatable = signatures
+    if signatures.is_empty() {
+        return Err("every audit calculation failed; no topology report was accepted (for partial cubic sources build the CLI with `--features trace`)".into());
+    }
+    let repeatable_at_20 = signatures
         .iter()
         .filter(|(sampling, _, _)| *sampling == 20)
-        .map(|(_, _, signature)| signature)
+        .map(|(_, _, signature)| &signature.exact)
         .collect::<std::collections::BTreeSet<_>>()
         .len()
-        <= 1;
+        == 1;
+    let mut first_by_sampling = std::collections::BTreeMap::<usize, &AuditTopologySignature>::new();
+    for (sampling, repeat, signature) in &signatures {
+        if *repeat == 0 {
+            first_by_sampling.insert(*sampling, signature);
+        }
+    }
+    let baseline = first_by_sampling.get(&20).copied();
+    let mut comparison = String::from(
+        "| Sampling | Exact hash | Tolerance hash | Topology hash | Compared with sampling 20 |\n|---:|---|---|---|---|\n",
+    );
+    for (sampling, signature) in &first_by_sampling {
+        let exact_hash = fnv1a64(signature.exact.bytes());
+        let tolerance_hash = fnv1a64(signature.tolerance_aware.bytes());
+        let topology_hash = fnv1a64(signature.topology.bytes());
+        let classification = baseline.map_or("no sampling-20 baseline", |baseline| {
+            if signature.topology != baseline.topology {
+                "topology changed"
+            } else if signature.tolerance_aware != baseline.tolerance_aware {
+                "same topology, geometry moved"
+            } else if signature.exact != baseline.exact {
+                "same topology, sub-tolerance geometry moved"
+            } else {
+                "identical"
+            }
+        });
+        comparison.push_str(&format!(
+            "| {sampling} | `{exact_hash:016x}` | `{tolerance_hash:016x}` | `{topology_hash:016x}` | {classification} |\n"
+        ));
+    }
+    let regularization_spacing = args
+        .regularization_spacing
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "null".into());
     let summary = format!(
-        "{{\n  \"input\": {:?},\n  \"fnv1a64\": \"{:016x}\",\n  \"repeatable_at_20\": {},\n  \"runs\": {}\n}}\n",
+        "{{\n  \"input\": {:?},\n  \"fnv1a64\": \"{input_hash:016x}\",\n  \"repeatable_at_20\": {repeatable_at_20},\n  \"successful_runs\": {},\n  \"failed_runs\": {failures_by_run},\n  \"options\": {{\n    \"source_interpolation\": \"{:?}\",\n    \"cubic_method\": \"{:?}\",\n    \"partial_domain_policy\": \"{:?}\",\n    \"continuation\": \"{:?}\",\n    \"regularize\": {},\n    \"regularization_spacing\": {regularization_spacing}\n  }}\n}}\n",
         args.input,
-        input_hash,
-        repeatable,
-        signatures.len()
+        signatures.len(),
+        args.source_interpolation,
+        args.cubic_method,
+        args.partial_domain_policy,
+        args.continuation,
+        args.regularize,
     );
     let report = format!(
-        "# Stable topology audit\n\nInput: `{}`\n\nRepeatable at sampling 20: **{}**.\n\nCanonical signatures are stored in `runs.tsv`; node and edge details are stored separately.\n",
+        "# Stable topology audit\n\nInput: `{}`\n\nFNV-1a-64 input hash: `{input_hash:016x}`.\n\nRepeatable at sampling 20: **{repeatable_at_20}**. The exact hash is deterministic for one fixed build and options; the tolerance-aware hash rounds node geometry to 0.001 only for cross-resolution comparison. The topology hash excludes geometry and records stable phase sets, incidence degrees, and phase-pair connectivity.\n\n{comparison}\n\nCanonical node and edge details are stored separately in `invariants.tsv` and `univariants.tsv`. A `raw_fallback` geometry state means raw topology was accepted but optional regularization failed for that path.\n",
         args.input.display(),
-        repeatable
     );
     std::fs::write(args.output.join("summary.json"), summary)?;
     std::fs::write(args.output.join("runs.tsv"), runs)?;
