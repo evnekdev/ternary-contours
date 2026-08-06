@@ -7,9 +7,9 @@ use ternary_contours::{
     NumericalTraceSession, NumericalTraceSink, NumericalTraceStage, PathRegularizationOptions,
     PreparedStablePhaseEnsemble, RegularTernaryGrid, RegularTernaryScalarField,
     StableBoundaryNetwork, StableBoundaryOptions, StableContourQuantity, StableContourSet,
-    StableGridOptions, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
-    StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, TraceCounts, TraceDecision,
-    TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
+    StableGridOptions, StableInvariantNode, StablePhaseEvaluation, StablePhaseEvaluator,
+    StablePhaseId, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource, TraceCounts,
+    TraceDecision, TraceRunCompleted, TraceRunFailed, TraceRunStarted, decision,
 };
 
 use crate::{
@@ -1232,6 +1232,58 @@ mod tests {
         assert!(started.interpolation.contains("CubicAlpha"));
         assert_eq!(started.partial_domain_policy, "OneSidedThenLinear");
         assert_eq!(started.continuation, "Muggianu");
+    }
+
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn detailed_ex_cao_pbo_zno_has_verified_stable_topology_at_20_and_40() {
+        let dataset = parse_str(include_str!(
+            "../../../calculations/CaO-PbO-ZnO_detailed.tct"
+        ))
+        .expect("committed detailed EX fixture parses");
+        for sampling_subdivisions in [20, 40] {
+            let projection = calculate_projection(
+                &dataset,
+                &ProjectionOptions {
+                    automatic_level_step: Some(100.0),
+                    sampling_subdivisions: Some(sampling_subdivisions),
+                    interpolation: InterpolationOptions::default(),
+                    ..ProjectionOptions::default()
+                },
+            )
+            .unwrap_or_else(|error| {
+                panic!("detailed EX fixture at sampling {sampling_subdivisions} failed: {error}")
+            });
+            let binary = projection
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+                .count();
+            let interior = projection
+                .stable_boundaries
+                .nodes
+                .iter()
+                .filter(|node| matches!(node, StableInvariantNode::Interior(_)))
+                .count();
+            assert_eq!((binary, interior), (3, 1));
+            assert_eq!(projection.stable_boundaries.univariants.len(), 3);
+            assert_eq!(projection.stable_boundaries.truncated_univariants.len(), 0);
+            assert_eq!(
+                projection
+                    .stable_boundaries
+                    .interior_invariant_verifications
+                    .len(),
+                1
+            );
+            let verification = &projection
+                .stable_boundaries
+                .interior_invariant_verifications[0];
+            assert!(
+                verification.maximum_equality_residual <= 1.0e-9,
+                "{verification:?}"
+            );
+        }
     }
 
     #[test]
