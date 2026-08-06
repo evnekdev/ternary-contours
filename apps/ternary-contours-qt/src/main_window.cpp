@@ -1117,8 +1117,8 @@ void MainWindow::showViewerMeshExtrapolationDialog(
     layout->addWidget(result);
     auto* preview_table = new QTableWidget(&dialog);
     preview_table->setObjectName(QStringLiteral("tableViewerExtrapolationPreview"));
-    preview_table->setColumnCount(12);
-    preview_table->setHorizontalHeaderLabels({tr("Field"), tr("Row"), tr("A"), tr("B"), tr("C"), tr("Old state"), tr("Proposed value"), tr("EX layer"), tr("Method"), tr("Support"), tr("Spread"), tr("Status")});
+    preview_table->setColumnCount(13);
+    preview_table->setHorizontalHeaderLabels({tr("Field"), tr("Row"), tr("A"), tr("B"), tr("C"), tr("Old state"), tr("Proposed value"), tr("EX layer"), tr("Method"), tr("Support"), tr("Spread"), tr("Status"), tr("Directional estimates")});
     preview_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
     preview_table->setSelectionBehavior(QAbstractItemView::SelectRows);
     preview_table->horizontalHeader()->setStretchLastSection(true);
@@ -1186,6 +1186,7 @@ void MainWindow::showViewerMeshExtrapolationDialog(
             set(7, row.has_value ? QStringLiteral("EX%1").arg(row.layer) : QStringLiteral("-")); set(8, row.has_value ? method_name(row.method) : QStringLiteral("-"));
             set(9, row.has_value ? QString::number(row.support_count) : QStringLiteral("-")); set(10, row.has_value ? QLocale::c().toString(row.spread, 'g', 8) : QStringLiteral("-"));
             set(11, row.status == 0 ? tr("Requested") : row.status == 1 ? tr("Dependency") : row.status == 2 ? tr("Proposed") : tr("Rejected: %1").arg(text(row.reason)));
+            set(12, row.has_value ? text(row.directional_estimates) : QString());
         }
         materialize->setEnabled(summary.values_proposed > 0);
     });

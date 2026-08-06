@@ -96,6 +96,7 @@ struct TcqtMeshExtrapolationPreviewRow {
     double spread;
     char property[128];
     char reason[512];
+    char directional_estimates[512];
 };
 struct TcqtCell { std::uint32_t state; bool has_value; double value; std::uint32_t extrapolation_layer; std::uint32_t extrapolation_method; std::uint32_t extrapolation_support_count; double extrapolation_spread; char note[128]; };
 struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; std::uint32_t path_source; char phase_1[128]; char phase_2[128]; char line_id[128]; };

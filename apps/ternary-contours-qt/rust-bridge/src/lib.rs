@@ -290,6 +290,7 @@ pub struct TcqtMeshExtrapolationPreviewRow {
     pub spread: f64,
     pub property: [u8; NAME],
     pub reason: [u8; MESSAGE],
+    pub directional_estimates: [u8; MESSAGE],
 }
 #[repr(C)]
 pub struct TcqtCell {
@@ -1604,6 +1605,31 @@ fn preview_row(
                     spread: value.spread,
                     property: bytes(&preview_field.property),
                     reason: [0; MESSAGE],
+                    directional_estimates: bytes(
+                        &value
+                            .directional_estimates
+                            .iter()
+                            .map(|estimate| {
+                                let rows = estimate
+                                    .support_vertex_indices
+                                    .iter()
+                                    .map(|row| (row + 1).to_string())
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                let samples = estimate
+                                    .support_values
+                                    .iter()
+                                    .map(|sample| format!("{sample:.8}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                format!(
+                                    "{:?}: rows [{rows}], values [{samples}] -> {:.8}",
+                                    estimate.direction, estimate.value
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    ),
                 });
             }
             current += 1;
@@ -1642,6 +1668,7 @@ fn preview_row(
                             .collect::<Vec<_>>()
                             .join("; "),
                     ),
+                    directional_estimates: [0; MESSAGE],
                 });
             }
             current += 1;
