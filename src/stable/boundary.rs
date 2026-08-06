@@ -419,6 +419,10 @@ pub struct StableBoundaryDiagnostics {
     pub interior_invariants_accepted: usize,
     pub known_invariants_revisited: usize,
     pub metastable_invariant_candidates_rejected: usize,
+    /// Continuous P=Q=P=R triplets attempted from pair fragments.
+    pub pair_driven_invariant_candidates: usize,
+    /// Pair-driven continuous roots accepted and attached to all incident pairs.
+    pub pair_driven_invariants_accepted: usize,
     pub directed_traversal_rejections: usize,
     pub maximum_trace_length: usize,
 }
@@ -1758,7 +1762,7 @@ fn match_binary_endpoints(
     sampling_subdivisions: usize,
     options: StableBoundaryOptions,
 ) -> Result<(), StableBoundaryError> {
-    for fragment in fragments {
+    for fragment in fragments.iter_mut() {
         for endpoint in &mut fragment.endpoints {
             let TraceFeature::StableBoundary(boundary, parameter) = endpoint.feature else {
                 continue;
@@ -1827,13 +1831,511 @@ fn canonical_nodes(
     Ok(nodes)
 }
 
-fn canonicalize_interior_nodes(
-    fragments: &mut [LocalBoundaryFragment],
+#[derive(Clone, Debug)]
+struct PairDrivenInvariantCandidate {
+    point: TernaryCoordinate,
+    temperature: f64,
+    phases: Vec<StablePhaseId>,
+    patch: BTreeSet<usize>,
+}
+
+fn triangle_patch(
+    triangle: usize,
+    topology: &RegularSamplingTopology,
+) -> Result<BTreeSet<usize>, StableBoundaryError> {
+    let mut patch = BTreeSet::from([triangle]);
+    for edge in topology.triangle_edges(triangle)? {
+        if let Some(neighbour) = topology.opposite_triangle(edge.edge, triangle)? {
+            patch.insert(neighbour);
+        }
+    }
+    Ok(patch)
+}
+
+fn triangle_centroid(
+    cells: &[super::partition::StableSamplingCell],
+    triangle: usize,
+) -> Result<TernaryCoordinate, StableBoundaryError> {
+    let cell = cells
+        .iter()
+        .find(|cell| cell.triangle.id == triangle)
+        .ok_or_else(|| StableBoundaryError::InvalidRegularGridTopology {
+            message: format!("sampling triangle {triangle} is absent from the stable partition"),
+        })?;
+    Ok(TernaryCoordinate::from([
+        (cell.vertices[0][0] + cell.vertices[1][0] + cell.vertices[2][0]) / 3.0,
+        (cell.vertices[0][1] + cell.vertices[1][1] + cell.vertices[2][1]) / 3.0,
+        (cell.vertices[0][2] + cell.vertices[1][2] + cell.vertices[2][2]) / 3.0,
+    ]))
+}
+
+fn valid_simplex_point(point: TernaryCoordinate, tolerance: f64) -> bool {
+    let [a, b, c] = point.as_array();
+    a.is_finite()
+        && b.is_finite()
+        && c.is_finite()
+        && a >= -tolerance
+        && b >= -tolerance
+        && c >= -tolerance
+        && (a + b + c - 1.0).abs() <= tolerance * 8.0
+}
+
+fn pair_driven_values(
+    layers: &[PreparedSourceLayer<'_>],
+    pair: StablePhasePair,
+    third: StablePhaseId,
+    point: TernaryCoordinate,
+) -> Result<Option<[f64; 3]>, StableBoundaryError> {
+    let Some(first) = phase_value_at(layers, pair.first, point)? else {
+        return Ok(None);
+    };
+    let Some(second) = phase_value_at(layers, pair.second, point)? else {
+        return Ok(None);
+    };
+    let Some(third) = phase_value_at(layers, third, point)? else {
+        return Ok(None);
+    };
+    Ok(Some([first, second, third]))
+}
+
+fn point_in_triangle_patch(
+    point: TernaryCoordinate,
+    patch: &BTreeSet<usize>,
+    samples: &super::sample::RegularSamplingGrid,
+) -> Result<bool, StableBoundaryError> {
+    let location = samples.grid.locate(point.as_array()).map_err(|error| {
+        StableBoundaryError::InvalidRegularGridTopology {
+            message: error.to_string(),
+        }
+    })?;
+    Ok(patch.contains(&location.triangle.id))
+}
+
+fn pair_driven_invariant_root(
+    pair: StablePhasePair,
+    third: StablePhaseId,
+    seed: TernaryCoordinate,
+    patch: &BTreeSet<usize>,
+    layers: &[PreparedSourceLayer<'_>],
+    phase_ids: &[StablePhaseId],
+    samples: &super::sample::RegularSamplingGrid,
+    options: StableBoundaryOptions,
+) -> Result<Option<(TernaryCoordinate, f64)>, StableBoundaryError> {
+    let mut point = seed;
+    const MAX_ITERATIONS: usize = 32;
+    const DIFFERENCE_STEP: f64 = 1.0e-6;
+    let residual_limit = options.temperature_tolerance.max(1.0e-8);
+    for _ in 0..MAX_ITERATIONS {
+        if !valid_simplex_point(point, options.geometry_tolerance)
+            || !point_in_triangle_patch(point, patch, samples)?
+        {
+            return Ok(None);
+        }
+        let Some(values) = pair_driven_values(layers, pair, third, point)? else {
+            return Ok(None);
+        };
+        let residual = [values[0] - values[1], values[0] - values[2]];
+        if residual[0].abs().max(residual[1].abs()) <= residual_limit {
+            let maximum = phase_ids
+                .iter()
+                .try_fold(f64::NEG_INFINITY, |maximum, phase| {
+                    let Some(value) = phase_value_at(layers, *phase, point)? else {
+                        return Ok::<_, StableBoundaryError>(maximum);
+                    };
+                    Ok(maximum.max(value))
+                })?;
+            let common = (values[0] + values[1] + values[2]) / 3.0;
+            if maximum <= common + options.stability_tolerance {
+                return Ok(Some((point, common)));
+            }
+            return Ok(None);
+        }
+        let [a, b, c] = point.as_array();
+        let b_point = TernaryCoordinate::new(a - DIFFERENCE_STEP, b + DIFFERENCE_STEP, c);
+        let c_point = TernaryCoordinate::new(a - DIFFERENCE_STEP, b, c + DIFFERENCE_STEP);
+        if !valid_simplex_point(b_point, options.geometry_tolerance)
+            || !valid_simplex_point(c_point, options.geometry_tolerance)
+        {
+            return Ok(None);
+        }
+        let Some(b_values) = pair_driven_values(layers, pair, third, b_point)? else {
+            return Ok(None);
+        };
+        let Some(c_values) = pair_driven_values(layers, pair, third, c_point)? else {
+            return Ok(None);
+        };
+        let jacobian = [
+            [
+                (b_values[0] - b_values[1] - residual[0]) / DIFFERENCE_STEP,
+                (c_values[0] - c_values[1] - residual[0]) / DIFFERENCE_STEP,
+            ],
+            [
+                (b_values[0] - b_values[2] - residual[1]) / DIFFERENCE_STEP,
+                (c_values[0] - c_values[2] - residual[1]) / DIFFERENCE_STEP,
+            ],
+        ];
+        let determinant = jacobian[0][0] * jacobian[1][1] - jacobian[0][1] * jacobian[1][0];
+        if !determinant.is_finite() || determinant.abs() <= 1.0e-14 {
+            return Ok(None);
+        }
+        let delta_b = (residual[0] * jacobian[1][1] - residual[1] * jacobian[0][1]) / determinant;
+        let delta_c = (jacobian[0][0] * residual[1] - jacobian[1][0] * residual[0]) / determinant;
+        let mut accepted = None;
+        for backtrack in 0..=12 {
+            let scale = 0.5f64.powi(backtrack);
+            let candidate = TernaryCoordinate::new(
+                a + scale * (delta_b + delta_c),
+                b - scale * delta_b,
+                c - scale * delta_c,
+            );
+            if !valid_simplex_point(candidate, options.geometry_tolerance)
+                || !point_in_triangle_patch(candidate, patch, samples)?
+            {
+                continue;
+            }
+            let Some(candidate_values) = pair_driven_values(layers, pair, third, candidate)? else {
+                continue;
+            };
+            let candidate_norm = (candidate_values[0] - candidate_values[1])
+                .abs()
+                .max((candidate_values[0] - candidate_values[2]).abs());
+            if candidate_norm < residual[0].abs().max(residual[1].abs()) {
+                accepted = Some(candidate);
+                break;
+            }
+        }
+        let Some(candidate) = accepted else {
+            return Ok(None);
+        };
+        point = candidate;
+    }
+    Ok(None)
+}
+
+fn pair_driven_interior_candidates(
+    fragments: &[LocalBoundaryFragment],
+    cells: &[super::partition::StableSamplingCell],
+    topology: &RegularSamplingTopology,
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    layers: &[PreparedSourceLayer<'_>],
+    options: StableBoundaryOptions,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<Vec<PairDrivenInvariantCandidate>, StableBoundaryError> {
+    let mut candidates = Vec::new();
+    for fragment in fragments {
+        // A sampled triple tie is already a deterministic high-priority seed for
+        // the existing canonicalization path. Pair-driven discovery is only the
+        // recovery path for the formerly invisible continuous intersections.
+        if fragment
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.tied_phases.len() >= 3)
+        {
+            continue;
+        }
+        let patch = triangle_patch(fragment.triangle, topology)?;
+        let mut seeds = vec![
+            fragment.endpoints[0].point,
+            fragment.endpoints[1].point,
+            TernaryCoordinate::from([
+                0.5 * (fragment.endpoints[0].point.as_array()[0]
+                    + fragment.endpoints[1].point.as_array()[0]),
+                0.5 * (fragment.endpoints[0].point.as_array()[1]
+                    + fragment.endpoints[1].point.as_array()[1]),
+                0.5 * (fragment.endpoints[0].point.as_array()[2]
+                    + fragment.endpoints[1].point.as_array()[2]),
+            ]),
+        ];
+        for triangle in &patch {
+            seeds.push(triangle_centroid(cells, *triangle)?);
+        }
+        seeds.sort_by(|left, right| {
+            left.as_array()[0]
+                .total_cmp(&right.as_array()[0])
+                .then_with(|| left.as_array()[1].total_cmp(&right.as_array()[1]))
+                .then_with(|| left.as_array()[2].total_cmp(&right.as_array()[2]))
+        });
+        seeds.dedup_by(|left, right| {
+            composition_distance(*left, *right) <= options.geometry_tolerance
+        });
+        for third in phase_ids
+            .iter()
+            .copied()
+            .filter(|phase| !fragment.pair.contains(*phase))
+        {
+            diagnostics.interior_invariant_candidates += 1;
+            diagnostics.pair_driven_invariant_candidates += 1;
+            for seed in &seeds {
+                let Some((point, temperature)) = pair_driven_invariant_root(
+                    fragment.pair,
+                    third,
+                    *seed,
+                    &patch,
+                    layers,
+                    phase_ids,
+                    samples,
+                    options,
+                )?
+                else {
+                    continue;
+                };
+                let mut phases = vec![fragment.pair.first, fragment.pair.second, third];
+                phases.sort();
+                phases.dedup();
+                if candidates
+                    .iter()
+                    .any(|candidate: &PairDrivenInvariantCandidate| {
+                        candidate.phases == phases
+                            && composition_distance(candidate.point, point)
+                                <= options.geometry_tolerance * 16.0
+                            && (candidate.temperature - temperature).abs()
+                                <= options.temperature_tolerance * 16.0
+                    })
+                {
+                    continue;
+                }
+                candidates.push(PairDrivenInvariantCandidate {
+                    point,
+                    temperature,
+                    phases,
+                    patch: patch.clone(),
+                });
+            }
+        }
+    }
+    candidates.sort_by(|left, right| {
+        left.phases
+            .cmp(&right.phases)
+            .then_with(|| left.point.as_array()[0].total_cmp(&right.point.as_array()[0]))
+            .then_with(|| left.point.as_array()[1].total_cmp(&right.point.as_array()[1]))
+            .then_with(|| left.point.as_array()[2].total_cmp(&right.point.as_array()[2]))
+    });
+    Ok(candidates)
+}
+
+fn candidate_fragment_distance(
+    fragment: &LocalBoundaryFragment,
+    point: TernaryCoordinate,
+) -> (f64, f64) {
+    let start = crate::simplex::logical_from_composition(fragment.endpoints[0].point.as_array());
+    let end = crate::simplex::logical_from_composition(fragment.endpoints[1].point.as_array());
+    let point = crate::simplex::logical_from_composition(point.as_array());
+    let direction = [end[0] - start[0], end[1] - start[1]];
+    let denominator = direction[0] * direction[0] + direction[1] * direction[1];
+    if denominator <= f64::EPSILON {
+        return (f64::INFINITY, f64::NAN);
+    }
+    let parameter =
+        ((point[0] - start[0]) * direction[0] + (point[1] - start[1]) * direction[1]) / denominator;
+    let projected = [
+        start[0] + parameter * direction[0],
+        start[1] + parameter * direction[1],
+    ];
+    (
+        (point[0] - projected[0]).hypot(point[1] - projected[1]),
+        parameter,
+    )
+}
+
+fn pair_fragment_can_host_invariant(
+    fragments: &[LocalBoundaryFragment],
+    pair: StablePhasePair,
+    point: TernaryCoordinate,
+    patch: &BTreeSet<usize>,
+    samples: &super::sample::RegularSamplingGrid,
+    options: StableBoundaryOptions,
+) -> Option<usize> {
+    let maximum_offset = 0.75 / samples.grid.subdivisions() as f64;
+    fragments
+        .iter()
+        .enumerate()
+        .filter(|(_, fragment)| fragment.pair == pair && patch.contains(&fragment.triangle))
+        .filter_map(|(index, fragment)| {
+            let (offset, parameter) = candidate_fragment_distance(fragment, point);
+            (offset <= maximum_offset
+                && parameter > options.geometry_tolerance * 4.0
+                && parameter < 1.0 - options.geometry_tolerance * 4.0)
+                .then_some((offset, index))
+        })
+        .min_by(|left, right| {
+            left.0
+                .total_cmp(&right.0)
+                .then_with(|| left.1.cmp(&right.1))
+        })
+        .map(|(_, index)| index)
+}
+
+fn split_fragment_at_invariant(
+    fragments: &mut Vec<LocalBoundaryFragment>,
+    index: usize,
+    node: StableInvariantNodeId,
+    point: TernaryCoordinate,
+    temperature: f64,
+    phases: &[StablePhaseId],
+    options: StableBoundaryOptions,
+) -> Result<(), StableBoundaryError> {
+    let original = fragments.get(index).cloned().ok_or_else(|| {
+        StableBoundaryError::MalformedGraphConnectivity {
+            message: "pair-driven invariant selected an absent fragment".into(),
+        }
+    })?;
+    let (offset, parameter) = candidate_fragment_distance(&original, point);
+    if !offset.is_finite()
+        || parameter <= options.geometry_tolerance * 4.0
+        || parameter >= 1.0 - options.geometry_tolerance * 4.0
+    {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: format!(
+                "pair-driven invariant cannot split fragment {} at a non-interior branch parameter",
+                original.triangle
+            ),
+        });
+    }
+    let endpoint = FragmentEndpoint {
+        key: point_key(point, options.geometry_tolerance),
+        point,
+        temperature,
+        tied_phases: phases.to_vec(),
+        feature: TraceFeature::Invariant,
+        node: Some(node),
+    };
+    let left = LocalBoundaryFragment {
+        pair: original.pair,
+        triangle: original.triangle,
+        endpoints: [original.endpoints[0].clone(), endpoint.clone()],
+    };
+    let right = LocalBoundaryFragment {
+        pair: original.pair,
+        triangle: original.triangle,
+        endpoints: [endpoint, original.endpoints[1].clone()],
+    };
+    if composition_distance(left.endpoints[0].point, left.endpoints[1].point)
+        <= options.geometry_tolerance
+        || composition_distance(right.endpoints[0].point, right.endpoints[1].point)
+            <= options.geometry_tolerance
+    {
+        return Err(StableBoundaryError::MalformedGraphConnectivity {
+            message: "pair-driven invariant split collapsed a local fragment".into(),
+        });
+    }
+    fragments[index] = left;
+    fragments.insert(index + 1, right);
+    Ok(())
+}
+
+fn invariant_pairs(phases: &[StablePhaseId]) -> Vec<StablePhasePair> {
+    let mut pairs = Vec::new();
+    for (index, first) in phases.iter().copied().enumerate() {
+        for second in phases.iter().copied().skip(index + 1) {
+            pairs.push(StablePhasePair::new(first, second));
+        }
+    }
+    pairs
+}
+
+fn canonicalize_pair_driven_interior_nodes(
+    fragments: &mut Vec<LocalBoundaryFragment>,
     nodes: &mut Vec<StableInvariantNode>,
+    candidates: Vec<PairDrivenInvariantCandidate>,
+    samples: &super::sample::RegularSamplingGrid,
     options: StableBoundaryOptions,
     diagnostics: &mut StableBoundaryDiagnostics,
 ) -> Result<(), StableBoundaryError> {
-    for fragment in fragments {
+    for candidate in candidates {
+        let pairs = invariant_pairs(&candidate.phases);
+        if pairs.len() < 3
+            || pairs.iter().any(|pair| {
+                pair_fragment_can_host_invariant(
+                    fragments,
+                    *pair,
+                    candidate.point,
+                    &candidate.patch,
+                    samples,
+                    options,
+                )
+                .is_none()
+            })
+        {
+            continue;
+        }
+        let matching = nodes.iter().position(|node| {
+            matches!(node, StableInvariantNode::Interior(_))
+                && composition_distance(node.point(), candidate.point)
+                    <= options.geometry_tolerance * 16.0
+                && (node.temperature() - candidate.temperature).abs()
+                    <= options.temperature_tolerance * 16.0
+        });
+        let id = if let Some(index) = matching {
+            let StableInvariantNode::Interior(node) = nodes.get_mut(index).expect("node index")
+            else {
+                return Err(
+                    StableBoundaryError::IncompatibleDuplicateInvariantCandidate {
+                        point: candidate.point,
+                    },
+                );
+            };
+            node.phases = node
+                .phases
+                .iter()
+                .chain(&candidate.phases)
+                .copied()
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            diagnostics.known_invariants_revisited += 1;
+            node.id
+        } else {
+            let id = StableInvariantNodeId(nodes.len());
+            nodes.push(StableInvariantNode::Interior(InteriorInvariantNode {
+                id,
+                point: candidate.point,
+                temperature: candidate.temperature,
+                phases: candidate.phases.clone(),
+            }));
+            diagnostics.interior_invariants_accepted += 1;
+            diagnostics.pair_driven_invariants_accepted += 1;
+            id
+        };
+        // Resolve and split one local equality fragment for every pair. The
+        // choice is bounded to the candidate patch and checks the branch
+        // parameter; no invariant is snapped to a merely-near endpoint.
+        for pair in pairs {
+            let index = pair_fragment_can_host_invariant(
+                fragments,
+                pair,
+                candidate.point,
+                &candidate.patch,
+                samples,
+                options,
+            )
+            .expect("prevalidated pair fragment must remain available");
+            split_fragment_at_invariant(
+                fragments,
+                index,
+                id,
+                candidate.point,
+                candidate.temperature,
+                &candidate.phases,
+                options,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn canonicalize_interior_nodes(
+    fragments: &mut Vec<LocalBoundaryFragment>,
+    nodes: &mut Vec<StableInvariantNode>,
+    cells: &[super::partition::StableSamplingCell],
+    topology: &RegularSamplingTopology,
+    samples: &super::sample::RegularSamplingGrid,
+    phase_ids: &[StablePhaseId],
+    layers: &[PreparedSourceLayer<'_>],
+    options: StableBoundaryOptions,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) -> Result<(), StableBoundaryError> {
+    for fragment in fragments.iter_mut() {
         for endpoint in &mut fragment.endpoints {
             if !matches!(endpoint.feature, TraceFeature::Invariant)
                 && endpoint.tied_phases.len() < 3
@@ -1895,6 +2397,24 @@ fn canonicalize_interior_nodes(
             endpoint.key = point_key(canonical.point(), options.geometry_tolerance);
         }
     }
+    let candidates = pair_driven_interior_candidates(
+        fragments,
+        cells,
+        topology,
+        samples,
+        phase_ids,
+        layers,
+        options,
+        diagnostics,
+    )?;
+    canonicalize_pair_driven_interior_nodes(
+        fragments,
+        nodes,
+        candidates,
+        samples,
+        options,
+        diagnostics,
+    )?;
     Ok(())
 }
 
@@ -2785,7 +3305,17 @@ pub(crate) fn build_stable_boundary_network(
         samples.grid.subdivisions(),
         options,
     )?;
-    canonicalize_interior_nodes(&mut fragments, &mut nodes, options, &mut diagnostics)?;
+    canonicalize_interior_nodes(
+        &mut fragments,
+        &mut nodes,
+        cells,
+        &topology,
+        samples,
+        phase_ids,
+        layers,
+        options,
+        &mut diagnostics,
+    )?;
     let adjacency = build_fragment_adjacency(&fragments);
     let (mut pending, pending_lookup) = create_pending_ends(&fragments, &nodes, &mut diagnostics)?;
     let mut used = vec![false; fragments.len()];
@@ -3107,6 +3637,121 @@ mod tests {
     }
 
     #[test]
+    fn pair_driven_discovery_finds_continuous_root_without_sampled_triple_tie() {
+        // These source surfaces meet continuously at (0.3, 0.3, 0.4). The
+        // hand-built local fragments intentionally carry pair ties only: this
+        // verifies that the continuous P=Q=P=R solve and fragment splitting
+        // are not gated on a sampled `tied_phases.len() >= 3` endpoint.
+        let alpha = |[a, _b, _c]: [f64; 3]| defined(a);
+        let beta = |[_a, b, _c]: [f64; 3]| defined(b);
+        let gamma = |[a, _b, c]: [f64; 3]| defined(0.6 * a + 0.088 + 0.2 * c * c);
+        let phases = [
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&alpha)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&beta)),
+            StablePhaseSource::new(StablePhaseId(3), StableScalarSource::evaluator(&gamma)),
+        ];
+        let mut contour_diagnostics = super::super::StableContourDiagnostics::default();
+        let (layers, groups) = super::super::sample::prepare_sources(
+            &phases,
+            StableContourQuantity::Height,
+            &mut contour_diagnostics,
+        )
+        .unwrap();
+        let grid = crate::RegularTernaryGrid::new(4).unwrap();
+        let samples = super::super::sample::sample_regular_grid(
+            grid,
+            phases.len(),
+            StableContourQuantity::Height,
+            &layers,
+            &groups,
+            &mut contour_diagnostics,
+        )
+        .unwrap();
+        let topology = RegularSamplingTopology::new(grid).unwrap();
+        let root_seed = TernaryCoordinate::new(0.3, 0.3, 0.4);
+        let root_triangle = samples
+            .grid
+            .locate(root_seed.as_array())
+            .unwrap()
+            .triangle
+            .id;
+        let patch = triangle_patch(root_triangle, &topology).unwrap();
+        let root = pair_driven_invariant_root(
+            StablePhasePair::new(StablePhaseId(1), StablePhaseId(2)),
+            StablePhaseId(3),
+            root_seed,
+            &patch,
+            &layers,
+            &[StablePhaseId(1), StablePhaseId(2), StablePhaseId(3)],
+            &samples,
+            StableBoundaryOptions::default(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!((root.0.as_array()[0] - 0.3).abs() < 1.0e-6, "{root:?}");
+        assert!((root.0.as_array()[1] - 0.3).abs() < 1.0e-6, "{root:?}");
+        assert!((root.0.as_array()[2] - 0.4).abs() < 1.0e-6, "{root:?}");
+
+        let options = StableBoundaryOptions::default();
+        let endpoint = |point: [f64; 3], pair: StablePhasePair| FragmentEndpoint {
+            key: point_key(TernaryCoordinate::from(point), options.geometry_tolerance),
+            point: TernaryCoordinate::from(point),
+            temperature: root.1,
+            tied_phases: vec![pair.first, pair.second],
+            feature: TraceFeature::Interior,
+            node: None,
+        };
+        let make_fragment = |pair, left, right| LocalBoundaryFragment {
+            pair,
+            triangle: root_triangle,
+            endpoints: [endpoint(left, pair), endpoint(right, pair)],
+        };
+        let mut fragments = vec![
+            make_fragment(
+                StablePhasePair::new(StablePhaseId(1), StablePhaseId(2)),
+                [0.27, 0.27, 0.46],
+                [0.33, 0.33, 0.34],
+            ),
+            make_fragment(
+                StablePhasePair::new(StablePhaseId(1), StablePhaseId(3)),
+                [0.27, 0.34, 0.39],
+                [0.33, 0.26, 0.41],
+            ),
+            make_fragment(
+                StablePhasePair::new(StablePhaseId(2), StablePhaseId(3)),
+                [0.34, 0.27, 0.39],
+                [0.26, 0.33, 0.41],
+            ),
+        ];
+        let candidate = PairDrivenInvariantCandidate {
+            point: root.0,
+            temperature: root.1,
+            phases: vec![StablePhaseId(1), StablePhaseId(2), StablePhaseId(3)],
+            patch,
+        };
+        let mut nodes = Vec::new();
+        let mut diagnostics = StableBoundaryDiagnostics::default();
+        canonicalize_pair_driven_interior_nodes(
+            &mut fragments,
+            &mut nodes,
+            vec![candidate],
+            &samples,
+            options,
+            &mut diagnostics,
+        )
+        .unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(diagnostics.pair_driven_invariants_accepted, 1);
+        assert_eq!(fragments.len(), 6);
+        assert!(fragments.iter().all(|fragment| {
+            fragment
+                .endpoints
+                .iter()
+                .any(|endpoint| endpoint.node == Some(StableInvariantNodeId(0)))
+        }));
+    }
+
+    #[test]
     fn affine_univariant_regularization_preserves_nodes_pairs_and_connectivity() {
         let alpha = |[a, _b, _c]: [f64; 3]| defined(a);
         let beta = |[_a, b, _c]: [f64; 3]| defined(b);
@@ -3140,6 +3785,12 @@ mod tests {
             .unwrap();
         assert_eq!(regularized.nodes, raw.nodes);
         assert_eq!(regularized.univariants.len(), raw.univariants.len());
+        assert!(raw.univariants.iter().all(|path| {
+            raw.path_geometry_state(path.id) == Some(StablePathGeometryState::Raw)
+        }));
+        assert!(regularized.univariants.iter().all(|path| {
+            regularized.path_geometry_state(path.id) == Some(StablePathGeometryState::Regularized)
+        }));
         for (path, raw_path) in regularized.univariants.iter().zip(&raw.univariants) {
             assert_eq!(path.phases, raw_path.phases);
             assert_eq!((path.start, path.end), (raw_path.start, raw_path.end));
