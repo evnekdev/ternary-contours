@@ -65,6 +65,29 @@ With no `--show-*` layer selection, plots show isotherms, univariants, and both
 classes of invariant by default. `--regularize` redraws the same graph with
 path regularization; it never changes the parser or numerical pipeline.
 
+## Stable-topology audit
+
+`audit-stable-topology` is a deterministic developer diagnostic. It runs the
+normal projection pipeline over a sampling-resolution matrix and writes
+machine-readable reports without requiring Qt:
+
+```text
+cargo run -p ternary-contours-cli --features trace -- audit-stable-topology \
+  calculations/CaO-PbO-ZnO_detailed.tct \
+  --output target/diagnostics/cao-pbo-zno-stability \
+  --repeat-count 5 \
+  --sampling-subdivisions 6,7,8,10,12,16,20,30,40
+```
+
+It records `summary.json`, `runs.tsv`, `invariants.tsv`, `univariants.tsv`,
+`regularization-failures.tsv`, and `comparison-report.md`. Exact graph hashes
+check repeatability; a tolerance-aware geometry hash and a topology-only hash
+distinguish moved geometry from changed stable connectivity. The command accepts
+the same source interpolation, cubic method, partial-domain policy,
+continuation, regularization, and spacing choices as the Viewer projection.
+A `raw_fallback` row means raw topology was accepted but optional path
+regularization was unavailable for that path.
+
 ## Interactive viewer
 
 The native inspection window is optional. A normal `inspect`, `validate`, or

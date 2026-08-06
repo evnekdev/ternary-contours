@@ -66,10 +66,12 @@ The final root is accepted only after a new full sweep confirms both phases on
 the stable envelope. Nearby coincident transitions merge into one higher-order
 node with sorted phase IDs.
 
-The binary root is authoritative. A sampling-grid trace reaching the same outer
-boundary is attached to the nearest compatible phase-pair node within one final
-sampling interval and its endpoint is replaced by the canonical binary
-coordinate.
+The binary root is authoritative. A sampling-cell interval is used only to
+find local compatible refined-root candidates. Exactly one candidate must
+remain; zero candidates produce `NoMatchingBinaryNode` and several candidates
+produce `AmbiguousBinaryEndpointMatch` with the candidate node IDs. The
+implementation never resolves an ambiguity by a nearest-node ID tie-break. The
+selected endpoint is then replaced by the canonical refined binary coordinate.
 
 ## Dense sampling-grid topology
 
@@ -94,12 +96,28 @@ stable phases becomes one local fragment for each applicable canonical phase
 pair. Shared sampling-edge intersections are registered once per pair and edge;
 adjacent triangles must reproduce the same canonical edge parameter.
 
-Interior endpoints with three or more stable phases are merged by composition
-and temperature tolerances into one graph node. Every fragment incident to a
-node creates a deterministic pending half-edge. Traversal consumes the lowest
-pending key first, orients each fragment away from the current endpoint, and
-selects the best forward continuation at shared grid features without immediate
-retracing. A path is committed only after it reaches another canonical node.
+Sampled triple ties remain useful deterministic seeds, but they are not the
+only source of an interior invariant. Every stable local phase-pair fragment
+also searches its triangle and edge-adjacent triangle patch for each possible
+third phase. A safeguarded continuous solve evaluates `T_P-T_Q = 0` and
+`T_P-T_R = 0` through the same prepared source evaluators used by projection.
+It accepts a root only when all three values are finite, the root is inside its
+permitted patch, pair residuals are within the configured tolerance, and no
+participating competitor is higher than the common temperature. This preserves
+short node-to-node branches even when no affine fragment endpoint was initially
+classified as a sampled triple tie.
+
+An accepted continuous node is attached to all compatible pair branches. When
+it occurs in a local fragment interior, that fragment is split into two
+nonzero child fragments; endpoint identity remains the full canonical node ID
+and full-precision composition. A coarse composition signature, when reported
+by diagnostics, is never used to merge nodes.
+
+Every fragment incident to a node creates a deterministic pending half-edge.
+Traversal consumes the lowest pending key first, orients each fragment away
+from the current endpoint, and selects the best forward continuation at shared
+grid features without immediate retracing. A path is committed only after it
+reaches another canonical node.
 
 Construction order is therefore:
 
@@ -152,9 +170,12 @@ implementation restores their exact graph-owned coordinates and revalidates:
 - absence of duplicate or reversed segments;
 - absence of a newly introduced self-intersection.
 
-Regularization retains only the requested final coordinates. Its diagnostics
-record summary counts and lengths rather than a second complete copy of the raw
-path.
+Regularization is strictly post-topology. If a recoverable regularization
+attempt fails, the complete raw branch remains in the network and the failure
+is recorded as `StableUnivariantRegularizationFailure`. Each path reports an
+effective `StablePathGeometryState`: `Raw`, `Regularized`, or `RawFallback`.
+Consequently a projection can be partially regularized without losing its
+invariants, univariants, or graph incidence.
 
 ## Complexity
 

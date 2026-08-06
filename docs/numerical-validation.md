@@ -135,6 +135,23 @@ These checks validate the final affine sampling-grid model. Midpoint and centroi
 verification does not certify that an original nonlinear source contains no
 smaller feature between samples.
 
+## Stable-topology audit workflow
+
+The repository also provides `ternary-contours-cli audit-stable-topology` for
+fixture-specific stability investigations. It repeatedly executes the
+production projection pipeline, records canonical node/edge signatures, and
+separates exact-repeatability, tolerance-aware geometry movement, and
+phase-set/connectivity changes. It is intentionally a diagnostic report rather
+than a claim of universal topology convergence.
+
+For the persisted EX CaO–PbO–ZnO detailed fixture, use the existing file
+unchanged and retain its hash with the audit output. The expected raw network
+at the production Cubic alpha/Akima/Muggianu/one-sided-then-linear options is
+three binary invariants, one interior invariant, and three complete
+univariants. Regularization is evaluated after that raw graph; a per-path
+`RawFallback` is reported separately and does not remove an accepted raw node
+or edge.
+
 ## Limits
 
 These tests do not prove global interpolation error bounds, C1 continuity,
