@@ -180,6 +180,7 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "tableInterpolationResults" => UiElementId::InterpolationResultsTable,
         "statusMain" => UiElementId::Status,
         "buttonViewerResetAutomaticRange" => UiElementId::PlotLevels,
+        "buttonViewerExtrapolatePhase" => UiElementId::GridPointEditor,
         "comboViewerGrid" => UiElementId::GridSelector,
         "comboViewerPhase" => UiElementId::GridPhaseSelector,
         "comboViewerProperty" => UiElementId::GridPropertySelector,
@@ -2246,6 +2247,7 @@ mod tests {
             "comboViewerPhase",
             "comboViewerProperty",
             "comboViewerMode",
+            "buttonViewerExtrapolatePhase",
             "checkViewerCalculated",
             "checkViewerExtrapolated",
             "checkViewerCutOff",
@@ -2398,6 +2400,7 @@ mod tests {
                 "comboViewerPhase",
                 "comboViewerProperty",
                 "comboViewerMode",
+                "buttonViewerExtrapolatePhase",
                 "canvasTernary",
                 "tableInterpolationResults"
             ]

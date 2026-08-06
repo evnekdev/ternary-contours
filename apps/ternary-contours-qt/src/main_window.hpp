@@ -139,6 +139,9 @@ private slots:
     void pasteGridClipboard();
     void showGridContextMenu(const QPoint& position);
     void extrapolateSelectedRegularField();
+    void extrapolateViewerPhase();
+    void extrapolateViewerTargets(const QVector<std::uint32_t>& rows);
+    void showViewerMeshExtrapolationDialog(std::uint32_t scope, const QVector<std::uint32_t>& rows = {});
 private:
     bool saveToPath(const QString& path);
     bool performSave(bool save_as);

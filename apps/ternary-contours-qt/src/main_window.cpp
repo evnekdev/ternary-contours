@@ -35,8 +35,12 @@
 #include <QItemSelectionModel>
 #include <QLineEdit>
 #include <QTextEdit>
+#include <QTableWidget>
+#include <QHeaderView>
+#include <QVBoxLayout>
 #include <QMessageBox>
 #include <QSettings>
+#include <QTimer>
 
 #include <QLocale>
 #include <QPushButton>
@@ -68,6 +72,9 @@ constexpr int min_regular_subdivisions = 1;
 constexpr int max_regular_subdivisions = 50;
 constexpr int default_regular_subdivisions = 10;
 constexpr std::uint32_t invalid_viewer_abi = std::numeric_limits<std::uint32_t>::max();
+constexpr std::uint32_t mesh_scope_field = 0;
+constexpr std::uint32_t mesh_scope_phase = 1;
+constexpr std::uint32_t mesh_scope_targets = 2;
 constexpr std::uint32_t abi_source_linear = 0;
 constexpr std::uint32_t abi_source_cubic_alpha = 1;
 constexpr std::uint32_t abi_cubic_akima = 0;
@@ -240,6 +247,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionGridCopy, &QAction::triggered, this, &MainWindow::copyGridSelection);
     connect(ui_->actionGridPaste, &QAction::triggered, this, &MainWindow::pasteGridClipboard);
     connect(ui_->actionGridExtrapolate, &QAction::triggered, this, &MainWindow::extrapolateSelectedRegularField);
+    connect(ui_->buttonViewerExtrapolatePhase, &QPushButton::clicked, this, &MainWindow::extrapolateViewerPhase);
     connect(ui_->tableGridValues, &QTableView::customContextMenuRequested, this, &MainWindow::showGridContextMenu);
     connect(ui_->tableGridValues->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { updateActionState(); });
     connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] { updateActionState(); });
@@ -736,13 +744,13 @@ void MainWindow::exportLinesCsv() {
             form.labelAddGridStepValue->setText(tr("Step size: %1 (%2%)").arg(step_text, percent_text));
             const auto point_text = QLocale(QLocale::English, QLocale::UnitedStates).toString(point_count);
             form.labelAddGridPointsValue->setText(
-                tr("Grid points: %1\nAllowed subdivisions: %2â€“%3")
+                tr("Grid points: %1\nAllowed subdivisions: %2-%3")
                     .arg(point_text)
                     .arg(min_regular_subdivisions)
                     .arg(max_regular_subdivisions));
         } else {
-            form.labelAddGridStepValue->setText(tr("Step size: â€”"));
-            form.labelAddGridPointsValue->setText(tr("Grid points: â€”\nAllowed subdivisions: %1â€“%2").arg(min_regular_subdivisions).arg(max_regular_subdivisions));
+            form.labelAddGridStepValue->setText(tr("Step size: -"));
+            form.labelAddGridPointsValue->setText(tr("Grid points: -\nAllowed subdivisions: %1-%2").arg(min_regular_subdivisions).arg(max_regular_subdivisions));
         }
         if (auto* ok = form.addGridButtonBox->button(QDialogButtonBox::Ok)) {
             ok->setEnabled(!regular_selected || valid);
@@ -1038,6 +1046,160 @@ void MainWindow::extrapolateSelectedRegularField() {
         dialog.accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.exec();
+}
+void MainWindow::extrapolateViewerPhase() {
+    showViewerMeshExtrapolationDialog(mesh_scope_phase);
+}
+
+void MainWindow::extrapolateViewerTargets(const QVector<std::uint32_t>& rows) {
+    showViewerMeshExtrapolationDialog(mesh_scope_targets, rows);
+}
+
+void MainWindow::showViewerMeshExtrapolationDialog(
+    std::uint32_t scope,
+    const QVector<std::uint32_t>& rows)
+{
+    if (viewer_.property.isEmpty()) {
+        reportBridgeStatus(tr("Select a grid, phase, and property before extrapolating."), false);
+        return;
+    }
+    TcqtGrid grid{};
+    if (!tcqt_grid_at(viewer_.grid_index, &grid).success || grid.kind != 0) {
+        QMessageBox::information(this, tr("Extrapolate missing values"),
+            tr("Automatic mesh extrapolation is currently available for regular grids only."));
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(scope == mesh_scope_targets
+        ? tr("Extrapolate Selected Vertex")
+        : tr("Extrapolate Selected Phase"));
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout();
+    layout->addLayout(form);
+    form->addRow(tr("Grid"), new QLabel(text(grid.name), &dialog));
+    form->addRow(tr("Phase"), new QLabel(ui_->comboViewerPhase->currentText(), &dialog));
+    form->addRow(tr("Property"), new QLabel(viewer_.property, &dialog));
+    if (scope == mesh_scope_targets) {
+        form->addRow(tr("Requested rows"), new QLabel([&rows] {
+            QStringList labels;
+            for (const auto row : rows) labels << QString::number(row + 1);
+            return labels.join(QStringLiteral(", "));
+        }(), &dialog));
+    }
+    auto* phase_scope = new QComboBox(&dialog);
+    if (scope == mesh_scope_phase) {
+        phase_scope->addItem(tr("Current property"), false);
+        phase_scope->addItem(tr("All properties for selected phase"), true);
+        form->addRow(tr("Scope"), phase_scope);
+    }
+    auto* method = new QComboBox(&dialog);
+    method->addItem(tr("Akima"), 0U);
+    method->addItem(tr("Makima"), 1U);
+    method->addItem(tr("PCHIP"), 2U);
+    method->addItem(tr("Steffen"), 3U);
+    method->setCurrentIndex(3);
+    auto* layers = new QSpinBox(&dialog); layers->setRange(1, 100); layers->setValue(1);
+    auto* support = new QSpinBox(&dialog); support->setRange(1, 32); support->setValue(3);
+    auto* spread = new QLineEdit(&dialog); spread->setPlaceholderText(tr("Optional"));
+    auto* minimum = new QLineEdit(&dialog); minimum->setPlaceholderText(tr("Optional"));
+    auto* maximum = new QLineEdit(&dialog); maximum->setPlaceholderText(tr("Optional"));
+    form->addRow(tr("Method"), method);
+    form->addRow(tr("Maximum layers"), layers);
+    form->addRow(tr("Minimum directional support"), support);
+    form->addRow(tr("Maximum directional spread"), spread);
+    form->addRow(tr("Minimum value"), minimum);
+    form->addRow(tr("Maximum value"), maximum);
+
+    auto* result = new QLabel(tr("Preview does not modify the document."), &dialog);
+    result->setWordWrap(true);
+    layout->addWidget(result);
+    auto* preview_table = new QTableWidget(&dialog);
+    preview_table->setObjectName(QStringLiteral("tableViewerExtrapolationPreview"));
+    preview_table->setColumnCount(12);
+    preview_table->setHorizontalHeaderLabels({tr("Field"), tr("Row"), tr("A"), tr("B"), tr("C"), tr("Old state"), tr("Proposed value"), tr("EX layer"), tr("Method"), tr("Support"), tr("Spread"), tr("Status")});
+    preview_table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    preview_table->setSelectionBehavior(QAbstractItemView::SelectRows);
+    preview_table->horizontalHeader()->setStretchLastSection(true);
+    preview_table->setMinimumHeight(230);
+    layout->addWidget(preview_table);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto* preview = buttons->addButton(tr("Preview"), QDialogButtonBox::ActionRole);
+    auto* materialize = buttons->addButton(tr("Materialize"), QDialogButtonBox::AcceptRole);
+    materialize->setEnabled(false);
+    layout->addWidget(buttons);
+
+    const auto method_name = [](std::uint32_t code) {
+        switch (code) { case 0: return QStringLiteral("Akima"); case 1: return QStringLiteral("Makima"); case 2: return QStringLiteral("PCHIP"); case 3: return QStringLiteral("Steffen"); default: return QStringLiteral("-"); }
+    };
+    const auto state_name = [](std::uint32_t code) {
+        switch (code) { case 0: return QObject::tr("Calculated"); case 2: return QObject::tr("Cut-off"); case 4: return QObject::tr("Extrapolated"); default: return QObject::tr("Missing"); }
+    };
+    const auto read_optional = [result](QLineEdit* editor, bool* present, double* value, const QString& label) {
+        const auto input = editor->text().trimmed();
+        *present = !input.isEmpty();
+        if (!*present) return true;
+        bool ok = false;
+        *value = QLocale::c().toDouble(input, &ok);
+        if (!ok || !std::isfinite(*value)) { result->setText(QObject::tr("%1 must be a finite number.").arg(label)); return false; }
+        return true;
+    };
+    auto make_options = [&]() -> std::optional<TcqtMeshExtrapolationOptions> {
+        TcqtMeshExtrapolationOptions options{};
+        options.grid_index = viewer_.grid_index;
+        options.field_index = viewer_.field_index;
+        options.phase_id = viewer_.phase_id;
+        options.scope = scope;
+        options.all_phase_properties = scope == mesh_scope_phase && phase_scope->currentData().toBool();
+        options.target_rows = rows.isEmpty() ? nullptr : rows.constData();
+        options.target_row_count = static_cast<std::uint32_t>(rows.size());
+        options.method = method->currentData().toUInt();
+        options.maximum_layers = layers->value();
+        options.minimum_directional_support = support->value();
+        if (!read_optional(spread, &options.has_maximum_directional_spread, &options.maximum_directional_spread, tr("Maximum directional spread"))) return std::nullopt;
+        if (options.has_maximum_directional_spread && options.maximum_directional_spread < 0.0) { result->setText(tr("Maximum directional spread must be non-negative.")); return std::nullopt; }
+        if (!read_optional(minimum, &options.has_minimum_value, &options.minimum_value, tr("Minimum value"))) return std::nullopt;
+        if (!read_optional(maximum, &options.has_maximum_value, &options.maximum_value, tr("Maximum value"))) return std::nullopt;
+        if (options.has_minimum_value && options.has_maximum_value && options.minimum_value > options.maximum_value) { result->setText(tr("Minimum value must not exceed maximum value.")); return std::nullopt; }
+        return options;
+    };
+    connect(preview, &QPushButton::clicked, &dialog, [&] {
+        const auto options = make_options();
+        if (!options) return;
+        TcqtMeshExtrapolationSummary summary{};
+        const auto status = tcqt_preview_regular_mesh_extrapolation(&*options, &summary);
+        if (!status.success) { result->setText(statusText(status)); materialize->setEnabled(false); return; }
+        result->setText(text(summary.message));
+        std::uint32_t count = 0;
+        const auto count_status = tcqt_mesh_extrapolation_preview_row_count(&count);
+        if (!count_status.success) { result->setText(statusText(count_status)); materialize->setEnabled(false); return; }
+        preview_table->setRowCount(static_cast<int>(count));
+        for (std::uint32_t index = 0; index < count; ++index) {
+            TcqtMeshExtrapolationPreviewRow row{};
+            const auto row_status = tcqt_mesh_extrapolation_preview_row_at(index, &row);
+            if (!row_status.success) { result->setText(statusText(row_status)); materialize->setEnabled(false); return; }
+            const auto set = [preview_table, index](int column, const QString& value) { preview_table->setItem(static_cast<int>(index), column, new QTableWidgetItem(value)); };
+            set(0, text(row.property)); set(1, QString::number(row.row_index + 1));
+            set(2, QLocale::c().toString(row.a, 'g', 8)); set(3, QLocale::c().toString(row.b, 'g', 8)); set(4, QLocale::c().toString(row.c, 'g', 8));
+            set(5, state_name(row.old_state)); set(6, row.has_value ? QLocale::c().toString(row.value, 'g', 12) : QStringLiteral("-"));
+            set(7, row.has_value ? QStringLiteral("EX%1").arg(row.layer) : QStringLiteral("-")); set(8, row.has_value ? method_name(row.method) : QStringLiteral("-"));
+            set(9, row.has_value ? QString::number(row.support_count) : QStringLiteral("-")); set(10, row.has_value ? QLocale::c().toString(row.spread, 'g', 8) : QStringLiteral("-"));
+            set(11, row.status == 0 ? tr("Requested") : row.status == 1 ? tr("Dependency") : row.status == 2 ? tr("Proposed") : tr("Rejected: %1").arg(text(row.reason)));
+        }
+        materialize->setEnabled(summary.values_proposed > 0);
+    });
+    connect(materialize, &QPushButton::clicked, &dialog, [&] {
+        TcqtMeshExtrapolationSummary summary{};
+        const auto status = tcqt_materialize_regular_mesh_extrapolation(&summary);
+        if (!status.success) { result->setText(statusText(status)); return; }
+        rebuildFromRust(selected_grid_);
+        scheduleViewerCalculation();
+        reportBridgeStatus(text(summary.message), true);
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.resize(1120, 650);
     dialog.exec();
 }
 void MainWindow::showGridContextMenu(const QPoint& position) {
@@ -1500,7 +1662,24 @@ void MainWindow::updateViewerActionState() {
     if (!tcqt_project_summary(&summary).success) return;
     const bool field_available = !viewer_.property.isEmpty() && viewer_.grid_index < summary.grid_count;
     const auto unavailable = summary.calculation_available ? QString() : tr("Calculation requires valid participating phases, grids, and finite Temperature values.");
-    ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
+    TcqtGrid inspection_grid{};
+    const bool regular_inspection_grid = tcqt_grid_at(viewer_.grid_index, &inspection_grid).success && inspection_grid.kind == 0;
+    bool has_eligible_missing = false;
+    if (field_available && regular_inspection_grid) {
+        for (std::uint32_t row = 0; row < inspection_grid.row_count; ++row) {
+            TcqtCell cell{};
+            if (tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success && cell.state == 3) {
+                has_eligible_missing = true;
+                break;
+            }
+        }
+    }
+    ui_->buttonViewerExtrapolatePhase->setEnabled(field_available && regular_inspection_grid && viewer_.interaction_mode == 0 && has_eligible_missing);
+    ui_->buttonViewerExtrapolatePhase->setToolTip(!regular_inspection_grid
+        ? tr("Automatic mesh extrapolation is currently available for regular grids only.")
+        : viewer_.interaction_mode != 0
+            ? tr("Return to Vertex mode to extrapolate source vertices.")
+            : has_eligible_missing ? QString() : tr("The selected field contains no eligible missing values."));    ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
     ui_->comboViewerPhase->setEnabled(field_available); ui_->comboViewerProperty->setEnabled(field_available); ui_->comboViewerMode->setEnabled(field_available);
     for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerCalculated), static_cast<QWidget*>(ui_->checkViewerExtrapolated), static_cast<QWidget*>(ui_->checkViewerCutOff), static_cast<QWidget*>(ui_->checkViewerMissing), static_cast<QWidget*>(ui_->checkViewerRegularGridEdges), static_cast<QWidget*>(ui_->spinViewerMarkerSize), static_cast<QWidget*>(ui_->comboViewerLabelMode), static_cast<QWidget*>(ui_->spinViewerLabelDecimals), static_cast<QWidget*>(ui_->checkViewerLabelsSelectedOnly)}) control->setEnabled(field_available);
     ui_->actionViewSourceVertices->setEnabled(field_available); ui_->actionViewSourceVertices->setToolTip(field_available ? QString() : tr("Select a grid field first."));
@@ -1541,7 +1720,7 @@ void MainWindow::updateViewerSelectionDetails() {
     const auto row = *viewer_.selected_rows.cbegin(); TcqtRow composition{}; TcqtCell cell{};
     if (!tcqt_grid_row_at(viewer_.grid_index, row, &composition).success || !tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success) return;
     const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 4 ? tr("Extrapolated") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
-    const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("â€”");
+    const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("-");
     const auto note = text(cell.note);
     ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
         .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
@@ -1565,32 +1744,163 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
     if (viewer_.property.isEmpty()) return;
     TcqtCell existing{};
     if (!tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &existing).success) return;
-    QDialog dialog(this, Qt::Tool); dialog.setWindowTitle(tr("Vertex %1 â€” %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
-    auto* layout = new QFormLayout(&dialog); auto* state = new QComboBox(&dialog); state->addItem(tr("Calculated"), 0); state->addItem(tr("Missing (NA)"), 3); state->addItem(tr("Cut-off (CO)"), 2); state->setCurrentIndex(state->findData(existing.state == 4 ? 3 : existing.state));
-    auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog); auto* note = new QLineEdit(text(existing.note), &dialog); auto* error = new QLabel(&dialog); error->setStyleSheet(QStringLiteral("color: #b03030"));
-    layout->addRow(tr("State"), state); layout->addRow(tr("Value"), value); layout->addRow(tr("Note"), note); layout->addRow(error);
-    auto commit = [&]() {
-        const auto code = state->currentData().toUInt(); QString token;
-        if (code == 0) { bool ok = false; const auto scalar = QLocale::c().toDouble(value->text(), &ok); if (!ok || !std::isfinite(scalar)) { error->setText(tr("Calculated requires one finite numeric value.")); return; } token = QLocale::c().toString(scalar, 'g', 15); }
-        else token = code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
-        if (!note->text().trimmed().isEmpty()) token += QStringLiteral(":") + note->text().trimmed();
-        const auto property = viewer_.property.toUtf8(); const auto encoded = token.toUtf8(); const auto result = tcqt_set_field_vertex(viewer_.grid_index, viewer_.phase_id, property.constData(), row, encoded.constData());
-        if (!result.success) { error->setText(statusText(result)); return; }
-        dialog.accept(); rebuildFromRust(selected_grid_); scheduleViewerCalculation(); reportBridgeStatus(tr("Updated vertex %1: %2").arg(row + 1).arg(token), true);
-    };
-    connect(value, &QLineEdit::returnPressed, &dialog, commit); connect(note, &QLineEdit::returnPressed, &dialog, commit); connect(state, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [=](int) { value->setEnabled(state->currentData().toUInt() == 0); });
-    value->setEnabled(existing.state == 0); const auto screen = QGuiApplication::screenAt(global_position); const auto bounds = screen ? screen->availableGeometry() : geometry(); dialog.adjustSize(); auto pos = global_position + QPoint(12, 12); pos.setX(qBound(bounds.left(), pos.x(), bounds.right() - dialog.width())); pos.setY(qBound(bounds.top(), pos.y(), bounds.bottom() - dialog.height())); dialog.move(pos); value->setFocus(); dialog.exec();
-}
+    QDialog dialog(this, Qt::Tool);
+    dialog.setWindowTitle(tr("Vertex %1 - %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
+    auto* layout = new QFormLayout(&dialog);
+    auto* state = new QComboBox(&dialog);
+    state->addItem(tr("Calculated"), 0);
+    state->addItem(tr("Extrapolated (EX)"), 4);
+    state->addItem(tr("Missing (NA)"), 3);
+    state->addItem(tr("Cut-off (CO)"), 2);
+    state->setCurrentIndex(qMax(0, state->findData(existing.state)));
+    auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog);
+    auto* note = new QLineEdit(text(existing.note), &dialog);
+    auto* provenance = new QLabel(&dialog);
+    provenance->setWordWrap(true);
+    auto* error = new QLabel(&dialog);
+    error->setStyleSheet(QStringLiteral("color: #b03030"));
+    layout->addRow(tr("State"), state);
+    layout->addRow(tr("Value"), value);
+    layout->addRow(tr("Note"), note);
+    layout->addRow(tr("Provenance"), provenance);
+    layout->addRow(error);
+    auto* actions = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto* extrapolate = actions->addButton(tr("Extrapolate this vertex..."), QDialogButtonBox::ActionRole);
+    TcqtGrid source_grid{};
+    const bool regular_grid = tcqt_grid_at(viewer_.grid_index, &source_grid).success && source_grid.kind == 0;
+    auto* calculated = actions->addButton(tr("Enter calculated value"), QDialogButtonBox::ActionRole);
+    auto* cut_off = actions->addButton(tr("Set cut-off"), QDialogButtonBox::ActionRole);
+    auto* clear = actions->addButton(tr("Clear to NA"), QDialogButtonBox::ActionRole);
+    layout->addRow(actions);
 
+    const auto update_state = [&] {
+        const auto code = state->currentData().toUInt();
+        const bool extrapolated = code == 4;
+        value->setEnabled(code == 0);
+        note->setEnabled(!extrapolated);
+        extrapolate->setText(extrapolated ? tr("Re-extrapolate...") : tr("Extrapolate this vertex..."));
+        extrapolate->setVisible(code == 3 || extrapolated || code == 2);
+        extrapolate->setEnabled(regular_grid && (code == 3 || extrapolated));
+        extrapolate->setToolTip(!regular_grid
+            ? tr("Automatic mesh extrapolation is currently available for regular grids only.")
+            : code == 2
+                ? tr("Cut-off values are excluded from automatic mesh extrapolation. Convert this cell to NA first to make it eligible.")
+                : QString());
+        if (extrapolated) {
+            provenance->setText(tr("EX%1 - %2; support %3; spread %4")
+                .arg(existing.extrapolation_layer)
+                .arg(existing.extrapolation_method == 0 ? tr("Akima") : existing.extrapolation_method == 1 ? tr("Makima") : existing.extrapolation_method == 2 ? tr("PCHIP") : tr("Steffen"))
+                .arg(existing.extrapolation_support_count)
+                .arg(QLocale::c().toString(existing.extrapolation_spread, 'g', 10)));
+        } else if (code == 2) {
+            provenance->setText(tr("Cut-off values are excluded from automatic mesh extrapolation. Convert to NA first to make this vertex eligible."));
+        } else {
+            provenance->clear();
+        }
+    };
+    const auto commit = [&] {
+        const auto code = state->currentData().toUInt();
+        if (code == 4) {
+            error->setText(tr("Extrapolated values are read-only. Re-extrapolate, convert to calculated, or clear to NA."));
+            return;
+        }
+        QString token;
+        if (code == 0) {
+            bool ok = false;
+            const auto scalar = QLocale::c().toDouble(value->text(), &ok);
+            if (!ok || !std::isfinite(scalar)) { error->setText(tr("Calculated requires one finite numeric value.")); return; }
+            token = QLocale::c().toString(scalar, 'g', 15);
+        } else {
+            token = code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+        }
+        if (!note->text().trimmed().isEmpty()) token += QStringLiteral(":") + note->text().trimmed();
+        const auto property = viewer_.property.toUtf8();
+        const auto encoded = token.toUtf8();
+        const auto result = tcqt_set_field_vertex(viewer_.grid_index, viewer_.phase_id, property.constData(), row, encoded.constData());
+        if (!result.success) { error->setText(statusText(result)); return; }
+        dialog.accept();
+        rebuildFromRust(selected_grid_);
+        scheduleViewerCalculation();
+        reportBridgeStatus(tr("Updated vertex %1: %2").arg(row + 1).arg(token), true);
+    };
+    connect(value, &QLineEdit::returnPressed, &dialog, commit);
+    connect(note, &QLineEdit::returnPressed, &dialog, commit);
+    connect(state, qOverload<int>(&QComboBox::currentIndexChanged), &dialog, [=](int) { update_state(); });
+    connect(calculated, &QPushButton::clicked, &dialog, [=] { state->setCurrentIndex(state->findData(0)); value->setFocus(); });
+    connect(cut_off, &QPushButton::clicked, &dialog, [=] { state->setCurrentIndex(state->findData(2)); commit(); });
+    connect(clear, &QPushButton::clicked, &dialog, [=] { state->setCurrentIndex(state->findData(3)); commit(); });
+    connect(extrapolate, &QPushButton::clicked, &dialog, [this, &dialog, row] {
+        dialog.reject();
+        QTimer::singleShot(0, this, [this, row] { extrapolateViewerTargets({row}); });
+    });
+    connect(actions, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    update_state();
+    const auto screen = QGuiApplication::screenAt(global_position);
+    const auto bounds = screen ? screen->availableGeometry() : geometry();
+    dialog.adjustSize();
+    auto position = global_position + QPoint(12, 12);
+    position.setX(qBound(bounds.left(), position.x(), bounds.right() - dialog.width()));
+    position.setY(qBound(bounds.top(), position.y(), bounds.bottom() - dialog.height()));
+    dialog.move(position);
+    if (existing.state == 0) value->setFocus();
+    dialog.exec();
+}
 void MainWindow::showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position) {
-    if (viewer_.property.isEmpty()) return; if (!viewer_.selected_rows.contains(row)) { viewer_.selected_rows = {row}; ui_->canvasTernary->setSelectedRows(viewer_.selected_rows); }
-    QMenu menu(this); auto* missing = menu.addAction(tr("Set selected to Missing (NA)")); auto* cut_off = menu.addAction(tr("Set selected to Cut-off (CO)")); auto* clear_notes = menu.addAction(tr("Clear notes"));
-    const auto selected = menu.exec(global_position); if (!selected) return; const auto property = viewer_.property.toUtf8(); QVector<std::uint32_t> rows = viewer_.selected_rows.values(); TcqtStatus result{};
+    if (viewer_.property.isEmpty()) return;
+    if (!viewer_.selected_rows.contains(row)) {
+        viewer_.selected_rows = {row};
+        ui_->canvasTernary->setSelectedRows(viewer_.selected_rows);
+    }
+    QVector<std::uint32_t> eligible;
+    bool contains_calculated_or_cut_off = false;
+    for (const auto selected : viewer_.selected_rows) {
+        TcqtCell cell{};
+        if (!tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, selected, &cell).success) continue;
+        if (cell.state == 3) eligible.append(selected);
+        else if (cell.state == 0 || cell.state == 2) contains_calculated_or_cut_off = true;
+    }
+    QMenu menu(this);
+    auto* extrapolate_one = menu.addAction(tr("Extrapolate selected vertex"));
+    auto* extrapolate_many = menu.addAction(tr("Extrapolate selected vertices"));
+    auto* extrapolate_phase = menu.addAction(tr("Extrapolate missing vertices for selected phase..."));
+    auto* clear_extrapolated = menu.addAction(tr("Clear extrapolated values from selected phase..."));
+    menu.addSeparator();
+    auto* missing = menu.addAction(tr("Set selected to Missing (NA)"));
+    auto* cut_off = menu.addAction(tr("Set selected to Cut-off (CO)"));
+    auto* clear_notes = menu.addAction(tr("Clear notes"));
+    extrapolate_one->setEnabled(eligible.size() == 1 && viewer_.selected_rows.size() == 1);
+    extrapolate_many->setEnabled(!eligible.isEmpty());
+    extrapolate_many->setToolTip(contains_calculated_or_cut_off
+        ? tr("Calculated and cut-off rows will be skipped; only missing rows are candidates.")
+        : QString());
+    TcqtGrid grid{};
+    const bool regular = tcqt_grid_at(viewer_.grid_index, &grid).success && grid.kind == 0;
+    extrapolate_phase->setEnabled(regular);
+    extrapolate_phase->setToolTip(regular ? QString() : tr("Automatic mesh extrapolation is currently available for regular grids only."));
+    const auto selected = menu.exec(global_position);
+    if (!selected) return;
+    if (selected == extrapolate_one || selected == extrapolate_many) {
+        extrapolateViewerTargets(eligible);
+        return;
+    }
+    if (selected == extrapolate_phase) {
+        extrapolateViewerPhase();
+        return;
+    }
+    if (selected == clear_extrapolated) {
+        const auto status = tcqt_clear_extrapolated_phase_values(viewer_.grid_index, viewer_.phase_id);
+        reportBridgeStatus(statusText(status), status.success);
+        if (status.success) { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); }
+        return;
+    }
+    const auto property = viewer_.property.toUtf8();
+    QVector<std::uint32_t> rows = viewer_.selected_rows.values();
+    TcqtStatus result{};
     if (selected == clear_notes) result = tcqt_clear_field_notes(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size());
     else { const auto state = selected == cut_off ? 2U : 3U; result = tcqt_bulk_set_field_state(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size(), state); }
-    reportBridgeStatus(statusText(result), result.success); if (result.success) { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); }
+    reportBridgeStatus(statusText(result), result.success);
+    if (result.success) { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); }
 }
-
 bool MainWindow::commitViewerNumber(QLineEdit* editor, double* target, const QString& label) {
     bool ok = false; const auto value = QLocale::c().toDouble(editor->text(), &ok); if (!ok || !std::isfinite(value)) { editor->setToolTip(tr("%1 must be a finite number.").arg(label)); return false; } *target = value; return true;
 }

@@ -1,4 +1,5 @@
 #include "grid_table_model.hpp"
+#include "scalar_state_appearance.hpp"
 #include "rust_bridge.hpp"
 
 #include <QBrush>
@@ -58,16 +59,24 @@ QVariant GridTableModel::data(const QModelIndex& index, int role) const {
         return row.fields.value(index.column() - 3).token;
     }
     if (role == Qt::BackgroundRole && composition && regular_) return QBrush(Qt::lightGray);
+    if (role == Qt::BackgroundRole && !composition) {
+        const auto& cell = row.fields.at(index.column() - 3);
+        if (cell.state == 4) return QBrush(scalarStateAppearance(cell.state).fill.lighter(175));
+    }
+    if (role == Qt::ForegroundRole && !composition) {
+        const auto& cell = row.fields.at(index.column() - 3);
+        if (cell.state == 4 || cell.state == 2) return QBrush(scalarStateAppearance(cell.state).outline);
+    }
     if (role == Qt::ToolTipRole && !composition) {
         const auto& cell = row.fields.at(index.column() - 3);
         if (cell.state == 4) {
-            return tr("Extrapolated value\nLayer: %1\nMethod code: %2\nDirectional support: %3\nSpread: %4").arg(cell.extrapolationLayer).arg(cell.extrapolationMethod).arg(cell.extrapolationSupportCount).arg(cell.extrapolationSpread, 0, 'g', 12);
+            return tr("Extrapolated value\nLayer: %1\nMethod: %2\nDirectional support: %3\nSpread: %4").arg(cell.extrapolationLayer).arg(cell.extrapolationMethod == 0 ? tr("Akima") : cell.extrapolationMethod == 1 ? tr("Makima") : cell.extrapolationMethod == 2 ? tr("PCHIP") : tr("Steffen")).arg(cell.extrapolationSupportCount).arg(cell.extrapolationSpread, 0, 'g', 12);
         }
         if (cell.state == 2) {
-            return cell.note.isEmpty() ? tr("CO\nCut-off — the value is beyond an explicit cutoff or limit.") : tr("CO:%1\nCut-off — %1").arg(cell.note);
+            return cell.note.isEmpty() ? tr("CO\nCut-off - the value is beyond an explicit cutoff or limit.") : tr("CO:%1\nCut-off - %1").arg(cell.note);
         }
         if (cell.state == 3) {
-            return cell.note.isEmpty() ? tr("NA\nMissing — no numeric value is available.") : tr("NA:%1\nMissing — %1").arg(cell.note);
+            return cell.note.isEmpty() ? tr("NA\nMissing - no numeric value is available.") : tr("NA:%1\nMissing - %1").arg(cell.note);
         }
     }
     return {};

@@ -1,4 +1,5 @@
 #include "ternary_canvas.hpp"
+#include "scalar_state_appearance.hpp"
 
 #include <QMouseEvent>
 #include <QPainter>
@@ -103,12 +104,8 @@ std::optional<std::uint32_t> TernaryCanvas::vertexAt(const QPointF& point) const
     return best;
 }
 QColor TernaryCanvas::colorForState(std::uint32_t state) const {
-    switch (state) {
-    case 0: return QColor(42, 150, 75);
-    case 4: return QColor(45, 105, 190);
-    case 2: return QColor(215, 115, 35);
-    default: return palette().text().color();
-    }
+    const auto appearance = scalarStateAppearance(state);
+    return appearance.filled ? appearance.fill : appearance.outline;
 }
 bool TernaryCanvas::visibleState(std::uint32_t state) const {
     return state == 0 ? show_calculated_ : state == 4 ? show_extrapolated_ : state == 2 ? show_cut_off_ : show_missing_;
@@ -191,11 +188,18 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
             if (!visibleState(vertex.state)) continue;
             const auto point = pointForComposition(vertex.composition.x(), vertex.composition.y(), 1.0 - vertex.composition.x() - vertex.composition.y());
             const auto selected = selected_rows_.contains(vertex.row);
-            painter.setPen(QPen(selected ? QColor(30, 90, 210) : colorForState(vertex.state), selected ? 2.5 : 1.4));
-            if (vertex.state == 3 || vertex.state == 1) painter.setBrush(Qt::NoBrush); else painter.setBrush(colorForState(vertex.state));
-            if (vertex.state == 4) { painter.drawRect(QRectF(point.x() - marker_size_ * 0.5, point.y() - marker_size_ * 0.5, marker_size_, marker_size_)); }
-            else if (vertex.state == 2) { QPolygonF triangle_marker; triangle_marker << point + QPointF(0, -marker_size_) << point + QPointF(marker_size_, marker_size_) << point + QPointF(-marker_size_, marker_size_); painter.drawPolygon(triangle_marker); }
-            else painter.drawEllipse(point, marker_size_ * 0.55, marker_size_ * 0.55);
+            const auto appearance = scalarStateAppearance(vertex.state);
+            painter.setPen(QPen(selected ? QColor(30, 90, 210) : appearance.outline, selected ? 2.5 : 1.4));
+            painter.setBrush(appearance.filled ? QBrush(appearance.fill) : Qt::NoBrush);
+            if (appearance.marker == ScalarMarkerShape::Square) {
+                painter.drawRect(QRectF(point.x() - marker_size_ * 0.5, point.y() - marker_size_ * 0.5, marker_size_, marker_size_));
+            } else if (appearance.marker == ScalarMarkerShape::Triangle) {
+                QPolygonF triangle_marker;
+                triangle_marker << point + QPointF(0, -marker_size_) << point + QPointF(marker_size_, marker_size_) << point + QPointF(-marker_size_, marker_size_);
+                painter.drawPolygon(triangle_marker);
+            } else {
+                painter.drawEllipse(point, marker_size_ * 0.55, marker_size_ * 0.55);
+            }
             if (label_mode_ != 0 && (!labels_selected_only_ || selected)) {
                 QString label;
                 const auto state = vertex.state == 0 ? tr("Calculated") : vertex.state == 4 ? tr("EX") : vertex.state == 2 ? tr("CO") : tr("NA");
@@ -228,7 +232,7 @@ if (show_containing_triangle_) {
         const QRectF legend(10.0, 10.0, 148.0, 76.0);
         painter.setPen(QPen(palette().mid().color())); painter.setBrush(palette().base()); painter.drawRect(legend);
         painter.setPen(palette().text().color());
-        painter.drawText(legend.adjusted(7.0, 5.0, -7.0, -5.0), tr("Green: calculated\nGrey: non-existing\nOrange: cut-off\nHollow: missing"));
+        painter.drawText(legend.adjusted(7.0, 5.0, -7.0, -5.0), tr("Calculated (circle)\nExtrapolated (square)\nCut-off (triangle)\nMissing (hollow circle)"));
     }
     if (selected_composition_.x() >= 0.0) { painter.setPen(QPen(QColor(200, 60, 40), 2)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(pointForComposition(selected_composition_.x(), selected_composition_.y(), 1.0 - selected_composition_.x() - selected_composition_.y()), 6, 6); }
 }

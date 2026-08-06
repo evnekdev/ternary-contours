@@ -135,6 +135,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | buttonAddPhase | main_window.ui | QPushButton | DataPhases |
 | buttonAddProperty | main_window.ui | QPushButton | DataProperties |
 | buttonRemovePhase | main_window.ui | QPushButton | DataPhases |
+| buttonViewerExtrapolatePhase | main_window.ui | QPushButton | GridPointEditor |
 | buttonViewerResetAutomaticRange | main_window.ui | QPushButton | PlotLevels |
 | canvasTernary | main_window.ui | TernaryCanvas | PlotCanvas |
 | checkPropertyRequired | property_editor_dialog.ui | QCheckBox | DataProperties |
