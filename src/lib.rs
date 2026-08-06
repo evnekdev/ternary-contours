@@ -180,8 +180,8 @@ pub use stable::{
     StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair, StablePhaseSource,
     StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
     StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
-    StableUnivariantRegularizationDiagnostics, StableVerificationPassDiagnostics,
-    UnivariantTermination,
+    StableUnivariantRegularizationDiagnostics, StableUnivariantRegularizationFailure,
+    StableVerificationPassDiagnostics, UnivariantTermination,
 };
 pub use trace::{
     CompositionRegion, NoopTraceSink, NumericalTraceConfig, NumericalTraceEvent,

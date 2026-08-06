@@ -193,8 +193,24 @@ pub struct StableUnivariantPath {
     pub end: StableInvariantNodeId,
     pub points: Vec<TernaryCoordinate>,
     pub temperatures: Vec<f64>,
-    /// Present when optional post-topology regularization was requested.
+    /// Present when optional post-topology regularization was requested and
+    /// completed for this path. A path that could not be regularized retains
+    /// its valid raw geometry and is described by the network diagnostic.
     pub regularization: Option<StableUnivariantRegularizationDiagnostics>,
+}
+
+/// A non-fatal failure to regularize one already-valid raw univariant.
+///
+/// Stable topology is constructed before regularization. Consequently a
+/// regularization failure must never invalidate invariant ownership or remove
+/// the raw equality branch from the network.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StableUnivariantRegularizationFailure {
+    pub path: StableUnivariantId,
+    pub phases: StablePhasePair,
+    pub start: StableInvariantNodeId,
+    pub end: StableInvariantNodeId,
+    pub error: StableBoundaryError,
 }
 
 /// Typed terminal state for a phase-pair equality branch.
@@ -406,6 +422,9 @@ pub struct StableBoundaryNetwork {
     pub univariants: Vec<StableUnivariantPath>,
     /// Diagnostic-only branches that terminate at a source-domain boundary.
     pub truncated_univariants: Vec<StableTruncatedUnivariantPath>,
+    /// Paths whose optional regularization was rejected. Their corresponding
+    /// entries in univariants retain raw geometry.
+    pub regularization_failures: Vec<StableUnivariantRegularizationFailure>,
     pub binary_traces: Vec<BinaryBoundaryTrace>,
     pub diagnostics: StableBoundaryDiagnostics,
     incidence: Vec<Vec<StableUnivariantId>>,
@@ -2616,6 +2635,17 @@ fn regularize_univariant(
     Ok(())
 }
 
+fn is_recoverable_regularization_failure(error: &StableBoundaryError) -> bool {
+    matches!(
+        error,
+        StableBoundaryError::RegularizationUndefinedPhase { .. }
+            | StableBoundaryError::RegularizationUnstableProjection { .. }
+            | StableBoundaryError::RegularizationZeroGradient { .. }
+            | StableBoundaryError::RegularizationNonConvergence { .. }
+            | StableBoundaryError::RegularizationBranchSwitch { .. }
+    )
+}
+
 fn regularize_network(
     network: &mut StableBoundaryNetwork,
     layers: &[PreparedSourceLayer<'_>],
@@ -2625,7 +2655,10 @@ fn regularize_network(
     options: PathRegularizationOptions,
 ) -> Result<(), StableBoundaryError> {
     for path in &mut network.univariants {
-        regularize_univariant(
+        // The regularizer updates a path only after all validation has
+        // completed. A recoverable failure therefore leaves its raw geometry
+        // intact and can be reported without weakening graph validation.
+        if let Err(error) = regularize_univariant(
             path,
             &network.nodes,
             layers,
@@ -2633,7 +2666,20 @@ fn regularize_network(
             phase_ids,
             boundary_options,
             options,
-        )?;
+        ) {
+            if !is_recoverable_regularization_failure(&error) {
+                return Err(error);
+            }
+            network
+                .regularization_failures
+                .push(StableUnivariantRegularizationFailure {
+                    path: path.id,
+                    phases: path.phases,
+                    start: path.start,
+                    end: path.end,
+                    error,
+                });
+        }
     }
     Ok(())
 }
@@ -2788,6 +2834,7 @@ pub(crate) fn build_stable_boundary_network(
         nodes,
         univariants,
         truncated_univariants,
+        regularization_failures: Vec::new(),
         binary_traces: traces,
         diagnostics,
         incidence,

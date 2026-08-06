@@ -283,6 +283,7 @@ pub struct TcqtProjectionSummary {
     pub regularized_projection_available: bool,
     pub selected_projection_regularized: bool,
     pub domain_truncated_univariant_count: u32,
+    pub regularization_failure_count: u32,
     pub message: [u8; MESSAGE],
 }
 
@@ -2751,6 +2752,7 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 regularized_projection_available: state.regularized_projection.is_some(),
                 selected_projection_regularized: effective.regularize,
                 domain_truncated_univariant_count: 0,
+                regularization_failure_count: 0,
                 message: bytes("No projection has been calculated."),
             };
             return Ok(());
@@ -2808,7 +2810,15 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 .diagnostics
                 .domain_truncated_univariant_count
                 as u32,
-            message: bytes("Projection is current."),
+            regularization_failure_count: projection.diagnostics.regularization_failure_count
+                as u32,
+            message: bytes(
+                if projection.diagnostics.regularization_failure_count == 0 {
+                    "Projection is current."
+                } else {
+                    "Raw topology is current; one or more univariants could not be regularized."
+                },
+            ),
         };
         Ok(())
     })())

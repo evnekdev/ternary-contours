@@ -132,6 +132,8 @@ pub struct ProjectionDiagnostics {
     pub univariant_count: usize,
     /// Equality branches retained as typed source-domain truncation diagnostics.
     pub domain_truncated_univariant_count: usize,
+    /// Raw univariants retained after their optional regularization failed.
+    pub regularization_failure_count: usize,
     /// Local interpolation summaries for partial regular cubic-alpha fields.
     pub partial_cubic_summaries: Vec<String>,
     /// Finite EX source cells accepted by this projection request.
@@ -765,6 +767,7 @@ pub(crate) fn calculate_projection_with_trace_session(
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
         domain_truncated_univariant_count: stable_boundaries.truncated_univariants.len(),
+        regularization_failure_count: stable_boundaries.regularization_failures.len(),
         partial_cubic_summaries,
         extrapolated_source_values_used,
         maximum_extrapolation_layer_used,
