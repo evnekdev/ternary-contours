@@ -30,6 +30,10 @@ private:
         QString token;
         std::uint32_t state = 3;
         QString note;
+        std::uint32_t extrapolationLayer = 0;
+        std::uint32_t extrapolationMethod = 0;
+        std::uint32_t extrapolationSupportCount = 0;
+        double extrapolationSpread = 0.0;
     };
     struct Row { double a; double b; double c; QVector<FieldCell> fields; };
     QString tokenForCell(std::uint32_t state, bool has_value, double value, std::uint32_t extrapolation_layer, const char* note) const;
