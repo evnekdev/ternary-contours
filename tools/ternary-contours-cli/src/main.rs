@@ -59,6 +59,8 @@ enum Command {
     /// Fill eligible NA cells on a regular mesh with provenance-preserving EX values.
     ExtrapolateMesh(ExtrapolateMeshArgs),
     AuditBinaryEdges(AuditBinaryEdgesArgs),
+    /// Run a deterministic stable-topology repeatability and resolution audit.
+    AuditStableTopology(AuditStableTopologyArgs),
     /// Produce an opt-in numerical projection trace (requires `--features trace`).
     TraceProjection(TraceProjectionArgs),
     /// Analyze a numerical trace JSON Lines file (requires `--features trace`).
@@ -238,6 +240,21 @@ struct AuditBinaryEdgesArgs {
     source_interpolation: SourceInterpolationArg,
 }
 #[derive(Args)]
+struct AuditStableTopologyArgs {
+    input: PathBuf,
+    #[arg(long)]
+    output: PathBuf,
+    #[arg(long, value_delimiter = ',', default_value = "6,7,8,10,12,16,20,30,40")]
+    sampling_subdivisions: Vec<usize>,
+    #[arg(long, default_value_t = 5)]
+    repeat_count: usize,
+    #[arg(long)]
+    regularize: bool,
+    #[arg(long)]
+    regularization_spacing: Option<f64>,
+}
+
+#[derive(Args)]
 struct TraceProjectionArgs {
     input: PathBuf,
     #[arg(short, long)]
@@ -375,6 +392,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         Some(Command::Template { kind }) => template(kind),
         Some(Command::ExtrapolateMesh(args)) => extrapolate_mesh(args),
         Some(Command::AuditBinaryEdges(args)) => audit_binary_edges(args),
+        Some(Command::AuditStableTopology(args)) => audit_stable_topology(args),
         Some(Command::TraceProjection(args)) => trace_projection(args),
         Some(Command::AnalyzeTrace { input }) => analyze_trace_command(input),
         Some(Command::View { input, options }) => view(input, options),
@@ -652,6 +670,178 @@ fn write_generated(output: Option<PathBuf>, content: String) -> Result<(), Box<d
     }
     Ok(())
 }
+fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Error>> {
+    if args.repeat_count == 0 || args.sampling_subdivisions.is_empty() {
+        return Err("repeat count and sampling subdivisions must be positive".into());
+    }
+    std::fs::create_dir_all(&args.output)?;
+    let input_bytes = std::fs::read(&args.input)?;
+    let input_hash = input_bytes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let dataset = parse_path(&args.input)?;
+    let mut runs = String::from(
+        "sampling\trepeat\tstatus\tsignature\tbinary\tinterior\tunivariants\ttruncated\tregularization_failures\n",
+    );
+    let mut invariants =
+        String::from("sampling\trepeat\tkind\tphases\ta\tb\tc\ttemperature\tdegree\n");
+    let mut univariants = String::from("sampling\trepeat\tphases\tstart\tend\traw_points\tstate\n");
+    let mut failures = String::from("sampling\trepeat\tpath\tphases\terror\n");
+    let mut signatures = Vec::new();
+    for &sampling in &args.sampling_subdivisions {
+        for repeat in 0..args.repeat_count {
+            let options = ProjectionOptions {
+                automatic_level_step: Some(100.0),
+                sampling_subdivisions: Some(sampling),
+                regularize: args.regularize,
+                regularization_spacing: args.regularization_spacing,
+                ..ProjectionOptions::default()
+            };
+            match calculate_projection(&dataset, &options) {
+                Ok(projection) => {
+                    let mut node_records = projection
+                        .stable_boundaries
+                        .nodes
+                        .iter()
+                        .map(|node| {
+                            let kind = if matches!(node, StableInvariantNode::Binary(_)) {
+                                "binary"
+                            } else {
+                                "interior"
+                            };
+                            let mut phases = node
+                                .phases()
+                                .iter()
+                                .map(|phase| phase.0)
+                                .collect::<Vec<_>>();
+                            phases.sort();
+                            let point = node.point().as_array();
+                            format!(
+                                "{kind}:{phases:?}:{:.10}:{:.10}:{:.10}:{:.8}",
+                                point[0],
+                                point[1],
+                                point[2],
+                                node.temperature()
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    node_records.sort();
+                    let mut edge_records = projection
+                        .stable_boundaries
+                        .univariants
+                        .iter()
+                        .map(|path| {
+                            let mut phases = [path.phases.first.0, path.phases.second.0];
+                            phases.sort();
+                            format!(
+                                "{:?}:{}:{}",
+                                phases,
+                                path.start.0.min(path.end.0),
+                                path.start.0.max(path.end.0)
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    edge_records.sort();
+                    let signature =
+                        format!("{}|{}", node_records.join(";"), edge_records.join(";"));
+                    signatures.push((sampling, repeat, signature.clone()));
+                    let binary = projection
+                        .stable_boundaries
+                        .nodes
+                        .iter()
+                        .filter(|node| matches!(node, StableInvariantNode::Binary(_)))
+                        .count();
+                    let interior = projection.stable_boundaries.nodes.len() - binary;
+                    runs.push_str(&format!("{sampling}\t{repeat}\tok\t{signature:?}\t{binary}\t{interior}\t{}\t{}\t{}\n", projection.stable_boundaries.univariants.len(), projection.stable_boundaries.truncated_univariants.len(), projection.stable_boundaries.regularization_failures.len()));
+                    for node in &projection.stable_boundaries.nodes {
+                        let kind = if matches!(node, StableInvariantNode::Binary(_)) {
+                            "binary"
+                        } else {
+                            "interior"
+                        };
+                        let point = node.point().as_array();
+                        let phases = node
+                            .phases()
+                            .iter()
+                            .map(|phase| phase.0.to_string())
+                            .collect::<Vec<_>>()
+                            .join(",");
+                        let degree = projection
+                            .stable_boundaries
+                            .incident_univariants(node.id())?
+                            .len();
+                        invariants.push_str(&format!("{sampling}\t{repeat}\t{kind}\t{phases}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\n",point[0],point[1],point[2],node.temperature()));
+                    }
+                    for path in &projection.stable_boundaries.univariants {
+                        let state = if path.regularization.is_some() {
+                            "regularized"
+                        } else if projection
+                            .stable_boundaries
+                            .regularization_failures
+                            .iter()
+                            .any(|failure| failure.path == path.id)
+                        {
+                            "raw_fallback"
+                        } else {
+                            "raw"
+                        };
+                        univariants.push_str(&format!(
+                            "{sampling}\t{repeat}\t{},{}\t{}\t{}\t{}\t{state}\n",
+                            path.phases.first.0,
+                            path.phases.second.0,
+                            path.start.0,
+                            path.end.0,
+                            path.points.len()
+                        ));
+                    }
+                    for failure in &projection.stable_boundaries.regularization_failures {
+                        failures.push_str(&format!(
+                            "{sampling}\t{repeat}\t{}\t{},{}\t{}\n",
+                            failure.path.0,
+                            failure.phases.first.0,
+                            failure.phases.second.0,
+                            failure.error
+                        ));
+                    }
+                }
+                Err(error) => runs.push_str(&format!(
+                    "{sampling}\t{repeat}\terror\t{:?}\t0\t0\t0\t0\t0\n",
+                    error.to_string()
+                )),
+            }
+        }
+    }
+    let repeatable = signatures
+        .iter()
+        .filter(|(sampling, _, _)| *sampling == 20)
+        .map(|(_, _, signature)| signature)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        <= 1;
+    let summary = format!(
+        "{{\n  \"input\": {:?},\n  \"fnv1a64\": \"{:016x}\",\n  \"repeatable_at_20\": {},\n  \"runs\": {}\n}}\n",
+        args.input,
+        input_hash,
+        repeatable,
+        signatures.len()
+    );
+    let report = format!(
+        "# Stable topology audit\n\nInput: `{}`\n\nRepeatable at sampling 20: **{}**.\n\nCanonical signatures are stored in `runs.tsv`; node and edge details are stored separately.\n",
+        args.input.display(),
+        repeatable
+    );
+    std::fs::write(args.output.join("summary.json"), summary)?;
+    std::fs::write(args.output.join("runs.tsv"), runs)?;
+    std::fs::write(args.output.join("invariants.tsv"), invariants)?;
+    std::fs::write(args.output.join("univariants.tsv"), univariants)?;
+    std::fs::write(args.output.join("regularization-failures.tsv"), failures)?;
+    std::fs::write(args.output.join("comparison-report.md"), report)?;
+    println!("Stable topology audit written to {}", args.output.display());
+    Ok(())
+}
+
 #[cfg(feature = "trace")]
 fn trace_projection(args: TraceProjectionArgs) -> Result<(), Box<dyn Error>> {
     let input_content_hash = trace_input_hash(&args.input)?;
