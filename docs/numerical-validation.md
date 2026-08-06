@@ -150,7 +150,20 @@ at the production Cubic alpha/Akima/Muggianu/one-sided-then-linear options is
 three binary invariants, one interior invariant, and three complete
 univariants. Regularization is evaluated after that raw graph; a per-path
 `RawFallback` is reported separately and does not remove an accepted raw node
-or edge.
+or edge. `runs.tsv` additionally records pair-driven triplets attempted,
+continuous roots converged, and roots attached to all incident pair branches;
+`invariants.tsv` records the independently verified maximum equality residual
+and stability margin for each interior node. Failed calculations retain their
+typed error in the final `error` column of `runs.tsv`.
+
+The detailed persisted-EX CaO–PbO–ZnO audit uses its source file unchanged.
+At the canonical Cubic alpha/Akima/Muggianu/one-sided-then-linear model it is
+repeatable through sampling subdivisions 6–40 and has a 3-binary,
+1-interior, 3-complete-univariant topology. The continuous interior solve is
+approximately `(0.0948132375, 0.8568845056, 0.0483022569)` at
+`815.9637563`, with a maximum equality residual below `6e-13` in the recorded
+run. This is diagnostic fixture evidence, not a general physical accuracy
+claim.
 
 ## Limits
 

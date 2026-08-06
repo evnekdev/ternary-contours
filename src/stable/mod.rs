@@ -20,9 +20,9 @@ pub use boundary::{
     BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
     BinaryStableRegion, BinaryTransitionUnavailableReason, InteriorInvariantNode,
     PartialBinaryTransition, StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork,
-    StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StablePathGeometryState,
-    StablePhasePair, StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId,
-    StableUnivariantPath, StableUnivariantRegularizationDiagnostics,
+    StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StableInvariantVerification,
+    StablePathGeometryState, StablePhasePair, StableTruncatedUnivariantPath, StableUnivariantEndId,
+    StableUnivariantId, StableUnivariantPath, StableUnivariantRegularizationDiagnostics,
     StableUnivariantRegularizationFailure, UnivariantTermination,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};

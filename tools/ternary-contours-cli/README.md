@@ -86,7 +86,11 @@ distinguish moved geometry from changed stable connectivity. The command accepts
 the same source interpolation, cubic method, partial-domain policy,
 continuation, regularization, and spacing choices as the Viewer projection.
 A `raw_fallback` row means raw topology was accepted but optional path
-regularization was unavailable for that path.
+regularization was unavailable for that path. The audit's `runs.tsv` also
+records pair-driven triplets attempted, continuous roots converged, and roots
+attached to the stable pair graph. `invariants.tsv` includes the verified
+maximum equality residual and stability margin for interior invariant nodes;
+failed rows retain their typed calculation error.
 
 ## Interactive viewer
 

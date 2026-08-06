@@ -854,10 +854,11 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
     let dataset = parse_path(&args.input)?;
     let interpolation = audit_interpolation_options(&args);
     let mut runs = String::from(
-        "sampling\trepeat\tstatus\texact_hash\ttolerance_hash\ttopology_hash\tbinary\tinterior\tunivariants\ttruncated\tregularization_failures\n",
+        "sampling\trepeat\tstatus\texact_hash\ttolerance_hash\ttopology_hash\tbinary\tinterior\tunivariants\ttruncated\tregularization_failures\tpair_driven_candidates\tpair_driven_roots\tpair_driven_accepted\terror\n",
     );
-    let mut invariants =
-        String::from("sampling\trepeat\tid\tkind\tphases\ta\tb\tc\ttemperature\tdegree\n");
+    let mut invariants = String::from(
+        "sampling\trepeat\tid\tkind\tphases\ta\tb\tc\ttemperature\tdegree\tmaximum_equality_residual\tstability_margin\n",
+    );
     let mut univariants = String::from(
         "sampling\trepeat\tid\tphases\tstart\tend\traw_points\tlogical_length\tstate\n",
     );
@@ -889,10 +890,13 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                         .count();
                     let interior = projection.stable_boundaries.nodes.len() - binary;
                     runs.push_str(&format!(
-                        "{sampling}\t{repeat}\tok\t{exact_hash:016x}\t{tolerance_hash:016x}\t{topology_hash:016x}\t{binary}\t{interior}\t{}\t{}\t{}\n",
+                        "{sampling}\t{repeat}\tok\t{exact_hash:016x}\t{tolerance_hash:016x}\t{topology_hash:016x}\t{binary}\t{interior}\t{}\t{}\t{}\t{}\t{}\t{}\t\n",
                         projection.stable_boundaries.univariants.len(),
                         projection.stable_boundaries.truncated_univariants.len(),
                         projection.stable_boundaries.regularization_failures.len(),
+                        projection.stable_boundaries.diagnostics.pair_driven_invariant_candidates,
+                        projection.stable_boundaries.diagnostics.pair_driven_roots_converged,
+                        projection.stable_boundaries.diagnostics.pair_driven_invariants_accepted,
                     ));
                     for node in &projection.stable_boundaries.nodes {
                         let kind = if matches!(node, StableInvariantNode::Binary(_)) {
@@ -905,8 +909,21 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                             .stable_boundaries
                             .incident_univariants(node.id())?
                             .len();
+                        let verification = projection
+                            .stable_boundaries
+                            .interior_invariant_verifications
+                            .iter()
+                            .find(|verification| verification.node == node.id());
+                        let residual = verification
+                            .map(|verification| {
+                                format!("{:.16}", verification.maximum_equality_residual)
+                            })
+                            .unwrap_or_default();
+                        let margin = verification
+                            .map(|verification| format!("{:.16}", verification.stability_margin))
+                            .unwrap_or_default();
                         invariants.push_str(&format!(
-                            "{sampling}\t{repeat}\t{}\t{kind}\t{}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\n",
+                            "{sampling}\t{repeat}\t{}\t{kind}\t{}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\t{residual}\t{margin}\n",
                             node.id().0,
                             phase_signature(node),
                             point[0],
@@ -954,11 +971,11 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                         ));
                     }
                 }
-                Err(error) => {
+                Err(_error) => {
                     failures_by_run += 1;
                     runs.push_str(&format!(
-                        "{sampling}\t{repeat}\terror\t\t\t\t0\t0\t0\t0\t0\t{}\n",
-                        error.to_string().replace(['\t', '\n'], " "),
+                        "{sampling}\t{repeat}\terror\t\t\t0\t0\t0\t0\t0\t0\t0\t0\t{}\n",
+                        _error.to_string().replace(['\t', '\n'], " "),
                     ));
                 }
             }

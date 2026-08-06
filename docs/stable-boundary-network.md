@@ -109,9 +109,24 @@ classified as a sampled triple tie.
 
 An accepted continuous node is attached to all compatible pair branches. When
 it occurs in a local fragment interior, that fragment is split into two
-nonzero child fragments; endpoint identity remains the full canonical node ID
-and full-precision composition. A coarse composition signature, when reported
-by diagnostics, is never used to merge nodes.
+nonzero child fragments. When it refines a sampled triple-tie endpoint, the
+matching local endpoint is relocated to the continuous coordinate instead of
+retaining the affine sampled coordinate as a second node. The sampled endpoint
+is only a bounded topology seed; continuous residuals and the full-precision
+node coordinate remain authoritative. Endpoint relocation is deterministic and
+requires the same complete phase set in the local patch. Endpoint identity
+remains the full canonical node ID and full-precision composition. A coarse
+composition signature, when reported by diagnostics, is never used to merge
+nodes.
+
+Before adjacency is built, every accepted interior node is reevaluated through
+the prepared continuous source evaluators. All participating values must be
+finite, the maximum equality residual must satisfy
+`StableBoundaryOptions::temperature_tolerance`, and no nonparticipating phase
+may exceed the common temperature beyond `stability_tolerance`. The resulting
+`StableInvariantVerification` records phase values, equality residual, and
+stability margin. A sampled triple tie that cannot pass this check is rejected
+rather than silently becoming graph topology.
 
 Every fragment incident to a node creates a deterministic pending half-edge.
 Traversal consumes the lowest pending key first, orients each fragment away
