@@ -162,8 +162,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     ui_->tableGridValues->setContextMenuPolicy(Qt::CustomContextMenu);
     ui_->tableGridValues->addAction(ui_->actionGridCopy);
     ui_->tableGridValues->addAction(ui_->actionGridPaste);
-    auto* results_model = new QStandardItemModel(0, 10, ui_->tableInterpolationResults);
-    results_model->setHorizontalHeaderLabels({tr("Index"), tr("A"), tr("B"), tr("C"), tr("Value"), tr("State"), tr("Grid"), tr("Phase"), tr("Property"), tr("Method")});
+    auto* results_model = new QStandardItemModel(0, 11, ui_->tableInterpolationResults);
+    results_model->setHorizontalHeaderLabels({tr("Index"), tr("A"), tr("B"), tr("C"), tr("Value"), tr("State"), tr("Grid"), tr("Phase"), tr("Property"), tr("Method"), tr("Source provenance")});
     ui_->tableInterpolationResults->setModel(results_model);
     connect(ui_->tableInterpolationResults->selectionModel(), &QItemSelectionModel::currentChanged, this,
             [this](const QModelIndex& current, const QModelIndex&) {
@@ -1287,22 +1287,20 @@ void MainWindow::runRustCalculation() {
                     ui_->editViewerTmin->setText(source.toString(projection.effective_minimum, 'g', 10));
                     ui_->editViewerTmax->setText(source.toString(projection.effective_maximum, 'g', 10));
                 }
-                ui_->labelViewerLevelPreview->setText(
-                    tr("%1 levels; %2 binary invariants, %3 ternary invariant%4, %5 univariants, %6 isotherm paths")
-                        .arg(projection.level_count)
-                        .arg(projection.binary_invariant_count)
-                        .arg(projection.interior_invariant_count)
-                        .arg(projection.interior_invariant_count == 1 ? QString() : QStringLiteral("s"))
-                        .arg(projection.univariant_count)
-                        .arg(projection.contour_path_count));
-                setViewerCalculationStatus(
-                    tr("%1 levels, %2 binary invariants, %3 ternary invariant%4, %5 univariants, %6 isotherm paths")
-                        .arg(projection.level_count)
-                        .arg(projection.binary_invariant_count)
-                        .arg(projection.interior_invariant_count)
-                        .arg(projection.interior_invariant_count == 1 ? QString() : QStringLiteral("s"))
-                        .arg(projection.univariant_count)
-                        .arg(projection.contour_path_count));
+                auto projection_summary = tr("%1 levels, %2 binary invariants, %3 ternary invariant%4, %5 complete univariants, %6 isotherm paths")
+                    .arg(projection.level_count)
+                    .arg(projection.binary_invariant_count)
+                    .arg(projection.interior_invariant_count)
+                    .arg(projection.interior_invariant_count == 1 ? QString() : QStringLiteral("s"))
+                    .arg(projection.univariant_count)
+                    .arg(projection.contour_path_count);
+                if (projection.domain_truncated_univariant_count != 0) {
+                    projection_summary += tr("; %1 domain-truncated branch%2 retained as diagnostics")
+                        .arg(projection.domain_truncated_univariant_count)
+                        .arg(projection.domain_truncated_univariant_count == 1 ? QString() : QStringLiteral("es"));
+                }
+                ui_->labelViewerLevelPreview->setText(projection_summary);
+                setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(
                     tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14")
                         .arg(projection.effective_automatic_range ? tr("automatic") : tr("manual"))
@@ -1450,7 +1448,12 @@ bool MainWindow::refreshProjectionCanvas(bool accept_empty) {
     for (std::uint32_t index = 0; index < count; ++index) {
         TcqtProjectionRecord record{};
         if (!tcqt_projection_record_at(index, &record).success) return false;
-        const auto key = QString::number(record.line_type) + QStringLiteral(":") + text(record.line_id);
+        // Raw and regularized variants intentionally share stable line IDs. Keep
+        // their path source in the grouping key so Overlay retains both geometries.
+        const auto key = QString::number(record.path_source) + QStringLiteral(":")
+            + QString::number(record.line_type) + QStringLiteral(":")
+            + text(record.phase_1) + QStringLiteral(":") + text(record.phase_2)
+            + QStringLiteral(":") + text(record.line_id);
         auto& path = paths[key];
         path.type = record.line_type;
         path.rgba = record.rgba;
@@ -1490,7 +1493,14 @@ void MainWindow::refreshViewerQueries() {
         QList<QStandardItem*> row;
         row << new QStandardItem(QString::number(query.id)) << new QStandardItem(QLocale::c().toString(query.a, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.b, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.c, 'g', 10));
         row << new QStandardItem(result.has_value ? QLocale::c().toString(result.value, 'g', 12) : (result.state == 3 ? QStringLiteral("CO") : QStringLiteral("NA")));
-        row << new QStandardItem(text(result.message)) << new QStandardItem(QString::number(viewer_.grid_index)) << new QStandardItem(QString::number(viewer_.phase_id)) << new QStandardItem(viewer_.property) << new QStandardItem(result.local_mode == 0 ? tr("Cubic") : result.local_mode == 1 ? tr("One-sided cubic") : result.local_mode == 2 ? tr("Linear") : tr("Undefined"));
+        const auto provenance = result.uses_extrapolated_sources
+            ? tr("EX%1, %2; %3 source row%4")
+                  .arg(result.maximum_extrapolation_layer)
+                  .arg(text(result.extrapolation_methods))
+                  .arg(result.extrapolated_source_row_count)
+                  .arg(result.extrapolated_source_row_count == 1 ? QString() : QStringLiteral("s"))
+            : tr("Calculated sources only");
+        row << new QStandardItem(text(result.message)) << new QStandardItem(QString::number(viewer_.grid_index)) << new QStandardItem(QString::number(viewer_.phase_id)) << new QStandardItem(viewer_.property) << new QStandardItem(result.local_mode == 0 ? tr("Cubic") : result.local_mode == 1 ? tr("One-sided cubic") : result.local_mode == 2 ? tr("Linear") : tr("Undefined")) << new QStandardItem(provenance);
         model->appendRow(row);
     }
     const auto current = ui_->tableInterpolationResults->currentIndex();
@@ -1609,6 +1619,13 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
         reportBridgeStatus(tr("Unsupported Viewer option selection."), false);
         return false;
     }
+    TcqtGrid selected_grid{};
+    if (source_interpolation == 1
+        && tcqt_grid_at(viewer_.grid_index, &selected_grid).success
+        && selected_grid.kind != 0) {
+        reportBridgeStatus(tr("Cubic alpha is unavailable for irregular grids. Select Linear source interpolation."), false);
+        return false;
+    }
     viewer_.options.sampling_subdivisions = static_cast<std::uint32_t>(ui_->spinViewerSamplingSubdivisions->value());
     viewer_.options.source_interpolation = source_interpolation;
     viewer_.options.cubic_method = cubic_method;
@@ -1689,9 +1706,17 @@ void MainWindow::updateViewerActionState() {
     for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants}) { action->setEnabled(viewer_.has_last_valid_projection); action->setToolTip(viewer_.has_last_valid_projection ? QString() : unavailable); }
     ui_->buttonViewerResetAutomaticRange->setEnabled(summary.calculation_available);
     for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerAutomaticRange), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->editViewerStep), static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing)}) control->setEnabled(summary.calculation_available);
-    ui_->comboViewerCubicMethod->setEnabled(summary.calculation_available && ui_->comboViewerSourceInterpolation->currentIndex() == 1);
-    ui_->comboViewerPartialDomain->setEnabled(summary.calculation_available && ui_->comboViewerSourceInterpolation->currentIndex() == 1);
-    ui_->comboViewerContinuation->setEnabled(summary.calculation_available && ui_->comboViewerSourceInterpolation->currentIndex() == 1);
+    const bool cubic_selected = ui_->comboViewerSourceInterpolation->currentIndex() == 1;
+    const bool cubic_available = summary.calculation_available && cubic_selected && regular_inspection_grid;
+    const auto cubic_reason = !regular_inspection_grid
+        ? tr("Cubic alpha is unavailable for irregular grids. Select Linear source interpolation.")
+        : !cubic_selected ? tr("Select Cubic alpha to configure cubic controls.") : QString();
+    for (QWidget* control : {static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation)}) {
+        control->setEnabled(cubic_available);
+        control->setToolTip(cubic_available ? QString() : cubic_reason);
+    }
+    ui_->comboViewerSourceInterpolation->setToolTip(!regular_inspection_grid
+        ? tr("Irregular grids support Linear source interpolation only.") : QString());
     if (!summary.calculation_available) setViewerCalculationStatus(tr("Waiting for calculation-ready data"));
 }
 
@@ -1723,7 +1748,7 @@ void MainWindow::updateViewerSelectionDetails() {
     const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 4 ? tr("Extrapolated") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
     const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("-");
     const auto note = text(cell.note);
-    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
+    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) · %7\nState: %8\nValue: %9\nNote: %10")
         .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
         .arg(ui_->comboViewerPhase->currentText()).arg(viewer_.phase_id).arg(viewer_.property).arg(state, value, note));
 }

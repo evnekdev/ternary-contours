@@ -197,6 +197,28 @@ pub struct StableUnivariantPath {
     pub regularization: Option<StableUnivariantRegularizationDiagnostics>,
 }
 
+/// Typed terminal state for a phase-pair equality branch.
+///
+/// Complete paths always end at an invariant. A source-domain boundary is a
+/// legitimate, explicitly diagnostic-only termination and is never fabricated
+/// into an invariant endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum UnivariantTermination {
+    ReachedSourceDomainBoundary { point: TernaryCoordinate },
+}
+
+/// A phase-pair equality branch that could not reach a second invariant because
+/// the available source domain ended. It is retained separately from complete
+/// stable univariants so callers can render or report it without treating it
+/// as a topological connection.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StableTruncatedUnivariantPath {
+    pub start: StableInvariantNodeId,
+    pub phases: StablePhasePair,
+    pub points: Vec<TernaryCoordinate>,
+    pub temperatures: Vec<f64>,
+    pub termination: UnivariantTermination,
+}
 /// Why a sampled binary stable-phase change could not yield a safe invariant.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BinaryTransitionUnavailableReason {
@@ -363,6 +385,8 @@ pub struct StableBoundaryDiagnostics {
     pub pending_ends_consumed: usize,
     pub univariant_traces_started: usize,
     pub completed_univariants: usize,
+    /// Equality branches that reached an unavailable source-domain boundary.
+    pub domain_truncated_univariants: usize,
     pub sampling_edge_crossings: usize,
     pub sampling_vertex_crossings: usize,
     pub reused_canonical_edge_hits: usize,
@@ -380,6 +404,8 @@ pub struct StableBoundaryDiagnostics {
 pub struct StableBoundaryNetwork {
     pub nodes: Vec<StableInvariantNode>,
     pub univariants: Vec<StableUnivariantPath>,
+    /// Diagnostic-only branches that terminate at a source-domain boundary.
+    pub truncated_univariants: Vec<StableTruncatedUnivariantPath>,
     pub binary_traces: Vec<BinaryBoundaryTrace>,
     pub diagnostics: StableBoundaryDiagnostics,
     incidence: Vec<Vec<StableUnivariantId>>,
@@ -466,6 +492,14 @@ pub enum StableBoundaryError {
     UnivariantLeftStablePairRegion {
         phases: StablePhasePair,
         point: TernaryCoordinate,
+    },
+    /// A sampled equality branch reached an unavailable source-domain edge before a second invariant.
+    UnivariantTerminatedAtSourceDomain {
+        start: StableInvariantNodeId,
+        phases: StablePhasePair,
+        point: TernaryCoordinate,
+        points: Vec<TernaryCoordinate>,
+        temperatures: Vec<f64>,
     },
     InvariantSolveOutsideTriangle {
         triangle: usize,
@@ -617,6 +651,11 @@ impl fmt::Display for StableBoundaryError {
             Self::UnivariantLeftStablePairRegion { phases, point } => write!(
                 formatter,
                 "univariant {phases:?} left its stable pair region at {:?}",
+                point.as_array()
+            ),
+            Self::UnivariantTerminatedAtSourceDomain { phases, point, .. } => write!(
+                formatter,
+                "univariant {phases:?} reached an unavailable source-domain boundary at {:?}",
                 point.as_array()
             ),
             Self::InvariantSolveOutsideTriangle { triangle } => {
@@ -1993,6 +2032,25 @@ fn consume_pending(
     Ok(())
 }
 
+/// Consume only pending endpoints carried by one already-traversed truncated
+/// branch. This intentionally does not consume every pending end for the phase
+/// pair: independent branches remain available for tracing and diagnostics.
+fn consume_truncated_branch_pending_ends(
+    pending: &mut [PendingStableUnivariantEnd],
+    used: &[bool],
+    phases: StablePhasePair,
+    diagnostics: &mut StableBoundaryDiagnostics,
+) {
+    for end in pending {
+        if !end.consumed
+            && end.key.phases == phases
+            && used.get(end.fragment).copied().unwrap_or(false)
+        {
+            end.consumed = true;
+            diagnostics.pending_ends_consumed += 1;
+        }
+    }
+}
 #[allow(clippy::too_many_arguments)]
 fn trace_one_univariant(
     start_pending: usize,
@@ -2082,9 +2140,24 @@ fn trace_one_univariant(
         let Some((next_fragment, next_entry_side)) =
             choose_forward_fragment(candidates, fragments, used, fragment_index, incoming)?
         else {
+            // No other fragment at this feature is a genuine source-domain
+            // termination. A candidate that exists but cannot be followed is
+            // a graph/traversal fault and must not be hidden as a boundary.
+            if candidates
+                .iter()
+                .all(|(candidate, _)| *candidate == fragment_index)
+            {
+                return Err(StableBoundaryError::UnivariantTerminatedAtSourceDomain {
+                    start: start_node,
+                    phases,
+                    point: exit.point,
+                    points,
+                    temperatures,
+                });
+            }
             return Err(StableBoundaryError::MalformedGraphConnectivity {
                 message: format!(
-                    "univariant {:?} terminates away from an invariant node",
+                    "univariant {:?} has an unusable forward continuation",
                     phases
                 ),
             });
@@ -2647,6 +2720,7 @@ pub(crate) fn build_stable_boundary_network(
     let mut used = vec![false; fragments.len()];
     let mut marks = RegularGridTraceMarks::new(&topology)?;
     let mut univariants = Vec::new();
+    let mut truncated_univariants = Vec::new();
     for pending_index in 0..pending.len() {
         if pending[pending_index].consumed {
             continue;
@@ -2668,18 +2742,30 @@ pub(crate) fn build_stable_boundary_network(
                 path.id = StableUnivariantId(univariants.len());
                 univariants.push(path);
             }
-            Err(StableBoundaryError::MalformedGraphConnectivity { message })
-                if message.contains("terminates away from an invariant node") =>
-            {
-                // A partial source domain can end a pair equality before a stable
-                // invariant. It is not a complete boundary-connected univariant;
-                // discard that pair pending ends rather than rejecting all contours.
-                let phases = pending[pending_index].key.phases;
-                for end in &mut pending {
-                    if end.key.phases == phases {
-                        end.consumed = true;
-                    }
-                }
+            Err(StableBoundaryError::UnivariantTerminatedAtSourceDomain {
+                start,
+                phases,
+                point,
+                points,
+                temperatures,
+            }) => {
+                // A partial source domain can end this particular equality branch
+                // before a stable invariant. Preserve it as a typed diagnostic;
+                // consume only its traversed pending endpoints.
+                consume_truncated_branch_pending_ends(
+                    &mut pending,
+                    &used,
+                    phases,
+                    &mut diagnostics,
+                );
+                diagnostics.domain_truncated_univariants += 1;
+                truncated_univariants.push(StableTruncatedUnivariantPath {
+                    start,
+                    phases,
+                    points,
+                    temperatures,
+                    termination: UnivariantTermination::ReachedSourceDomainBoundary { point },
+                });
             }
             Err(error) => return Err(error),
         }
@@ -2701,6 +2787,7 @@ pub(crate) fn build_stable_boundary_network(
     let mut network = StableBoundaryNetwork {
         nodes,
         univariants,
+        truncated_univariants,
         binary_traces: traces,
         diagnostics,
         incidence,

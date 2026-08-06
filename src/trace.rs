@@ -147,6 +147,7 @@ pub enum NumericalTraceEventKind {
     PendingEndCreated,
     PendingEndMatched,
     PendingEndConsumed,
+    PendingEndTruncatedAtDomainBoundary,
     PendingEndLeftUnresolved,
     UnivariantTraceStarted,
     UnivariantTriangleEntered,
@@ -236,6 +237,10 @@ pub enum NumericalTraceStage {
 )]
 pub struct TraceCounts {
     pub calculated: usize,
+    /// Finite, provenance-preserving regular-mesh estimates.
+    #[cfg_attr(feature = "numerical-trace-serde", serde(default))]
+    pub extrapolated: usize,
+    /// Retained for compatibility with traces written before EX values existed.
     pub non_existing: usize,
     pub cut_off: usize,
     pub missing: usize,

@@ -21,8 +21,8 @@ pub use boundary::{
     BinaryStableRegion, BinaryTransitionUnavailableReason, InteriorInvariantNode,
     PartialBinaryTransition, StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork,
     StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StablePhasePair,
-    StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
-    StableUnivariantRegularizationDiagnostics,
+    StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
+    StableUnivariantRegularizationDiagnostics, UnivariantTermination,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
 pub use error::{StableContourError, StableSourceEvaluationError};

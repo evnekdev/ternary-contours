@@ -410,6 +410,33 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                         );
                     }
                 }
+                for path in &network.truncated_univariants {
+                    let point = path.points.last().map(|point| point.as_array());
+                    let detail = TraceDecision {
+                        phase_pair: Some([path.phases.first.0, path.phases.second.0]),
+                        composition: point,
+                        node_id: Some(path.start.0),
+                        counts: Some(TraceCounts {
+                            calculated: path.points.len(),
+                            ..TraceCounts::default()
+                        }),
+                        reason: Some("ReachedSourceDomainBoundary".into()),
+                        ..TraceDecision::default()
+                    };
+                    trace.emit(
+                        NumericalTraceLevel::Decisions,
+                        NumericalTraceStage::Univariant,
+                        decision(
+                            NumericalTraceEventKind::PendingEndTruncatedAtDomainBoundary,
+                            detail.clone(),
+                        ),
+                    );
+                    trace.emit(
+                        NumericalTraceLevel::Decisions,
+                        NumericalTraceStage::Univariant,
+                        decision(NumericalTraceEventKind::UnivariantTraceRejected, detail),
+                    );
+                }
                 for path in &network.univariants {
                     trace.emit(
                         NumericalTraceLevel::Decisions,

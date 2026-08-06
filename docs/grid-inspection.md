@@ -84,7 +84,7 @@ remain typed `Missing`, `Non-existing`, `Cut-off`, or unavailable results; no
 result is represented as `NaN`.
 
 The source interpolation, cubic slope, continuation, and partial-domain
-fallback controls share the Plot calculation configuration. Changing a setting
+fallback controls share the Plot calculation configuration. Finite `EX[...]` cells are accepted by this exact same prepared evaluator as projection, boundaries, and isotherms; each query records whether EX inputs contributed, their maximum EX layer, method, and source-row count. This provenance is never converted into an ordinary calculated value. Changing a setting
 rebuilds only the selected cached source evaluator and recalculates registered
 queries; it does not start a full liquidus calculation. The optional local
 lambda columns are explicitly triangle-local (`lambda0`, `lambda1`,

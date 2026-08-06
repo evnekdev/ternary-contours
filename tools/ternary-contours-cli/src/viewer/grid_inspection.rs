@@ -1437,6 +1437,7 @@ mod tests {
             linear_part: Some(1_234.5),
             excess_part: Some(0.0),
             local_mode: Some(ternary_contours::LocalInterpolationMode::Linear),
+            source_provenance: Default::default(),
             stale_error: None,
             stale: false,
         };

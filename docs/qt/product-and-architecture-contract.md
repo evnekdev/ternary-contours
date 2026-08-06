@@ -129,6 +129,13 @@ stable univariants, binary invariants, interior invariants, and raw/regularized
 provenance through Rust projection, records, C ABI, Qt grouping, and canvas
 objects.
 
+For regular Viewer fields, the default source model is Cubic alpha / Akima /
+Muggianu with one-sided-cubic-then-linear partial-domain fallback. Irregular
+fields require explicit Linear selection; cubic-only controls are disabled with
+an explanation. The selected raw or regularized projection is calculated first.
+A failed optional sibling variant must be reported as unavailable without
+discarding the selected projection or its canvas geometry.
+
 ## Actions, layers, sections, and clipboard
 
 Menus, panels, canvas, and state MUST share one layer state. Every visible Viewer

@@ -61,6 +61,19 @@ impl InterpolatedResultState {
     }
 }
 
+/// Finite EX support used by one inspected source triangle.
+///
+/// `Extrapolated` remains a distinct tabulated state; this records where its
+/// finite value contributed without reclassifying it as calculated input.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct InterpolationSourceProvenance {
+    pub uses_extrapolated_values: bool,
+    pub maximum_extrapolation_layer: Option<u16>,
+    pub extrapolation_methods: Vec<ternary_contours::CubicAlphaMethod>,
+    /// Zero-based canonical source rows in triangle/lambda order.
+    pub extrapolated_source_rows: Vec<usize>,
+}
+
 /// One persisted, reproducible interpolation query.
 #[derive(Clone, Debug)]
 pub struct InterpolatedResult {
@@ -83,6 +96,7 @@ pub struct InterpolatedResult {
     pub linear_part: Option<f64>,
     pub excess_part: Option<f64>,
     pub local_mode: Option<LocalInterpolationMode>,
+    pub source_provenance: InterpolationSourceProvenance,
     pub stale: bool,
     pub stale_error: Option<String>,
 }
@@ -200,6 +214,7 @@ impl FieldInspectionCache {
             excess_part: None,
             stale_error: None,
             local_mode: None,
+            source_provenance: InterpolationSourceProvenance::default(),
             stale: false,
         };
         match self.prepared.as_ref().expect("cache prepared with key") {
@@ -209,6 +224,8 @@ impl FieldInspectionCache {
                     result.local_barycentric = Some(inspection.local_barycentric);
                     result.triangle_vertex_indices = inspection.triangle_vertex_indices;
                     result.local_mode = Some(inspection.local_mode);
+                    result.source_provenance =
+                        source_provenance(&field.values, inspection.triangle_vertex_indices);
                     result.linear_part = inspection.linear_part;
                     result.excess_part = inspection.excess_part;
                     result.value = inspection.value;
@@ -228,6 +245,8 @@ impl FieldInspectionCache {
                     result.triangle_vertex_indices =
                         Some(location.triangle.vertices.map(|vertex| vertex.0));
                     result.local_mode = Some(LocalInterpolationMode::Linear);
+                    result.source_provenance =
+                        source_provenance(values, result.triangle_vertex_indices);
                     match interpolate_tabulated(
                         values,
                         location
@@ -271,7 +290,7 @@ fn prepare(
             let values = field
                 .values
                 .iter()
-                .map(TabulatedValue::calculated_value)
+                .map(TabulatedValue::defined_value)
                 .collect::<Vec<_>>();
             let source = match RegularTernaryPartialScalarField::new(grid.subdivisions, values) {
                 Ok(source) => source,
@@ -308,6 +327,32 @@ fn prepare(
             }
         }
     }
+}
+
+fn source_provenance(
+    values: &[TabulatedValue],
+    vertices: Option<[usize; 3]>,
+) -> InterpolationSourceProvenance {
+    let mut provenance = InterpolationSourceProvenance::default();
+    for index in vertices.into_iter().flatten() {
+        let Some(metadata) = values
+            .get(index)
+            .and_then(|value| value.extrapolation.as_ref())
+        else {
+            continue;
+        };
+        provenance.uses_extrapolated_values = true;
+        provenance.extrapolated_source_rows.push(index);
+        provenance.maximum_extrapolation_layer = Some(
+            provenance
+                .maximum_extrapolation_layer
+                .map_or(metadata.layer, |maximum| maximum.max(metadata.layer)),
+        );
+        if !provenance.extrapolation_methods.contains(&metadata.method) {
+            provenance.extrapolation_methods.push(metadata.method);
+        }
+    }
+    provenance
 }
 
 fn state_for_triangle(
@@ -399,6 +444,7 @@ fn error_result(
         linear_part: None,
         excess_part: None,
         local_mode: None,
+        source_provenance: InterpolationSourceProvenance::default(),
         stale: false,
     }
 }
@@ -460,6 +506,74 @@ mod tests {
         assert!((first.local_barycentric.unwrap().into_iter().sum::<f64>() - 1.0).abs() < 1.0e-12);
     }
 
+    #[test]
+    fn finite_ex_triangle_is_defined_for_linear_and_partial_cubic_policies() {
+        let point = [0.63, 0.17, 0.20];
+        let lattice = ternary_contours::RegularTernaryGrid::new(10).unwrap();
+        let vertices = lattice
+            .locate(point)
+            .unwrap()
+            .triangle
+            .vertices
+            .map(|vertex| vertex.0);
+        for extrapolated_count in 0..=3 {
+            let mut dataset = populated_regular_dataset();
+            let TabulatedGrid::Regular(grid) = &mut dataset.grids[0] else {
+                unreachable!()
+            };
+            for row in vertices.into_iter().take(extrapolated_count) {
+                let value = grid.fields[0].values[row].defined_value().unwrap();
+                grid.fields[0].values[row] = TabulatedValue::extrapolated(
+                    value,
+                    crate::ExtrapolatedValueMetadata {
+                        layer: 1,
+                        method: ternary_contours::CubicAlphaMethod::Steffen,
+                        support_count: 2,
+                        spread: 0.25,
+                    },
+                )
+                .unwrap();
+            }
+            let identity = InspectionFieldIdentity {
+                grid_index: 0,
+                phase_id: StablePhaseId(1),
+                property: "T".into(),
+            };
+            let options = [
+                ProjectionOptions::default(),
+                ProjectionOptions {
+                    source_interpolation: SourceInterpolation::CubicAlpha {
+                        method: ternary_contours::CubicAlphaMethod::Akima,
+                        continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                    },
+                    partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+                    ..ProjectionOptions::default()
+                },
+                ProjectionOptions {
+                    source_interpolation: SourceInterpolation::CubicAlpha {
+                        method: ternary_contours::CubicAlphaMethod::Akima,
+                        continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                    },
+                    partial_domain_policy: CubicPartialDomainPolicy::LinearNearDomain,
+                    ..ProjectionOptions::default()
+                },
+            ];
+            for options in options {
+                let mut cache = FieldInspectionCache::default();
+                let result = cache.evaluate(&dataset, &identity, &options, point, 1, 1);
+                assert_eq!(result.state, InterpolatedResultState::Defined);
+                assert!(result.value.is_some_and(f64::is_finite));
+                assert_eq!(
+                    result.source_provenance.extrapolated_source_rows.len(),
+                    extrapolated_count
+                );
+                assert_eq!(
+                    result.source_provenance.uses_extrapolated_values,
+                    extrapolated_count != 0
+                );
+            }
+        }
+    }
     #[test]
     fn irregular_queries_keep_loaded_source_indices_stable() {
         let dataset =

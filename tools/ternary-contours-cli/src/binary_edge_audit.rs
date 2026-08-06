@@ -114,10 +114,10 @@ impl BinaryEdgeAuditReport {
                     row.composition[2],
                     edge.phase_one.name,
                     row.phase_one.state.token(),
-                    format_value(row.phase_one.calculated_value()),
+                    format_value(row.phase_one.defined_value()),
                     edge.phase_two.name,
                     row.phase_two.state.token(),
-                    format_value(row.phase_two.calculated_value()),
+                    format_value(row.phase_two.defined_value()),
                     format_value(row.difference),
                     row.source_row + 1,
                 );
@@ -473,8 +473,8 @@ fn evaluated(value: StablePhaseEvaluation) -> EvaluatedCell {
 
 fn finite_difference(first: &TabulatedValue, second: &TabulatedValue) -> Option<f64> {
     first
-        .calculated_value()
-        .zip(second.calculated_value())
+        .defined_value()
+        .zip(second.defined_value())
         .map(|(left, right)| left - right)
 }
 

@@ -96,6 +96,8 @@ pub struct ProjectionDiagnostics {
     pub invariant_count: usize,
     pub stable_polygon_count: usize,
     pub univariant_count: usize,
+    /// Equality branches retained as typed source-domain truncation diagnostics.
+    pub domain_truncated_univariant_count: usize,
     /// Local interpolation summaries for partial regular cubic-alpha fields.
     pub partial_cubic_summaries: Vec<String>,
     /// Finite EX source cells accepted by this projection request.
@@ -147,14 +149,14 @@ pub enum ProjectionError {
     #[error("stable boundary calculation failed: {0}")]
     Boundaries(#[from] ternary_contours::StableBoundaryError),
     #[error(
-        "cubic-alpha cannot safely prepare grid `{grid}` field `{phase}.{property}`: calculated {calculated}, non-existing {non_existing}, cut-off {cut_off}, missing {missing}"
+        "cubic-alpha cannot safely prepare grid `{grid}` field `{phase}.{property}`: calculated {calculated}, extrapolated {extrapolated}, cut-off {cut_off}, missing {missing}"
     )]
     CubicSourceIncomplete {
         grid: String,
         phase: String,
         property: String,
         calculated: usize,
-        non_existing: usize,
+        extrapolated: usize,
         cut_off: usize,
         missing: usize,
     },
@@ -416,7 +418,8 @@ pub(crate) fn calculate_projection_with_trace_session(
                             phase: Some(field.phase_id.0),
                             counts: Some(TraceCounts {
                                 calculated: counts[0],
-                                non_existing: counts[1],
+                                extrapolated: counts[1],
+                                non_existing: 0,
                                 cut_off: counts[2],
                                 missing: counts[3],
                             }),
@@ -435,7 +438,7 @@ pub(crate) fn calculate_projection_with_trace_session(
                 );
             }
             let coverage = format!(
-                "grid {} phase {}.{} (calculated {}, non-existing {}, cut-off {}, missing {})",
+                "grid {} phase {}.{} (calculated {}, extrapolated {}, cut-off {}, missing {})",
                 grid.name(),
                 field.phase_id.0,
                 field.property,
@@ -493,7 +496,7 @@ pub(crate) fn calculate_projection_with_trace_session(
                             phase: phase.clone(),
                             property: field.property.clone(),
                             calculated: counts[0],
-                            non_existing: counts[1],
+                            extrapolated: counts[1],
                             cut_off: counts[2],
                             missing: counts[3],
                         });
@@ -553,7 +556,7 @@ pub(crate) fn calculate_projection_with_trace_session(
                                 phase: phase.clone(),
                                 property: field.property.clone(),
                                 calculated: counts[0],
-                                non_existing: counts[1],
+                                extrapolated: counts[1],
                                 cut_off: counts[2],
                                 missing: counts[3],
                             });
@@ -729,6 +732,7 @@ pub(crate) fn calculate_projection_with_trace_session(
         stable_polygon_count: stable_contours.diagnostics.nonempty_stable_polygons,
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
+        domain_truncated_univariant_count: stable_boundaries.truncated_univariants.len(),
         partial_cubic_summaries,
         extrapolated_source_values_used,
         maximum_extrapolation_layer_used,
@@ -975,7 +979,7 @@ mod tests {
             ProjectionError::NoCalculatedTemperatureSamples { .. }
         ));
         assert!(message.contains("grid regular phase 1.T"));
-        assert!(message.contains("non-existing 0, cut-off 0, missing 66"));
+        assert!(message.contains("extrapolated 0, cut-off 0, missing 66"));
     }
 
     #[cfg(feature = "inspection")]
@@ -997,6 +1001,52 @@ mod tests {
         assert!(projection.diagnostics.stable_polygon_count > 0);
     }
 
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn cubic_option_matrix_uses_the_same_complete_projection_pipeline() {
+        let dataset = parse_str(include_str!("../fixtures/minimal-regular.tct")).unwrap();
+        for method in [
+            CubicAlphaMethod::Akima,
+            CubicAlphaMethod::Makima,
+            CubicAlphaMethod::Pchip,
+            CubicAlphaMethod::Steffen,
+        ] {
+            for continuation in [
+                BinaryExtrapolation::RawBarycentric,
+                BinaryExtrapolation::Muggianu,
+                BinaryExtrapolation::Kohler,
+            ] {
+                for partial_domain_policy in [
+                    CubicPartialDomainPolicy::Strict,
+                    CubicPartialDomainPolicy::OneSided,
+                    CubicPartialDomainPolicy::OneSidedThenLinear,
+                    CubicPartialDomainPolicy::LinearNearDomain,
+                ] {
+                    let projection = calculate_projection(
+                        &dataset,
+                        &ProjectionOptions {
+                            automatic_level_step: Some(10.0),
+                            sampling_subdivisions: Some(12),
+                            source_interpolation: SourceInterpolation::CubicAlpha {
+                                method,
+                                continuation,
+                            },
+                            partial_domain_policy,
+                            ..ProjectionOptions::default()
+                        },
+                    )
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "{method:?}/{continuation:?}/{partial_domain_policy:?} did not reach the projection pipeline: {error}"
+                        )
+                    });
+                    assert_eq!(projection.input_summary.phase_count, 3);
+                    assert!(projection.diagnostics.stable_polygon_count > 0);
+                    assert!(!projection.levels.is_empty());
+                }
+            }
+        }
+    }
     #[cfg(feature = "inspection")]
     #[test]
     fn cubic_alpha_partial_regular_domains_use_local_fallbacks() {

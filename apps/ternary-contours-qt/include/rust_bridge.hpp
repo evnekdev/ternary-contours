@@ -21,7 +21,8 @@ struct TcqtProjectionSummary {
     std::uint32_t effective_sampling_subdivisions; bool effective_regularize; double effective_regularization_spacing;
     std::uint32_t effective_source_interpolation; std::uint32_t effective_cubic_method;
     std::uint32_t effective_partial_domain_policy; std::uint32_t effective_continuation;
-    std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id; char message[512];
+    std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id;
+    bool raw_projection_available; bool regularized_projection_available; bool selected_projection_regularized; std::uint32_t domain_truncated_univariant_count; char message[512];
 };
 struct TcqtInspectionResult {
     bool success; std::uint32_t state; bool has_value; double value;
@@ -29,7 +30,8 @@ struct TcqtInspectionResult {
     bool has_local_barycentric; double lambda0; double lambda1; double lambda2;
     bool has_contributions; double linear_part; double excess_part;
     bool has_source_rows; std::uint32_t source_row0; std::uint32_t source_row1; std::uint32_t source_row2;
-    std::uint32_t local_mode; char unit[128]; char message[512];
+    std::uint32_t local_mode; bool uses_extrapolated_sources; std::uint32_t maximum_extrapolation_layer;
+    char extrapolation_methods[128]; std::uint32_t extrapolated_source_row_count; char unit[128]; char message[512];
 };struct TcqtProjectSummary {
     char title[128]; char path[512]; char component_a[128]; char component_b[128]; char component_c[128];
     std::uint32_t phase_count; std::uint32_t property_count; std::uint32_t grid_count;

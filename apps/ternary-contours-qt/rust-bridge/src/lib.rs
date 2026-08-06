@@ -131,6 +131,10 @@ pub struct TcqtProjectionSummary {
     pub dataset_revision: u64,
     pub options_revision: u64,
     pub request_id: u64,
+    pub raw_projection_available: bool,
+    pub regularized_projection_available: bool,
+    pub selected_projection_regularized: bool,
+    pub domain_truncated_univariant_count: u32,
     pub message: [u8; MESSAGE],
 }
 
@@ -161,6 +165,12 @@ pub struct TcqtInspectionResult {
     pub source_row2: u32,
     /// 0 cubic, 1 one-sided cubic, 2 linear fallback, 3 undefined.
     pub local_mode: u32,
+    /// Finite EX inputs are accepted by the same field evaluator and remain attributable.
+    pub uses_extrapolated_sources: bool,
+    /// Zero means no EX source was used; values are otherwise one-based EX layers.
+    pub maximum_extrapolation_layer: u32,
+    pub extrapolation_methods: [u8; NAME],
+    pub extrapolated_source_row_count: u32,
     pub unit: [u8; NAME],
     pub message: [u8; MESSAGE],
 }
@@ -555,8 +565,8 @@ fn default_viewer_options() -> TcqtViewerCalculationOptions {
         sampling_subdivisions: 20,
         regularize: true,
         regularization_spacing: 0.0,
-        source_interpolation: 0,
-        cubic_method: 3,
+        source_interpolation: ABI_SOURCE_CUBIC_ALPHA,
+        cubic_method: ABI_CUBIC_AKIMA,
         partial_domain_policy: 2,
         continuation: 1,
     }
@@ -2330,8 +2340,9 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
     };
 
-    // Retain both authoritative geometries.  Display mode is render-only and
-    // selects this cache without re-running the numerical pipeline.
+    // Calculate the selected display variant first. The request trace belongs
+    // to that accepted projection; an optional sibling variant is useful for
+    // Overlay but must never invalidate the selected result.
     let trace_context = NumericalTraceRunContext {
         input_identifier: dataset
             .source_path
@@ -2342,61 +2353,53 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         request_id: Some(request_id),
         ..NumericalTraceRunContext::default()
     };
+    let selected_regularized = abi_options.regularize;
+    let mut selected_options = projection_options.clone();
+    selected_options.regularize = selected_regularized;
+    let (selected_result, trace_status) =
+        calculate_viewer_projection(&dataset, &selected_options, &trace_request, &trace_context);
+    let selected_projection = match selected_result {
+        Ok(projection) => projection,
+        Err(error) => {
+            return failure(
+                format!(
+                    "Calculation failed while preparing the selected {} paths: {error}",
+                    if selected_regularized {
+                        "regularized"
+                    } else {
+                        "raw"
+                    }
+                ),
+                expected_revision,
+                options_revision,
+            );
+        }
+    };
+
     let mut raw_options = projection_options.clone();
     raw_options.regularize = false;
-    let (raw_projection, raw_trace_status) = if abi_options.regularize {
-        (
-            calculate_projection(&dataset, &raw_options).map_err(|error| error.to_string()),
-            None,
-        )
-    } else {
-        calculate_viewer_projection(&dataset, &raw_options, &trace_request, &trace_context)
-    };
-    let raw_projection = match raw_projection {
-        Ok(projection) => projection,
-        Err(error) => {
-            return failure(
-                format!("Calculation failed while preparing raw paths: {error}"),
-                expected_revision,
-                options_revision,
-            );
-        }
-    };
     let mut regularized_options = projection_options.clone();
     regularized_options.regularize = true;
-    let (regularized_projection, regularized_trace_status) = if abi_options.regularize {
-        calculate_viewer_projection(
-            &dataset,
-            &regularized_options,
-            &trace_request,
-            &trace_context,
-        )
+    let (raw_projection, regularized_projection, sibling_warning) = if selected_regularized {
+        let raw = calculate_projection(&dataset, &raw_options).map_err(|error| error.to_string());
+        let warning = raw
+            .as_ref()
+            .err()
+            .map(|error| format!("Raw path variant unavailable: {error}"));
+        (raw.ok(), Some(selected_projection.clone()), warning)
     } else {
-        (
-            calculate_projection(&dataset, &regularized_options).map_err(|error| error.to_string()),
-            None,
-        )
-    };
-    let regularized_projection = match regularized_projection {
-        Ok(projection) => projection,
-        Err(error) => {
-            return failure(
-                format!("Calculation failed while preparing regularized paths: {error}"),
-                expected_revision,
-                options_revision,
-            );
-        }
-    };
-    let trace_status = raw_trace_status.or(regularized_trace_status);
-    let selected_projection = if abi_options.regularize {
-        regularized_projection.clone()
-    } else {
-        raw_projection.clone()
+        let regularized =
+            calculate_projection(&dataset, &regularized_options).map_err(|error| error.to_string());
+        let warning = regularized
+            .as_ref()
+            .err()
+            .map(|error| format!("Regularized path variant unavailable: {error}"));
+        (Some(selected_projection.clone()), regularized.ok(), warning)
     };
     let records = match projection_csv_records(
         &dataset,
-        Some(&regularized_projection),
-        Some(&raw_projection),
+        regularized_projection.as_ref(),
+        raw_projection.as_ref(),
         &RenderOptions::default(),
         ProjectionCsvOptions {
             layers: ProjectionCsvLayerFilter::AllCalculatedLayers,
@@ -2436,6 +2439,31 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         selected_projection.diagnostics.univariant_count,
         selected_projection.diagnostics.contour_path_count,
     );
+    if selected_projection
+        .diagnostics
+        .domain_truncated_univariant_count
+        != 0
+    {
+        summary.push_str(&format!(
+            "; {} domain-truncated branch{} retained as diagnostics",
+            selected_projection
+                .diagnostics
+                .domain_truncated_univariant_count,
+            if selected_projection
+                .diagnostics
+                .domain_truncated_univariant_count
+                == 1
+            {
+                ""
+            } else {
+                "es"
+            }
+        ));
+    }
+    if let Some(warning) = sibling_warning {
+        summary.push_str(". ");
+        summary.push_str(&warning);
+    }
     if let Some(trace_status) = trace_status {
         summary.push_str(". ");
         summary.push_str(&trace_status);
@@ -2447,8 +2475,8 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
                 && state.calculation_generation == request_id =>
         {
             state.projection = Some(selected_projection);
-            state.raw_projection = Some(raw_projection);
-            state.regularized_projection = Some(regularized_projection);
+            state.raw_projection = raw_projection;
+            state.regularized_projection = regularized_projection;
             state.projection_records = records;
             state.projection_options_revision = expected_options_revision;
             state.projection_request_id = request_id;
@@ -2506,6 +2534,10 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 dataset_revision: state.revision,
                 options_revision: state.options_revision,
                 request_id: state.projection_request_id,
+                raw_projection_available: state.raw_projection.is_some(),
+                regularized_projection_available: state.regularized_projection.is_some(),
+                selected_projection_regularized: effective.regularize,
+                domain_truncated_univariant_count: 0,
                 message: bytes("No projection has been calculated."),
             };
             return Ok(());
@@ -2556,6 +2588,13 @@ pub unsafe extern "C" fn tcqt_projection_summary(
             dataset_revision: state.revision,
             options_revision: state.projection_options_revision,
             request_id: state.projection_request_id,
+            raw_projection_available: state.raw_projection.is_some(),
+            regularized_projection_available: state.regularized_projection.is_some(),
+            selected_projection_regularized: effective.regularize,
+            domain_truncated_univariant_count: projection
+                .diagnostics
+                .domain_truncated_univariant_count
+                as u32,
             message: bytes("Projection is current."),
         };
         Ok(())
@@ -2625,6 +2664,22 @@ pub unsafe extern "C" fn tcqt_evaluate_field(
             source_row1: rows[1] as u32,
             source_row2: rows[2] as u32,
             local_mode: local_mode(result.local_mode),
+            uses_extrapolated_sources: result.source_provenance.uses_extrapolated_values,
+            maximum_extrapolation_layer: result
+                .source_provenance
+                .maximum_extrapolation_layer
+                .map_or(0, u32::from),
+            extrapolation_methods: bytes(
+                &result
+                    .source_provenance
+                    .extrapolation_methods
+                    .iter()
+                    .map(|method| format!("{method:?}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            extrapolated_source_row_count: result.source_provenance.extrapolated_source_rows.len()
+                as u32,
             unit: bytes(&result.unit),
             message: bytes(match &result.state {
                 InterpolatedResultState::Error(error) => error,
@@ -3279,6 +3334,17 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn default_viewer_options_prefer_regular_cubic_alpha_akima_muggianu() {
+        let options = default_viewer_options();
+        assert_eq!(options.source_interpolation, ABI_SOURCE_CUBIC_ALPHA);
+        assert_eq!(options.cubic_method, ABI_CUBIC_AKIMA);
+        assert_eq!(
+            options.partial_domain_policy,
+            ABI_PARTIAL_ONE_SIDED_THEN_LINEAR
+        );
+        assert_eq!(options.continuation, ABI_CONTINUATION_MUGGIANU);
+    }
     #[test]
     fn viewer_setting_revision_invalidates_only_numerical_caches() {
         let mut state = ProjectDocument::new();

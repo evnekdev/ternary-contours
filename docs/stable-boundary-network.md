@@ -40,6 +40,13 @@ This policy also applies during regularization. Both members of a projected
 phase pair must remain defined. Undefined competitors are omitted consistently
 from the upper envelope.
 
+A phase-pair equality that reaches an unavailable source-domain boundary before
+a second invariant is retained as a typed `StableTruncatedUnivariantPath` with
+`UnivariantTermination::ReachedSourceDomainBoundary`. It is diagnostic-only:
+it is neither fabricated into an invariant connection nor counted as a complete
+univariant. Only the pending ends carried by that traversed branch are consumed;
+other pending ends for the same phase pair remain independently traceable.
+
 ## Canonical binary discovery
 
 Boundary parameters increase as follows:
