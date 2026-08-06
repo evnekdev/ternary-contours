@@ -66,7 +66,7 @@ public:
     void setQueries(const QVector<CanvasQuery>& queries);
     void setContainingTriangleVisible(bool visible);
     void setMarkerSize(int size);
-    void setVertexVisibility(bool calculated, bool non_existing, bool cut_off, bool missing);
+    void setVertexVisibility(bool calculated, bool extrapolated, bool cut_off, bool missing);
     void setInteractionMode(int mode);
     void setSelectedRows(const QSet<std::uint32_t>& rows);
     void fitTriangleToView();
@@ -117,7 +117,7 @@ private:
     int line_width_ = 2;
     int invariant_marker_size_ = 6;
     bool show_calculated_ = true;
-    bool show_non_existing_ = true;
+    bool show_extrapolated_ = true;
     bool show_cut_off_ = true;
     bool show_missing_ = true;
     int marker_size_ = 6;

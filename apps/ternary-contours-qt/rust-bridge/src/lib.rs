@@ -16,16 +16,19 @@ use std::{
 
 use ternary_contours::{
     BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, NumericalTraceConfig,
-    NumericalTraceLevel, RegularTernaryGrid, StableInvariantNode, StablePhaseId,
+    NumericalTraceLevel, RegularMeshExtrapolationOptions, RegularTernaryGrid, StableInvariantNode,
+    StablePhaseId,
 };
 use ternary_contours_cli::{
     CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, JsonLinesTraceSink,
-    LiquidusProjection, NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition,
-    ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
-    ProjectionPathSource, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode,
-    RowOrder, SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
-    TabulatedValueState, TctSerializeOptions, automatic_iso_levels, calculate_projection,
+    LiquidusProjection, MeshExtrapolationField, MeshExtrapolationPreview, MeshExtrapolationRequest,
+    NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvLayerFilter,
+    ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions, ProjectionPathSource,
+    PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange,
+    TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
+    TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, calculate_projection,
     calculate_projection_with_trace_context, empty_project_dataset,
+    extrapolate_regular_grid_fields,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
@@ -233,13 +236,45 @@ pub struct TcqtRow {
     pub b: f64,
     pub c: f64,
 }
+/// Rust-owned regular mesh extrapolation request. `field_index == u32::MAX`
+/// selects every field in the selected regular grid.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TcqtMeshExtrapolationOptions {
+    pub grid_index: u32,
+    pub field_index: u32,
+    /// 0 Akima, 1 Makima, 2 PCHIP, 3 Steffen.
+    pub method: u32,
+    pub maximum_layers: u32,
+    pub minimum_directional_support: u32,
+    pub has_maximum_directional_spread: bool,
+    pub maximum_directional_spread: f64,
+    pub has_minimum_value: bool,
+    pub minimum_value: f64,
+    pub has_maximum_value: bool,
+    pub maximum_value: f64,
+}
+
+#[repr(C)]
+pub struct TcqtMeshExtrapolationSummary {
+    pub success: bool,
+    pub fields_processed: u32,
+    pub values_proposed: u32,
+    pub values_remaining: u32,
+    pub maximum_layer: u32,
+    pub message: [u8; MESSAGE],
+}
 #[repr(C)]
 pub struct TcqtCell {
-    /// 0 calculated, 1 non-existing, 2 cut-off, 3 missing. Undefined cells
-    /// use has_value=false and value=0.0, never NaN.
+    /// 0 calculated, 2 cut-off, 3 missing, 4 extrapolated. Legacy 1 is
+    /// normalized to missing. Undefined cells use has_value=false and value=0.0.
     pub state: u32,
     pub has_value: bool,
     pub value: f64,
+    pub extrapolation_layer: u32,
+    pub extrapolation_method: u32,
+    pub extrapolation_support_count: u32,
+    pub extrapolation_spread: f64,
     pub note: [u8; NAME],
 }
 
@@ -304,6 +339,7 @@ struct ProjectDocument {
     // only a presentation mirror for its controls.
     viewer_options: TcqtViewerCalculationOptions,
     trace_request: NumericalTraceRequest,
+    mesh_extrapolation_preview: Option<MeshExtrapolationPreview>,
 }
 impl ProjectDocument {
     fn new() -> Self {
@@ -328,6 +364,7 @@ impl ProjectDocument {
             projection_request_id: 0,
             viewer_options: default_viewer_options(),
             trace_request: NumericalTraceRequest::default(),
+            mesh_extrapolation_preview: None,
         }
     }
     fn invalidate_calculation(&mut self) {
@@ -373,6 +410,7 @@ impl ProjectDocument {
             self.dataset = prior;
             return Err(error);
         }
+        self.mesh_extrapolation_preview = None;
         self.undo.push(prior);
         if self.undo.len() > 50 {
             self.undo.remove(0);
@@ -398,6 +436,7 @@ impl ProjectDocument {
         self.dirty = false;
         self.undo.clear();
         self.redo.clear();
+        self.mesh_extrapolation_preview = None;
         self.contract = GuiContractState::default();
         self.invalidate_calculation();
         self.contract.revisions.dataset = Revision(self.revision);
@@ -703,7 +742,7 @@ fn parse_pasted_value(token: &str, missing_tokens: &[String]) -> Result<Tabulate
         return Err("Blank cells are not accepted. Use NA to represent a missing value.".into());
     }
     parse_tabulated_value_token(token, missing_tokens, false)
-        .map_err(|_| "Unsupported value. Enter a finite number, NA, NE, or CO.".to_owned())
+        .map_err(|_| "Unsupported value. Enter a finite number, NA, or CO.".to_owned())
 }
 
 fn parse_pasted_composition(token: &str) -> Result<f64, String> {
@@ -866,6 +905,17 @@ fn prepare_grid_paste(
             .grids
             .get_mut(grid_index)
             .expect("checked grid index");
+        let mut touched_fields = assignments
+            .iter()
+            .map(|(_, field_index, _)| *field_index)
+            .collect::<Vec<_>>();
+        touched_fields.sort_unstable();
+        touched_fields.dedup();
+        for field_index in touched_fields {
+            for existing in &mut fields_mut(grid)[field_index].values {
+                existing.clear_if_extrapolated();
+            }
+        }
         for (row, field_index, value) in assignments {
             fields_mut(grid)
                 .get_mut(field_index)
@@ -944,6 +994,17 @@ fn prepare_grid_paste(
         }
         if let Err((row, message)) = validate_pasted_irregular_compositions(&grid.compositions) {
             return Err(PasteFailure::new(message, row, 0, row, 1));
+        }
+        let mut touched_fields = assignments
+            .iter()
+            .map(|(_, field_index, _)| *field_index)
+            .collect::<Vec<_>>();
+        touched_fields.sort_unstable();
+        touched_fields.dedup();
+        for field_index in touched_fields {
+            for existing in &mut grid.fields[field_index].values {
+                existing.clear_if_extrapolated();
+            }
         }
         for (row, field_index, value) in assignments {
             grid.fields
@@ -1259,6 +1320,181 @@ pub unsafe extern "C" fn tcqt_grid_row_at(
     })())
 }
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_preview_regular_mesh_extrapolation(
+    options: *const TcqtMeshExtrapolationOptions,
+    output_value: *mut TcqtMeshExtrapolationSummary,
+) -> TcqtStatus {
+    status((|| {
+        // SAFETY: caller supplies readable options and writable summary storage.
+        let options = unsafe { options.as_ref() }.ok_or("mesh extrapolation options are null")?;
+        let output_value = unsafe { out(output_value, "mesh extrapolation summary") }?;
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let grid = state
+            .dataset
+            .grids
+            .get(options.grid_index as usize)
+            .ok_or("grid index is out of range")?;
+        let TabulatedGrid::Regular(regular) = grid else {
+            return Err(
+                "Automatic mesh extrapolation is currently available for regular grids only."
+                    .into(),
+            );
+        };
+        let fields = if options.field_index == u32::MAX {
+            Vec::new()
+        } else {
+            let field = regular
+                .fields
+                .get(options.field_index as usize)
+                .ok_or("field index is out of range")?;
+            let phase = state
+                .dataset
+                .phases
+                .iter()
+                .find(|phase| phase.id == field.phase_id)
+                .ok_or("field references an unknown phase")?;
+            vec![MeshExtrapolationField {
+                phase: phase.name.clone(),
+                property: field.property.clone(),
+            }]
+        };
+        let method = match options.method {
+            ABI_CUBIC_AKIMA => CubicAlphaMethod::Akima,
+            ABI_CUBIC_MAKIMA => CubicAlphaMethod::Makima,
+            ABI_CUBIC_PCHIP => CubicAlphaMethod::Pchip,
+            ABI_CUBIC_STEFFEN => CubicAlphaMethod::Steffen,
+            _ => return Err("unsupported cubic extrapolation method".into()),
+        };
+        let preview = extrapolate_regular_grid_fields(
+            &state.dataset,
+            &MeshExtrapolationRequest {
+                grid: regular.name.clone(),
+                fields,
+                all_fields: options.field_index == u32::MAX,
+                options: RegularMeshExtrapolationOptions {
+                    method,
+                    maximum_layers: u16::try_from(options.maximum_layers)
+                        .map_err(|_| "maximum extrapolation layers exceed u16")?,
+                    minimum_directional_support: options.minimum_directional_support as usize,
+                    maximum_directional_spread: options
+                        .has_maximum_directional_spread
+                        .then_some(options.maximum_directional_spread),
+                    minimum_value: options.has_minimum_value.then_some(options.minimum_value),
+                    maximum_value: options.has_maximum_value.then_some(options.maximum_value),
+                    ..RegularMeshExtrapolationOptions::default()
+                },
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let fields_processed = u32::try_from(preview.fields.len()).unwrap_or(u32::MAX);
+        let values_proposed = preview
+            .fields
+            .iter()
+            .map(|field| field.values.len())
+            .sum::<usize>();
+        let values_remaining = preview
+            .fields
+            .iter()
+            .map(|field| field.diagnostics.remaining_eligible_missing_values)
+            .sum::<usize>();
+        let maximum_layer = preview
+            .fields
+            .iter()
+            .flat_map(|field| field.values.iter().map(|value| value.layer))
+            .max()
+            .unwrap_or(0);
+        *output_value = TcqtMeshExtrapolationSummary {
+            success: true,
+            fields_processed,
+            values_proposed: u32::try_from(values_proposed).unwrap_or(u32::MAX),
+            values_remaining: u32::try_from(values_remaining).unwrap_or(u32::MAX),
+            maximum_layer: u32::from(maximum_layer),
+            message: bytes(&format!(
+                "Preview: {values_proposed} EX values across {fields_processed} fields; {values_remaining} eligible NA cells remain"
+            )),
+        };
+        state.mesh_extrapolation_preview = Some(preview);
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_materialize_regular_mesh_extrapolation(
+    output_value: *mut TcqtMeshExtrapolationSummary,
+) -> TcqtStatus {
+    status((|| {
+        // SAFETY: caller supplies writable summary storage.
+        let output_value = unsafe { out(output_value, "mesh extrapolation summary") }?;
+        let mut state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let preview = state
+            .mesh_extrapolation_preview
+            .clone()
+            .ok_or("create and review a mesh extrapolation preview first")?;
+        let fields_processed = preview.fields.len();
+        let values_remaining = preview
+            .fields
+            .iter()
+            .map(|field| field.diagnostics.remaining_eligible_missing_values)
+            .sum::<usize>();
+        let summary = apply_mesh_extrapolation(&mut state.dataset.clone(), preview.clone())
+            .map_err(|error| error.to_string())?;
+        state.mutate(|dataset| {
+            apply_mesh_extrapolation(dataset, preview)
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        })?;
+        *output_value = TcqtMeshExtrapolationSummary {
+            success: true,
+            fields_processed: u32::try_from(fields_processed).unwrap_or(u32::MAX),
+            values_proposed: u32::try_from(summary.values_created).unwrap_or(u32::MAX),
+            values_remaining: u32::try_from(values_remaining).unwrap_or(u32::MAX),
+            maximum_layer: u32::from(summary.maximum_layer),
+            message: bytes(&format!(
+                "Materialized {} EX values; projection is stale and will recalculate",
+                summary.values_created
+            )),
+        };
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn tcqt_clear_extrapolated_grid_values(
+    grid_index: u32,
+    field_index: u32,
+) -> TcqtStatus {
+    status((|| {
+        document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?
+            .mutate(|dataset| {
+                let grid = dataset
+                    .grids
+                    .get_mut(grid_index as usize)
+                    .ok_or("grid index is out of range")?;
+                let fields = fields_mut(grid);
+                let selected = if field_index == u32::MAX {
+                    (0..fields.len()).collect::<Vec<_>>()
+                } else {
+                    (field_index as usize..=field_index as usize).collect::<Vec<_>>()
+                };
+                for index in selected {
+                    let field = fields.get_mut(index).ok_or("field index is out of range")?;
+                    for value in &mut field.values {
+                        if matches!(value.state, TabulatedValueState::Extrapolated) {
+                            *value = TabulatedValue::missing();
+                        }
+                    }
+                }
+                Ok(())
+            })
+    })())
+}
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_grid_cell_at(
     grid_index: u32,
     field_index: u32,
@@ -1285,12 +1521,34 @@ pub unsafe extern "C" fn tcqt_grid_cell_at(
         *output_value = TcqtCell {
             state: match value.state {
                 TabulatedValueState::Calculated => 0,
-                TabulatedValueState::NonExisting => 1,
                 TabulatedValueState::CutOff => 2,
                 TabulatedValueState::Missing => 3,
+                TabulatedValueState::Extrapolated => 4,
             },
             has_value: value.value.is_some(),
             value: value.value.unwrap_or_default(),
+            extrapolation_layer: value
+                .extrapolation
+                .as_ref()
+                .map_or(0, |metadata| u32::from(metadata.layer)),
+            extrapolation_method: value
+                .extrapolation
+                .as_ref()
+                .map_or(0, |metadata| match metadata.method {
+                    CubicAlphaMethod::Akima => 0,
+                    CubicAlphaMethod::Makima => 1,
+                    CubicAlphaMethod::Pchip => 2,
+                    CubicAlphaMethod::Steffen => 3,
+                    _ => u32::MAX,
+                }),
+            extrapolation_support_count: value
+                .extrapolation
+                .as_ref()
+                .map_or(0, |metadata| u32::from(metadata.support_count)),
+            extrapolation_spread: value
+                .extrapolation
+                .as_ref()
+                .map_or(0.0, |metadata| metadata.spread),
             note: bytes(value.note.as_deref().unwrap_or("")),
         };
         Ok(())
@@ -1581,6 +1839,9 @@ pub unsafe extern "C" fn tcqt_set_grid_cell(
                 let field = fields_mut(grid)
                     .get_mut(field_index as usize)
                     .ok_or("field index is out of range")?;
+                for existing in &mut field.values {
+                    existing.clear_if_extrapolated();
+                }
                 *field
                     .values
                     .get_mut(row_index as usize)
@@ -2075,6 +2336,9 @@ pub unsafe extern "C" fn tcqt_set_field_vertex(
                     .iter_mut()
                     .find(|field| field.phase_id.0 == phase_id && field.property == property)
                     .ok_or("selected phase/property field no longer exists")?;
+                for existing in &mut field.values {
+                    existing.clear_if_extrapolated();
+                }
                 *field
                     .values
                     .get_mut(row_index as usize)
@@ -2086,10 +2350,10 @@ pub unsafe extern "C" fn tcqt_set_field_vertex(
 
 fn state_value(code: u32) -> Result<TabulatedValueState, String> {
     match code {
-        1 => Ok(TabulatedValueState::NonExisting),
+        1 => Ok(TabulatedValueState::Missing),
         2 => Ok(TabulatedValueState::CutOff),
         3 => Ok(TabulatedValueState::Missing),
-        _ => Err("bulk edits may set only Missing, Non-existing, or Cut-off".into()),
+        _ => Err("bulk edits may set only Missing or Cut-off".into()),
     }
 }
 
@@ -2125,10 +2389,14 @@ pub unsafe extern "C" fn tcqt_bulk_set_field_state(
                 if rows.iter().any(|row| *row as usize >= field.values.len()) {
                     return Err("a selected vertex row is out of range".into());
                 }
+                for existing in &mut field.values {
+                    existing.clear_if_extrapolated();
+                }
                 for row in rows {
                     field.values[*row as usize] = TabulatedValue {
                         state: state_value,
                         value: None,
+                        extrapolation: None,
                         note: None,
                     };
                 }
@@ -2508,10 +2776,10 @@ mod tests {
         assert!(pasted.4);
         let fields = pasted.0.grids[0].fields();
         assert_eq!(fields[0].values[0].state, TabulatedValueState::Calculated);
-        assert_eq!(fields[1].values[1].state, TabulatedValueState::NonExisting);
+        assert_eq!(fields[1].values[1].state, TabulatedValueState::Missing);
 
         let failure = prepare_grid_paste(&dataset, 0, 0, 3, "1200\tNO").unwrap_err();
-        assert!(failure.message.contains("finite number, NA, NE, or CO"));
+        assert!(failure.message.contains("finite number, NA, or CO"));
         assert_eq!(
             dataset.grids[0].fields()[0].values[0].state,
             TabulatedValueState::Missing

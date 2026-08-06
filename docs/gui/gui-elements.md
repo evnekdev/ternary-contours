@@ -101,6 +101,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | actionGridAddRegular | main_window.ui | QAction | DataGridEditor |
 | actionGridCopy | main_window.ui | QAction | DataCopyGrid |
 | actionGridDuplicate | main_window.ui | QAction | DataGridEditor |
+| actionGridExtrapolate | main_window.ui | QAction | DataGridEditor |
 | actionGridModifyPhaseField | main_window.ui | QAction | DataGridEditor |
 | actionGridPaste | main_window.ui | QAction | DataPasteApply |
 | actionGridRecalculate | main_window.ui | QAction | Recalculate |
@@ -145,12 +146,12 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | checkViewerContourEndpoints | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerCornerNames | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerCutOff | main_window.ui | QCheckBox | GridStateFilter |
+| checkViewerExtrapolated | main_window.ui | QCheckBox | GridStateFilter |
 | checkViewerInteriorInvariants | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerInvariantIds | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerLabelsSelectedOnly | main_window.ui | QCheckBox | GridLabelMode |
 | checkViewerLegend | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerMissing | main_window.ui | QCheckBox | GridStateFilter |
-| checkViewerNonExisting | main_window.ui | QCheckBox | GridStateFilter |
 | checkViewerPathVertices | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerPhasePairLabels | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerQueryPoints | main_window.ui | QCheckBox | PlotSettings |

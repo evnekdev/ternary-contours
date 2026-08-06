@@ -32,7 +32,7 @@ private:
         QString note;
     };
     struct Row { double a; double b; double c; QVector<FieldCell> fields; };
-    QString tokenForCell(std::uint32_t state, bool has_value, double value, const char* note) const;
+    QString tokenForCell(std::uint32_t state, bool has_value, double value, std::uint32_t extrapolation_layer, const char* note) const;
 
     std::uint32_t grid_index_ = 0;
     bool regular_ = true;

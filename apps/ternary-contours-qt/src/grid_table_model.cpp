@@ -34,7 +34,7 @@ void GridTableModel::load(std::uint32_t grid_index, const QStringList& component
         for (std::uint32_t field_index = 0; field_index < grid.field_count; ++field_index) {
             TcqtCell cell{}; const auto cell_status = tcqt_grid_cell_at(grid_index, field_index, row_index, &cell);
             if (cell_status.success) {
-                row.fields.append(FieldCell{tokenForCell(cell.state, cell.has_value, cell.value, cell.note), cell.state, cText(cell.note)});
+                row.fields.append(FieldCell{tokenForCell(cell.state, cell.has_value, cell.value, cell.extrapolation_layer, cell.note), cell.state, cText(cell.note), cell.extrapolation_layer, cell.extrapolation_method, cell.extrapolation_support_count, cell.extrapolation_spread});
             } else {
                 row.fields.append(FieldCell{tr("NA"), 3, {}});
             }
@@ -60,8 +60,8 @@ QVariant GridTableModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::BackgroundRole && composition && regular_) return QBrush(Qt::lightGray);
     if (role == Qt::ToolTipRole && !composition) {
         const auto& cell = row.fields.at(index.column() - 3);
-        if (cell.state == 1) {
-            return cell.note.isEmpty() ? tr("NE\nNon-existing — the phase is absent at this composition.") : tr("NE:%1\nNon-existing — %1").arg(cell.note);
+        if (cell.state == 4) {
+            return tr("Extrapolated value\nLayer: %1\nMethod code: %2\nDirectional support: %3\nSpread: %4").arg(cell.extrapolationLayer).arg(cell.extrapolationMethod).arg(cell.extrapolationSupportCount).arg(cell.extrapolationSpread, 0, 'g', 12);
         }
         if (cell.state == 2) {
             return cell.note.isEmpty() ? tr("CO\nCut-off — the value is beyond an explicit cutoff or limit.") : tr("CO:%1\nCut-off — %1").arg(cell.note);
@@ -100,7 +100,7 @@ bool GridTableModel::setData(const QModelIndex& index, const QVariant& value, in
         status = tcqt_set_irregular_composition(grid_index_, static_cast<std::uint32_t>(index.row()), row.a, row.b, row.c);
     }
     if (!status.success && index.column() >= 3) {
-        emit bridgeStatus(tr("Invalid value. Enter a finite number, NA, NE, or CO. (%1)").arg(statusText(status)), false);
+        emit bridgeStatus(tr("Invalid value. Enter a finite number, NA, or CO. (%1)").arg(statusText(status)), false);
         return false;
     }
     emit bridgeStatus(statusText(status), status.success);
@@ -109,9 +109,10 @@ bool GridTableModel::setData(const QModelIndex& index, const QVariant& value, in
     return true;
 }
 
-QString GridTableModel::tokenForCell(std::uint32_t state, bool has_value, double value, const char* note) const {
+QString GridTableModel::tokenForCell(std::uint32_t state, bool has_value, double value, std::uint32_t extrapolation_layer, const char* note) const {
+    if (state == 4 && has_value) return QStringLiteral("EX%1 %2").arg(extrapolation_layer).arg(QLocale::c().toString(value, 'g', 15));
     if (has_value) return QLocale::c().toString(value, 'g', 15);
     const auto suffix = cText(note).trimmed();
-    const auto base = state == 1 ? QStringLiteral("NE") : state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+    const auto base = state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
     return suffix.isEmpty() ? base : base + QStringLiteral(":") + suffix;
 }

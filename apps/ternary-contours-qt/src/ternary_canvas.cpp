@@ -69,8 +69,8 @@ void TernaryCanvas::setVertexLabelSettings(int mode, int decimals, bool selected
 void TernaryCanvas::setQueries(const QVector<CanvasQuery>& queries) { queries_ = queries; update(); }
 void TernaryCanvas::setContainingTriangleVisible(bool visible) { show_containing_triangle_ = visible; update(); }
 void TernaryCanvas::setMarkerSize(int size) { marker_size_ = std::clamp(size, 2, 20); update(); }
-void TernaryCanvas::setVertexVisibility(bool calculated, bool non_existing, bool cut_off, bool missing) {
-    show_calculated_ = calculated; show_non_existing_ = non_existing; show_cut_off_ = cut_off; show_missing_ = missing; update();
+void TernaryCanvas::setVertexVisibility(bool calculated, bool extrapolated, bool cut_off, bool missing) {
+    show_calculated_ = calculated; show_extrapolated_ = extrapolated; show_cut_off_ = cut_off; show_missing_ = missing; update();
 }
 void TernaryCanvas::setInteractionMode(int mode) { interaction_mode_ = mode; update(); }
 void TernaryCanvas::setSelectedRows(const QSet<std::uint32_t>& rows) { selected_rows_ = rows; update(); }
@@ -105,13 +105,13 @@ std::optional<std::uint32_t> TernaryCanvas::vertexAt(const QPointF& point) const
 QColor TernaryCanvas::colorForState(std::uint32_t state) const {
     switch (state) {
     case 0: return QColor(42, 150, 75);
-    case 1: return QColor(110, 110, 110);
+    case 4: return QColor(45, 105, 190);
     case 2: return QColor(215, 115, 35);
     default: return palette().text().color();
     }
 }
 bool TernaryCanvas::visibleState(std::uint32_t state) const {
-    return state == 0 ? show_calculated_ : state == 1 ? show_non_existing_ : state == 2 ? show_cut_off_ : show_missing_;
+    return state == 0 ? show_calculated_ : state == 4 ? show_extrapolated_ : state == 2 ? show_cut_off_ : show_missing_;
 }
 void TernaryCanvas::mousePressEvent(QMouseEvent* event) {
     if (event->button() == Qt::MiddleButton) { panning_ = true; pan_origin_ = event->position(); setCursor(Qt::ClosedHandCursor); event->accept(); return; }
@@ -192,13 +192,13 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
             const auto point = pointForComposition(vertex.composition.x(), vertex.composition.y(), 1.0 - vertex.composition.x() - vertex.composition.y());
             const auto selected = selected_rows_.contains(vertex.row);
             painter.setPen(QPen(selected ? QColor(30, 90, 210) : colorForState(vertex.state), selected ? 2.5 : 1.4));
-            if (vertex.state == 3) painter.setBrush(Qt::NoBrush); else painter.setBrush(colorForState(vertex.state));
-            if (vertex.state == 1) { painter.drawLine(point + QPointF(-marker_size_, -marker_size_), point + QPointF(marker_size_, marker_size_)); painter.drawLine(point + QPointF(-marker_size_, marker_size_), point + QPointF(marker_size_, -marker_size_)); }
+            if (vertex.state == 3 || vertex.state == 1) painter.setBrush(Qt::NoBrush); else painter.setBrush(colorForState(vertex.state));
+            if (vertex.state == 4) { painter.drawRect(QRectF(point.x() - marker_size_ * 0.5, point.y() - marker_size_ * 0.5, marker_size_, marker_size_)); }
             else if (vertex.state == 2) { QPolygonF triangle_marker; triangle_marker << point + QPointF(0, -marker_size_) << point + QPointF(marker_size_, marker_size_) << point + QPointF(-marker_size_, marker_size_); painter.drawPolygon(triangle_marker); }
             else painter.drawEllipse(point, marker_size_ * 0.55, marker_size_ * 0.55);
             if (label_mode_ != 0 && (!labels_selected_only_ || selected)) {
                 QString label;
-                const auto state = vertex.state == 0 ? tr("Calculated") : vertex.state == 1 ? tr("NE") : vertex.state == 2 ? tr("CO") : tr("NA");
+                const auto state = vertex.state == 0 ? tr("Calculated") : vertex.state == 4 ? tr("EX") : vertex.state == 2 ? tr("CO") : tr("NA");
                 if (label_mode_ == 1) label = vertex.label.section(QLatin1Char(':'), 0, 0);
                 else if (label_mode_ == 2) label = state;
                 else if (label_mode_ == 3) label = QString::number(vertex.row + 1);

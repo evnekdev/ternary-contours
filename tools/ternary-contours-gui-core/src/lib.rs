@@ -196,7 +196,7 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         "spinViewerSamplingSubdivisions" => UiElementId::PlotSampling,
         "spinViewerLineWidth" | "spinViewerPlotMarkerSize" => UiElementId::PlotSettings,
         "checkViewerCalculated"
-        | "checkViewerNonExisting"
+        | "checkViewerExtrapolated"
         | "checkViewerCutOff"
         | "checkViewerMissing"
         | "checkViewerRegularGridEdges" => UiElementId::GridStateFilter,
@@ -292,6 +292,7 @@ pub enum QtUiAction {
     RecalculateGrid,
     CopyGrid,
     PasteGrid,
+    ExtrapolateMesh,
     TogglePlotLayer,
     ToggleGridLayer,
     ToggleSourceVertices,
@@ -341,6 +342,7 @@ pub const fn qt_ui_action(id: QtUiElementId) -> Option<QtUiAction> {
         QtUiElementId::ActionGridRecalculate => QtUiAction::RecalculateGrid,
         QtUiElementId::ActionGridCopy => QtUiAction::CopyGrid,
         QtUiElementId::ActionGridPaste => QtUiAction::PasteGrid,
+        QtUiElementId::ActionGridExtrapolate => QtUiAction::ExtrapolateMesh,
         QtUiElementId::ActionViewPlot => QtUiAction::TogglePlotLayer,
         QtUiElementId::ActionViewGrid => QtUiAction::ToggleGridLayer,
         QtUiElementId::ActionViewSourceVertices => QtUiAction::ToggleSourceVertices,
@@ -2245,7 +2247,7 @@ mod tests {
             "comboViewerProperty",
             "comboViewerMode",
             "checkViewerCalculated",
-            "checkViewerNonExisting",
+            "checkViewerExtrapolated",
             "checkViewerCutOff",
             "checkViewerMissing",
             "checkViewerAutomaticRange",

@@ -60,7 +60,7 @@ struct ViewerState {
     // Designer combo box and TernaryCanvas interaction routing.
     int interaction_mode = 0;
     bool show_calculated = true;
-    bool show_non_existing = true;
+    bool show_extrapolated = true;
     bool show_cut_off = true;
     bool show_missing = true;
     bool show_regular_grid_edges = true;
@@ -138,6 +138,7 @@ private slots:
     void copyGridSelection();
     void pasteGridClipboard();
     void showGridContextMenu(const QPoint& position);
+    void extrapolateSelectedRegularField();
 private:
     bool saveToPath(const QString& path);
     bool performSave(bool save_as);

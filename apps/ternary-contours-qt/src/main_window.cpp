@@ -239,6 +239,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->actionGridRename, &QAction::triggered, this, &MainWindow::renameSelectedGrid);
     connect(ui_->actionGridCopy, &QAction::triggered, this, &MainWindow::copyGridSelection);
     connect(ui_->actionGridPaste, &QAction::triggered, this, &MainWindow::pasteGridClipboard);
+    connect(ui_->actionGridExtrapolate, &QAction::triggered, this, &MainWindow::extrapolateSelectedRegularField);
     connect(ui_->tableGridValues, &QTableView::customContextMenuRequested, this, &MainWindow::showGridContextMenu);
     connect(ui_->tableGridValues->selectionModel(), &QItemSelectionModel::selectionChanged, this, [this] { updateActionState(); });
     connect(QApplication::clipboard(), &QClipboard::dataChanged, this, [this] { updateActionState(); });
@@ -277,7 +278,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->comboViewerPhase, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SelectPhase); });
     connect(ui_->comboViewerProperty, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SelectProperty); });
     connect(ui_->comboViewerMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetInteractionMode); });
-    for (auto* toggle : {ui_->checkViewerCalculated, ui_->checkViewerNonExisting, ui_->checkViewerCutOff, ui_->checkViewerMissing}) connect(toggle, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetVertexVisibility); });
+    for (auto* toggle : {ui_->checkViewerCalculated, ui_->checkViewerExtrapolated, ui_->checkViewerCutOff, ui_->checkViewerMissing}) connect(toggle, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetVertexVisibility); });
     connect(ui_->checkViewerRegularGridEdges, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetRegularGridEdges); });
     connect(ui_->spinViewerMarkerSize, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetMarkerSize); });
     connect(ui_->comboViewerLabelMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelMode); });
@@ -537,6 +538,7 @@ void MainWindow::updateActionState() {
     const bool has_clipboard = !QApplication::clipboard()->text().isEmpty();
     ui_->actionGridCopy->setEnabled(grid_selected && has_table_selection);
     ui_->actionGridPaste->setEnabled(grid_selected && table_loaded && has_clipboard && has_table_selection);
+    ui_->actionGridExtrapolate->setEnabled(grid_selected && table_loaded && grid_model_->isRegular());
     // Projection calculation is automatic; document saveability remains independent of readiness.
 
     updateViewerActionState();
@@ -946,6 +948,98 @@ void MainWindow::pasteGridClipboard() {
     reportBridgeStatus(message, true);
 }
 
+void MainWindow::extrapolateSelectedRegularField() {
+    if (!grid_model_->isRegular()) {
+        QMessageBox::information(this, tr("Extrapolate missing values"),
+            tr("Automatic mesh extrapolation is currently available for regular grids only."));
+        return;
+    }
+    TcqtGrid grid{};
+    if (!tcqt_grid_at(selected_grid_, &grid).success) {
+        reportBridgeStatus(tr("Select a regular grid before extrapolating."), false);
+        return;
+    }
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Extrapolate Missing Values"));
+    auto* layout = new QFormLayout(&dialog);
+    auto* field = new QComboBox(&dialog);
+    const auto current = ui_->tableGridValues->currentIndex();
+    if (current.isValid() && current.column() >= 3) {
+        field->addItem(grid_model_->headerData(current.column(), Qt::Horizontal, Qt::DisplayRole).toString(), current.column() - 3);
+    }
+    field->addItem(tr("All fields"), invalid_viewer_abi);
+    auto* method = new QComboBox(&dialog);
+    method->addItem(tr("Akima"), 0U);
+    method->addItem(tr("Makima"), 1U);
+    method->addItem(tr("PCHIP"), 2U);
+    method->addItem(tr("Steffen"), 3U);
+    method->setCurrentIndex(3);
+    auto* layers = new QSpinBox(&dialog); layers->setRange(1, 100); layers->setValue(1);
+    auto* support = new QSpinBox(&dialog); support->setRange(1, 32); support->setValue(3);
+    auto* spread = new QLineEdit(&dialog);
+    spread->setPlaceholderText(tr("Optional"));
+    auto* result = new QLabel(tr("Preview does not modify the document."), &dialog);
+    result->setWordWrap(true);
+    layout->addRow(tr("Grid"), new QLabel(text(grid.name), &dialog));
+    layout->addRow(tr("Fields"), field);
+    layout->addRow(tr("Method"), method);
+    layout->addRow(tr("Maximum layers"), layers);
+    layout->addRow(tr("Minimum directional support"), support);
+    layout->addRow(tr("Maximum directional spread"), spread);
+    layout->addRow(result);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Cancel, &dialog);
+    auto* preview = buttons->addButton(tr("Preview"), QDialogButtonBox::ActionRole);
+    auto* materialize = buttons->addButton(tr("Materialize"), QDialogButtonBox::AcceptRole);
+    materialize->setEnabled(false);
+    layout->addRow(buttons);
+    auto make_options = [&]() -> std::optional<TcqtMeshExtrapolationOptions> {
+        TcqtMeshExtrapolationOptions options{};
+        options.grid_index = selected_grid_;
+        options.field_index = field->currentData().toUInt();
+        options.method = method->currentData().toUInt();
+        options.maximum_layers = layers->value();
+        options.minimum_directional_support = support->value();
+        if (!spread->text().trimmed().isEmpty()) {
+            bool ok = false;
+            const auto value = QLocale::c().toDouble(spread->text(), &ok);
+            if (!ok || !std::isfinite(value) || value < 0.0) {
+                result->setText(tr("Maximum directional spread must be a finite non-negative number."));
+                return std::nullopt;
+            }
+            options.has_maximum_directional_spread = true;
+            options.maximum_directional_spread = value;
+        }
+        return options;
+    };
+    connect(preview, &QPushButton::clicked, &dialog, [&]() {
+        const auto options = make_options();
+        if (!options) return;
+        TcqtMeshExtrapolationSummary summary{};
+        const auto status = tcqt_preview_regular_mesh_extrapolation(&*options, &summary);
+        if (!status.success) {
+            result->setText(statusText(status));
+            materialize->setEnabled(false);
+            return;
+        }
+        result->setText(text(summary.message));
+        materialize->setEnabled(summary.values_proposed > 0);
+    });
+    connect(materialize, &QPushButton::clicked, &dialog, [&]() {
+        TcqtMeshExtrapolationSummary summary{};
+        const auto status = tcqt_materialize_regular_mesh_extrapolation(&summary);
+        if (!status.success) {
+            result->setText(statusText(status));
+            return;
+        }
+        rebuildFromRust(selected_grid_);
+        scheduleViewerCalculation();
+        reportBridgeStatus(text(summary.message), true);
+        dialog.accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    dialog.exec();
+}
 void MainWindow::showGridContextMenu(const QPoint& position) {
     updateActionState();
     QMenu menu(this);
@@ -1147,7 +1241,7 @@ void MainWindow::refreshViewerVertices() {
     if (!tcqt_project_summary(&summary).success || viewer_.grid_index >= summary.grid_count || viewer_.property.isEmpty()) {
         ui_->canvasTernary->setInspectionVertices(vertices);
         ui_->labelViewerCalculatedCount->setText(QStringLiteral("0"));
-        ui_->labelViewerNonExistingCount->setText(QStringLiteral("0"));
+        ui_->labelViewerExtrapolatedCount->setText(QStringLiteral("0"));
         ui_->labelViewerCutOffCount->setText(QStringLiteral("0"));
         ui_->labelViewerMissingCount->setText(QStringLiteral("0"));
         ui_->labelViewerSelectedVertex->setText(tr("No vertex selected"));
@@ -1155,7 +1249,7 @@ void MainWindow::refreshViewerVertices() {
     }
     TcqtGrid grid{};
     if (!tcqt_grid_at(viewer_.grid_index, &grid).success) return;
-    std::array<int, 4> state_counts{};
+    std::array<int, 5> state_counts{};
     vertices.reserve(static_cast<qsizetype>(grid.row_count));
     for (std::uint32_t row = 0; row < grid.row_count; ++row) {
         TcqtRow composition{}; TcqtCell cell{};
@@ -1165,18 +1259,18 @@ void MainWindow::refreshViewerVertices() {
         CanvasVertex vertex; vertex.composition = QPointF(composition.a, composition.b); vertex.row = row; vertex.state = cell.state;
         const auto note = text(cell.note);
         const auto token = cell.has_value ? QLocale::c().toString(cell.value, 'f', viewer_.label_decimals)
-            : cell.state == 1 ? QStringLiteral("NE") : cell.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+            : cell.state == 4 ? QStringLiteral("EX") : cell.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
         vertex.label = note.isEmpty() ? token : token + QStringLiteral(":") + note;
         vertices.append(vertex);
     }
     ui_->labelViewerCalculatedCount->setText(QString::number(state_counts[0]));
-    ui_->labelViewerNonExistingCount->setText(QString::number(state_counts[1]));
+    ui_->labelViewerExtrapolatedCount->setText(QString::number(state_counts[4]));
     ui_->labelViewerCutOffCount->setText(QString::number(state_counts[2]));
     ui_->labelViewerMissingCount->setText(QString::number(state_counts[3]));
     ui_->canvasTernary->setInspectionVertices(vertices);
     ui_->canvasTernary->setSourceVerticesVisible(viewer_.show_source_vertices);
     ui_->canvasTernary->setGridVisible(viewer_.show_regular_grid_edges && viewer_.show_sampling_grid);
-    ui_->canvasTernary->setVertexVisibility(viewer_.show_calculated, viewer_.show_non_existing, viewer_.show_cut_off, viewer_.show_missing);
+    ui_->canvasTernary->setVertexVisibility(viewer_.show_calculated, viewer_.show_extrapolated, viewer_.show_cut_off, viewer_.show_missing);
     ui_->canvasTernary->setMarkerSize(viewer_.marker_size);
     ui_->canvasTernary->setVertexLabelSettings(viewer_.label_mode, viewer_.label_decimals, viewer_.labels_selected_only);
     ui_->canvasTernary->setSelectedRows(viewer_.selected_rows);
@@ -1232,7 +1326,7 @@ void MainWindow::refreshViewerQueries() {
         if (status.success) { query.grid_index = viewer_.grid_index; query.phase_id = viewer_.phase_id; query.property = viewer_.property; query.result = result; }
         QList<QStandardItem*> row;
         row << new QStandardItem(QString::number(query.id)) << new QStandardItem(QLocale::c().toString(query.a, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.b, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.c, 'g', 10));
-        row << new QStandardItem(result.has_value ? QLocale::c().toString(result.value, 'g', 12) : (result.state == 2 ? QStringLiteral("NE") : result.state == 3 ? QStringLiteral("CO") : QStringLiteral("NA")));
+        row << new QStandardItem(result.has_value ? QLocale::c().toString(result.value, 'g', 12) : (result.state == 3 ? QStringLiteral("CO") : QStringLiteral("NA")));
         row << new QStandardItem(text(result.message)) << new QStandardItem(QString::number(viewer_.grid_index)) << new QStandardItem(QString::number(viewer_.phase_id)) << new QStandardItem(viewer_.property) << new QStandardItem(result.local_mode == 0 ? tr("Cubic") : result.local_mode == 1 ? tr("One-sided cubic") : result.local_mode == 2 ? tr("Linear") : tr("Undefined"));
         model->appendRow(row);
     }
@@ -1273,7 +1367,7 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::SetInteractionMode:
         viewer_.interaction_mode = ui_->comboViewerMode->currentIndex(); ui_->canvasTernary->setInteractionMode(viewer_.interaction_mode); break;
     case ViewerWidgetCommand::SetVertexVisibility:
-        viewer_.show_calculated = ui_->checkViewerCalculated->isChecked(); viewer_.show_non_existing = ui_->checkViewerNonExisting->isChecked();
+        viewer_.show_calculated = ui_->checkViewerCalculated->isChecked(); viewer_.show_extrapolated = ui_->checkViewerExtrapolated->isChecked();
         viewer_.show_cut_off = ui_->checkViewerCutOff->isChecked(); viewer_.show_missing = ui_->checkViewerMissing->isChecked(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetRegularGridEdges:
         viewer_.show_regular_grid_edges = ui_->checkViewerRegularGridEdges->isChecked(); refreshViewerVertices(); break;
@@ -1408,7 +1502,7 @@ void MainWindow::updateViewerActionState() {
     const auto unavailable = summary.calculation_available ? QString() : tr("Calculation requires valid participating phases, grids, and finite Temperature values.");
     ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
     ui_->comboViewerPhase->setEnabled(field_available); ui_->comboViewerProperty->setEnabled(field_available); ui_->comboViewerMode->setEnabled(field_available);
-    for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerCalculated), static_cast<QWidget*>(ui_->checkViewerNonExisting), static_cast<QWidget*>(ui_->checkViewerCutOff), static_cast<QWidget*>(ui_->checkViewerMissing), static_cast<QWidget*>(ui_->checkViewerRegularGridEdges), static_cast<QWidget*>(ui_->spinViewerMarkerSize), static_cast<QWidget*>(ui_->comboViewerLabelMode), static_cast<QWidget*>(ui_->spinViewerLabelDecimals), static_cast<QWidget*>(ui_->checkViewerLabelsSelectedOnly)}) control->setEnabled(field_available);
+    for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerCalculated), static_cast<QWidget*>(ui_->checkViewerExtrapolated), static_cast<QWidget*>(ui_->checkViewerCutOff), static_cast<QWidget*>(ui_->checkViewerMissing), static_cast<QWidget*>(ui_->checkViewerRegularGridEdges), static_cast<QWidget*>(ui_->spinViewerMarkerSize), static_cast<QWidget*>(ui_->comboViewerLabelMode), static_cast<QWidget*>(ui_->spinViewerLabelDecimals), static_cast<QWidget*>(ui_->checkViewerLabelsSelectedOnly)}) control->setEnabled(field_available);
     ui_->actionViewSourceVertices->setEnabled(field_available); ui_->actionViewSourceVertices->setToolTip(field_available ? QString() : tr("Select a grid field first."));
     ui_->actionViewQueryPoints->setEnabled(!viewer_.queries.isEmpty());
     ui_->actionViewerClearSelectedQuery->setEnabled(ui_->tableInterpolationResults->currentIndex().isValid()); ui_->actionViewerClearAllQueries->setEnabled(!viewer_.queries.isEmpty());
@@ -1446,7 +1540,7 @@ void MainWindow::updateViewerSelectionDetails() {
     if (viewer_.selected_rows.size() != 1 || viewer_.property.isEmpty()) { ui_->labelViewerSelectedVertex->setText(tr("No vertex selected")); return; }
     const auto row = *viewer_.selected_rows.cbegin(); TcqtRow composition{}; TcqtCell cell{};
     if (!tcqt_grid_row_at(viewer_.grid_index, row, &composition).success || !tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success) return;
-    const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 1 ? tr("Non-existing") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
+    const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 4 ? tr("Extrapolated") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
     const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("â€”");
     const auto note = text(cell.note);
     ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
@@ -1472,13 +1566,13 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
     TcqtCell existing{};
     if (!tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &existing).success) return;
     QDialog dialog(this, Qt::Tool); dialog.setWindowTitle(tr("Vertex %1 â€” %2 / %3").arg(row + 1).arg(viewer_.phase_id).arg(viewer_.property));
-    auto* layout = new QFormLayout(&dialog); auto* state = new QComboBox(&dialog); state->addItem(tr("Calculated"), 0); state->addItem(tr("Missing (NA)"), 3); state->addItem(tr("Non-existing (NE)"), 1); state->addItem(tr("Cut-off (CO)"), 2); state->setCurrentIndex(state->findData(existing.state));
+    auto* layout = new QFormLayout(&dialog); auto* state = new QComboBox(&dialog); state->addItem(tr("Calculated"), 0); state->addItem(tr("Missing (NA)"), 3); state->addItem(tr("Cut-off (CO)"), 2); state->setCurrentIndex(state->findData(existing.state == 4 ? 3 : existing.state));
     auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog); auto* note = new QLineEdit(text(existing.note), &dialog); auto* error = new QLabel(&dialog); error->setStyleSheet(QStringLiteral("color: #b03030"));
     layout->addRow(tr("State"), state); layout->addRow(tr("Value"), value); layout->addRow(tr("Note"), note); layout->addRow(error);
     auto commit = [&]() {
         const auto code = state->currentData().toUInt(); QString token;
         if (code == 0) { bool ok = false; const auto scalar = QLocale::c().toDouble(value->text(), &ok); if (!ok || !std::isfinite(scalar)) { error->setText(tr("Calculated requires one finite numeric value.")); return; } token = QLocale::c().toString(scalar, 'g', 15); }
-        else token = code == 1 ? QStringLiteral("NE") : code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
+        else token = code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
         if (!note->text().trimmed().isEmpty()) token += QStringLiteral(":") + note->text().trimmed();
         const auto property = viewer_.property.toUtf8(); const auto encoded = token.toUtf8(); const auto result = tcqt_set_field_vertex(viewer_.grid_index, viewer_.phase_id, property.constData(), row, encoded.constData());
         if (!result.success) { error->setText(statusText(result)); return; }
@@ -1490,10 +1584,10 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
 
 void MainWindow::showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position) {
     if (viewer_.property.isEmpty()) return; if (!viewer_.selected_rows.contains(row)) { viewer_.selected_rows = {row}; ui_->canvasTernary->setSelectedRows(viewer_.selected_rows); }
-    QMenu menu(this); auto* missing = menu.addAction(tr("Set selected to Missing (NA)")); auto* non_existing = menu.addAction(tr("Set selected to Non-existing (NE)")); auto* cut_off = menu.addAction(tr("Set selected to Cut-off (CO)")); auto* clear_notes = menu.addAction(tr("Clear notes"));
+    QMenu menu(this); auto* missing = menu.addAction(tr("Set selected to Missing (NA)")); auto* cut_off = menu.addAction(tr("Set selected to Cut-off (CO)")); auto* clear_notes = menu.addAction(tr("Clear notes"));
     const auto selected = menu.exec(global_position); if (!selected) return; const auto property = viewer_.property.toUtf8(); QVector<std::uint32_t> rows = viewer_.selected_rows.values(); TcqtStatus result{};
     if (selected == clear_notes) result = tcqt_clear_field_notes(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size());
-    else { const auto state = selected == non_existing ? 1U : selected == cut_off ? 2U : 3U; result = tcqt_bulk_set_field_state(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size(), state); }
+    else { const auto state = selected == cut_off ? 2U : 3U; result = tcqt_bulk_set_field_state(viewer_.grid_index, viewer_.phase_id, property.constData(), rows.constData(), rows.size(), state); }
     reportBridgeStatus(statusText(result), result.success); if (result.success) { rebuildFromRust(selected_grid_); scheduleViewerCalculation(); }
 }
 
