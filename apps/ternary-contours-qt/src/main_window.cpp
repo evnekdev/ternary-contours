@@ -1440,6 +1440,14 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.domain_truncated_univariant_count)
                         .arg(projection.domain_truncated_univariant_count == 1 ? QString() : QStringLiteral("es"));
                 }
+                if (projection.regularization_failure_count != 0) {
+                    const auto regularized = projection.univariant_count - projection.regularization_failure_count;
+                    projection_summary += tr("; %1 of %2 paths regularized, %3 raw fallback%4")
+                        .arg(regularized)
+                        .arg(projection.univariant_count)
+                        .arg(projection.regularization_failure_count)
+                        .arg(projection.regularization_failure_count == 1 ? QString() : QStringLiteral("s"));
+                }
                 ui_->labelViewerLevelPreview->setText(projection_summary);
                 setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(

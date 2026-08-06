@@ -184,6 +184,14 @@ pub struct StableUnivariantRegularizationDiagnostics {
     pub spacing_cv_before: f64,
     pub spacing_cv_after: f64,
 }
+/// Effective geometry selected for one stable univariant path.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StablePathGeometryState {
+    Raw,
+    Regularized,
+    RawFallback,
+}
+
 /// One complete phase-pair path between invariant nodes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StableUnivariantPath {
@@ -431,6 +439,23 @@ pub struct StableBoundaryNetwork {
 }
 
 impl StableBoundaryNetwork {
+    /// Return the effective geometry state without conflating a recovered
+    /// regularization failure with a fully regularized path.
+    pub fn path_geometry_state(&self, path: StableUnivariantId) -> Option<StablePathGeometryState> {
+        let path = self.univariants.get(path.0)?;
+        Some(if path.regularization.is_some() {
+            StablePathGeometryState::Regularized
+        } else if self
+            .regularization_failures
+            .iter()
+            .any(|failure| failure.path == path.id)
+        {
+            StablePathGeometryState::RawFallback
+        } else {
+            StablePathGeometryState::Raw
+        })
+    }
+
     pub fn incident_univariants(
         &self,
         node: StableInvariantNodeId,

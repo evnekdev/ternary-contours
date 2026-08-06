@@ -775,17 +775,16 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
                         invariants.push_str(&format!("{sampling}\t{repeat}\t{kind}\t{phases}\t{:.16}\t{:.16}\t{:.16}\t{:.16}\t{degree}\n",point[0],point[1],point[2],node.temperature()));
                     }
                     for path in &projection.stable_boundaries.univariants {
-                        let state = if path.regularization.is_some() {
-                            "regularized"
-                        } else if projection
+                        let state = match projection
                             .stable_boundaries
-                            .regularization_failures
-                            .iter()
-                            .any(|failure| failure.path == path.id)
+                            .path_geometry_state(path.id)
+                            .expect("path belongs to network")
                         {
-                            "raw_fallback"
-                        } else {
-                            "raw"
+                            ternary_contours::StablePathGeometryState::Raw => "raw",
+                            ternary_contours::StablePathGeometryState::Regularized => "regularized",
+                            ternary_contours::StablePathGeometryState::RawFallback => {
+                                "raw_fallback"
+                            }
                         };
                         univariants.push_str(&format!(
                             "{sampling}\t{repeat}\t{},{}\t{}\t{}\t{}\t{state}\n",

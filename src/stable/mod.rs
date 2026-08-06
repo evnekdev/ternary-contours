@@ -20,10 +20,10 @@ pub use boundary::{
     BinaryBoundary, BinaryBoundaryTrace, BinaryBoundaryTraceDiagnostics, BinaryInvariantNode,
     BinaryStableRegion, BinaryTransitionUnavailableReason, InteriorInvariantNode,
     PartialBinaryTransition, StableBoundaryDiagnostics, StableBoundaryError, StableBoundaryNetwork,
-    StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StablePhasePair,
-    StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
-    StableUnivariantRegularizationDiagnostics, StableUnivariantRegularizationFailure,
-    UnivariantTermination,
+    StableBoundaryOptions, StableInvariantNode, StableInvariantNodeId, StablePathGeometryState,
+    StablePhasePair, StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId,
+    StableUnivariantPath, StableUnivariantRegularizationDiagnostics,
+    StableUnivariantRegularizationFailure, UnivariantTermination,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
 pub use error::{StableContourError, StableSourceEvaluationError};

@@ -177,11 +177,12 @@ pub use stable::{
     StableContourError, StableContourJunction, StableContourJunctionKind, StableContourLevel,
     StableContourPath, StableContourQuantity, StableContourSet, StableGridOptions,
     StableGridVerification, StableInvariantNode, StableInvariantNodeId, StableJunctionId,
-    StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId, StablePhasePair, StablePhaseSource,
-    StablePhaseUndefinedReason, StableScalarSource, StableSourceEvaluationError,
-    StableTruncatedUnivariantPath, StableUnivariantEndId, StableUnivariantId, StableUnivariantPath,
-    StableUnivariantRegularizationDiagnostics, StableUnivariantRegularizationFailure,
-    StableVerificationPassDiagnostics, UnivariantTermination,
+    StablePathGeometryState, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
+    StablePhasePair, StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,
+    StableSourceEvaluationError, StableTruncatedUnivariantPath, StableUnivariantEndId,
+    StableUnivariantId, StableUnivariantPath, StableUnivariantRegularizationDiagnostics,
+    StableUnivariantRegularizationFailure, StableVerificationPassDiagnostics,
+    UnivariantTermination,
 };
 pub use trace::{
     CompositionRegion, NoopTraceSink, NumericalTraceConfig, NumericalTraceEvent,
