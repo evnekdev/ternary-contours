@@ -75,3 +75,23 @@ The opt-in numerical trace records mesh extrapolation start/completion, each
 layer, directional support decision, accepted/rejected direction, and
 accepted/rejected vertex. Tracing is observation-only: trace-on and trace-off
 produce identical extrapolated values and layer order.
+## Viewer workflows
+
+In **Viewer → Vertex**, choose one regular-grid field and use **Extrapolate
+selected phase…**.  The dialog defaults to the selected property and can expand
+only to the other properties belonging to that same phase; it never selects all
+phases implicitly.  Preview is read-only.  Materialize applies the exact
+Rust-owned preview as one undoable document transaction.
+
+Double-clicking a missing regular-grid vertex provides **Extrapolate this
+vertex…**.  A target preview lists the requested one-based source row separately
+from any lower-layer dependency rows.  Only that closure is materialized: other
+candidates discovered by the layered solver remain `NA`.  Calculated and
+cut-off values are not eligible; an existing `EX` cell may be explicitly
+re-extrapolated or cleared back to `NA`.
+
+The Viewer uses a stable state legend: calculated values are filled circles,
+extrapolated values are filled squares, cut-off values are filled triangles, and
+missing values are hollow circles.  Selection changes the outline only, so an
+`EX` value never looks like a calculated sample.  Irregular grids remain
+read-only for automatic mesh extrapolation.

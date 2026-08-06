@@ -6,7 +6,8 @@
 
 use ternary_contours::{
     RegularMeshExtrapolatedValue, RegularMeshExtrapolationDiagnostics,
-    RegularMeshExtrapolationOptions, extrapolate_regular_mesh,
+    RegularMeshExtrapolationOptions, RegularMeshExtrapolationScope, RegularMeshExtrapolationTarget,
+    RejectedExtrapolationVertex, extrapolate_regular_mesh_scoped,
 };
 
 use crate::{
@@ -52,6 +53,10 @@ pub struct MeshExtrapolationRequest {
     pub fields: Vec<MeshExtrapolationField>,
     /// Select every field in the selected grid.
     pub all_fields: bool,
+    /// Optional zero-based canonical rows to materialize. Empty preserves the
+    /// existing whole-field behavior. Target previews include only the selected
+    /// rows and any accepted layered dependencies they actually use.
+    pub target_rows: Vec<usize>,
     /// Numerical safety policy.
     pub options: RegularMeshExtrapolationOptions,
 }
@@ -64,6 +69,12 @@ pub struct MeshExtrapolationFieldPreview {
     pub property: String,
     /// EX values in canonical regular-grid row order.
     pub values: Vec<RegularMeshExtrapolatedValue>,
+    /// Explicit target rows, zero-based and canonical.
+    pub requested_rows: Vec<usize>,
+    /// Accepted intermediate EX rows needed by the requested rows.
+    pub dependency_rows: Vec<usize>,
+    /// Typed target rejections retained for preview presentation.
+    pub rejections: Vec<RejectedExtrapolationVertex>,
     /// Core diagnostics, kept visible even when no values were created.
     pub diagnostics: RegularMeshExtrapolationDiagnostics,
 }
@@ -164,28 +175,80 @@ pub fn extrapolate_regular_grid_fields(
     let mut fields = Vec::with_capacity(field_indices.len());
     for field_index in field_indices {
         let field = &grid.fields[field_index];
+        let target_set = request
+            .target_rows
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
         let values = field
             .values
             .iter()
-            .map(TabulatedValue::defined_value)
+            .enumerate()
+            .map(|(row, value)| {
+                if target_set.contains(&row)
+                    && matches!(value.state, TabulatedValueState::Extrapolated)
+                {
+                    None
+                } else {
+                    value.defined_value()
+                }
+            })
             .collect::<Vec<_>>();
         let eligible = field
             .values
             .iter()
-            .map(|value| matches!(value.state, TabulatedValueState::Missing))
+            .enumerate()
+            .map(|(row, value)| {
+                matches!(value.state, TabulatedValueState::Missing)
+                    || (target_set.contains(&row)
+                        && matches!(value.state, TabulatedValueState::Extrapolated))
+            })
             .collect::<Vec<_>>();
-        let core = extrapolate_regular_mesh(
+        let scope = if request.target_rows.is_empty() {
+            RegularMeshExtrapolationScope::EntireField
+        } else {
+            RegularMeshExtrapolationScope::Targets(
+                request
+                    .target_rows
+                    .iter()
+                    .copied()
+                    .map(|vertex_index| RegularMeshExtrapolationTarget { vertex_index })
+                    .collect(),
+            )
+        };
+        let core = extrapolate_regular_mesh_scoped(
             ternary_contours::RegularTernaryGrid::new(grid.subdivisions)
                 .map_err(|error| MeshExtrapolationError::Core(error.to_string()))?,
             &values,
             &eligible,
             request.options,
+            scope,
         )
         .map_err(|error| MeshExtrapolationError::Core(error.to_string()))?;
+        let mut requested_rows = core
+            .requested_targets
+            .iter()
+            .map(|value| value.vertex_index)
+            .collect::<Vec<_>>();
+        requested_rows.sort_unstable();
+        requested_rows.dedup();
+        let mut dependency_rows = core
+            .required_dependencies
+            .iter()
+            .map(|value| value.vertex_index)
+            .collect::<Vec<_>>();
+        dependency_rows.sort_unstable();
+        dependency_rows.dedup();
+        let mut proposed = core.required_dependencies;
+        proposed.extend(core.requested_targets);
+        proposed.sort_by_key(|value| (value.layer, value.vertex_index));
         fields.push(MeshExtrapolationFieldPreview {
             phase_id: field.phase_id,
             property: field.property.clone(),
-            values: core.values,
+            values: proposed,
+            requested_rows,
+            dependency_rows,
+            rejections: core.rejections,
             diagnostics: core.diagnostics,
         });
     }
@@ -239,6 +302,7 @@ pub fn apply_mesh_extrapolation(
         if field_preview.values.is_empty() {
             continue;
         }
+        let requested_rows = field_preview.requested_rows.clone();
         for value in field_preview.values {
             let target = field.values.get_mut(value.vertex_index).ok_or_else(|| {
                 MeshExtrapolationError::InvalidDocument(format!(
@@ -249,7 +313,12 @@ pub fn apply_mesh_extrapolation(
                     value.vertex_index + 1
                 ))
             })?;
-            if !matches!(target.state, TabulatedValueState::Missing) {
+            let may_replace_target_extrapolation =
+                requested_rows.binary_search(&value.vertex_index).is_ok()
+                    && matches!(target.state, TabulatedValueState::Extrapolated);
+            if !matches!(target.state, TabulatedValueState::Missing)
+                && !may_replace_target_extrapolation
+            {
                 return Err(MeshExtrapolationError::StalePreview {
                     grid: grid.name.clone(),
                 });
@@ -392,6 +461,8 @@ mod tests {
                 property: "T".into(),
             }],
             all_fields: false,
+
+            target_rows: Vec::new(),
             options: RegularMeshExtrapolationOptions::default(),
         };
         let preview = extrapolate_regular_grid_fields(&dataset, &request).unwrap();
@@ -402,5 +473,38 @@ mod tests {
             dataset.grids[0].fields()[0].values[0].state,
             TabulatedValueState::Extrapolated
         );
+    }
+    #[test]
+    fn target_preview_does_not_materialize_unrequested_missing_rows() {
+        let mut dataset = default_regular_dataset();
+        let TabulatedGrid::Regular(grid) = &mut dataset.grids[0] else {
+            unreachable!()
+        };
+        for (row, value) in grid.fields[0].values.iter_mut().enumerate() {
+            *value = TabulatedValue::calculated(900.0 + row as f64).unwrap();
+        }
+        grid.fields[0].values[0] = TabulatedValue::missing();
+        grid.fields[0].values[1] = TabulatedValue::missing();
+        let request = MeshExtrapolationRequest {
+            grid: "regular".into(),
+            fields: vec![MeshExtrapolationField {
+                phase: "Phase1".into(),
+                property: "T".into(),
+            }],
+            all_fields: false,
+            target_rows: vec![0],
+            options: RegularMeshExtrapolationOptions::default(),
+        };
+        let preview = extrapolate_regular_grid_fields(&dataset, &request).unwrap();
+        assert!(
+            preview.fields[0]
+                .values
+                .iter()
+                .all(|value| value.vertex_index == 0)
+        );
+        apply_mesh_extrapolation(&mut dataset, preview).unwrap();
+        let values = &dataset.grids[0].fields()[0].values;
+        assert_eq!(values[0].state, TabulatedValueState::Extrapolated);
+        assert_eq!(values[1].state, TabulatedValueState::Missing);
     }
 }

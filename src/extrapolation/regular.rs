@@ -216,6 +216,39 @@ pub struct RegularMeshExtrapolationResult {
     pub diagnostics: RegularMeshExtrapolationDiagnostics,
 }
 
+/// One canonical row explicitly requested by a target-scoped preview.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct RegularMeshExtrapolationTarget {
+    /// Zero-based canonical regular-grid vertex index.
+    pub vertex_index: usize,
+}
+
+/// Scope for a deterministic regular-mesh extrapolation preview.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegularMeshExtrapolationScope {
+    /// Preview every eligible missing cell in the field.
+    EntireField,
+    /// Preview only requested targets and the dependency closure needed to
+    /// materialize those targets safely.
+    Targets(Vec<RegularMeshExtrapolationTarget>),
+}
+
+/// A target-scoped view of a normal layered extrapolation result.
+///
+/// `required_dependencies` contains only accepted EX values which were used by
+/// a requested target. Its row order is the canonical layer/row order of the
+/// underlying deterministic extrapolation result.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TargetedExtrapolationResult {
+    /// Values the caller explicitly requested.
+    pub requested_targets: Vec<RegularMeshExtrapolatedValue>,
+    /// Accepted intermediate EX values required by the requested targets.
+    pub required_dependencies: Vec<RegularMeshExtrapolatedValue>,
+    /// Target-only typed rejection diagnostics.
+    pub rejections: Vec<RejectedExtrapolationVertex>,
+    /// Full field diagnostics, retained so a UI can explain remaining NA cells.
+    pub diagnostics: RegularMeshExtrapolationDiagnostics,
+}
 /// Input validation failure for the focused regular-grid algorithm.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RegularMeshExtrapolationError {
@@ -229,6 +262,15 @@ pub enum RegularMeshExtrapolationError {
     NonFiniteSourceValue { vertex_index: usize },
     /// Guard configuration is inconsistent or non-finite.
     InvalidOptions { message: &'static str },
+    /// A target row is not a canonical vertex of this grid.
+    TargetOutOfRange {
+        vertex_index: usize,
+        vertex_count: usize,
+    },
+    /// A target already has a defined scalar and cannot be overwritten implicitly.
+    TargetIsNotMissing { vertex_index: usize },
+    /// A target is classified as an ineligible barrier such as cut-off.
+    TargetIsIneligible { vertex_index: usize },
 }
 
 impl fmt::Display for RegularMeshExtrapolationError {
@@ -249,6 +291,20 @@ impl fmt::Display for RegularMeshExtrapolationError {
                 )
             }
             Self::InvalidOptions { message } => formatter.write_str(message),
+            Self::TargetOutOfRange {
+                vertex_index,
+                vertex_count,
+            } => write!(
+                formatter,
+                "target vertex {vertex_index} is outside the {vertex_count}-row regular grid"
+            ),
+            Self::TargetIsNotMissing { vertex_index } => {
+                write!(formatter, "target vertex {vertex_index} is not missing")
+            }
+            Self::TargetIsIneligible { vertex_index } => write!(
+                formatter,
+                "target vertex {vertex_index} is not eligible for automatic extrapolation"
+            ),
         }
     }
 }
@@ -272,6 +328,103 @@ pub fn extrapolate_regular_mesh(
     extrapolate_regular_mesh_impl(grid, values, eligible, options, &mut trace)
 }
 
+/// Preview the regular mesh through the same layered algorithm but retain only
+/// requested targets and the exact accepted EX dependency closure they use.
+///
+/// This function deliberately runs the existing deterministic whole-field
+/// construction first. That preserves its synchronous layer semantics; target
+/// scoping changes materialization only, never the numerical estimates.
+pub fn extrapolate_regular_mesh_scoped(
+    grid: RegularTernaryGrid,
+    values: &[Option<f64>],
+    eligible: &[bool],
+    options: RegularMeshExtrapolationOptions,
+    scope: RegularMeshExtrapolationScope,
+) -> Result<TargetedExtrapolationResult, RegularMeshExtrapolationError> {
+    let requested = match &scope {
+        RegularMeshExtrapolationScope::EntireField => None,
+        RegularMeshExtrapolationScope::Targets(targets) => {
+            let mut rows = std::collections::BTreeSet::new();
+            for target in targets {
+                if target.vertex_index >= grid.vertex_count() {
+                    return Err(RegularMeshExtrapolationError::TargetOutOfRange {
+                        vertex_index: target.vertex_index,
+                        vertex_count: grid.vertex_count(),
+                    });
+                }
+                if values.get(target.vertex_index).copied().flatten().is_some() {
+                    return Err(RegularMeshExtrapolationError::TargetIsNotMissing {
+                        vertex_index: target.vertex_index,
+                    });
+                }
+                if !eligible.get(target.vertex_index).copied().unwrap_or(false) {
+                    return Err(RegularMeshExtrapolationError::TargetIsIneligible {
+                        vertex_index: target.vertex_index,
+                    });
+                }
+                rows.insert(target.vertex_index);
+            }
+            Some(rows)
+        }
+    };
+    let result = extrapolate_regular_mesh(grid, values, eligible, options)?;
+    let Some(requested) = requested else {
+        return Ok(TargetedExtrapolationResult {
+            requested_targets: result.values,
+            required_dependencies: Vec::new(),
+            rejections: result.rejections,
+            diagnostics: result.diagnostics,
+        });
+    };
+
+    let accepted = result
+        .values
+        .iter()
+        .map(|value| (value.vertex_index, value))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let mut closure = requested.clone();
+    let mut pending = requested.iter().copied().collect::<Vec<_>>();
+    while let Some(vertex_index) = pending.pop() {
+        let Some(value) = accepted.get(&vertex_index) else {
+            continue;
+        };
+        for support in value
+            .directional_estimates
+            .iter()
+            .flat_map(|estimate| estimate.support_vertex_indices.iter().copied())
+        {
+            if accepted.contains_key(&support) && closure.insert(support) {
+                pending.push(support);
+            }
+        }
+    }
+    let requested_targets = result
+        .values
+        .iter()
+        .filter(|value| requested.contains(&value.vertex_index))
+        .cloned()
+        .collect();
+    let required_dependencies = result
+        .values
+        .iter()
+        .filter(|value| {
+            closure.contains(&value.vertex_index) && !requested.contains(&value.vertex_index)
+        })
+        .cloned()
+        .collect();
+    let rejections = result
+        .rejections
+        .iter()
+        .filter(|value| requested.contains(&value.vertex_index))
+        .cloned()
+        .collect();
+    Ok(TargetedExtrapolationResult {
+        requested_targets,
+        required_dependencies,
+        rejections,
+        diagnostics: result.diagnostics,
+    })
+}
 /// Traced variant of [`extrapolate_regular_mesh`].
 pub fn extrapolate_regular_mesh_with_trace(
     grid: RegularTernaryGrid,
@@ -807,6 +960,108 @@ mod tests {
         assert_eq!(first.values.len(), 1);
         assert!((first.values[0].value - 830.0).abs() < 1.0e-9);
         assert_eq!(first.values[0].layer, 1);
+    }
+
+    #[test]
+    fn target_scope_materializes_only_the_requested_vertex() {
+        let grid = grid();
+        let mut values = grid
+            .compositions()
+            .map(|[a, b, c]| Some(800.0 + 100.0 * a + 30.0 * b + 10.0 * c))
+            .collect::<Vec<_>>();
+        let target = grid
+            .vertex_id(LatticeCoordinate { i: 0, j: 4, k: 0 })
+            .unwrap()
+            .0;
+        values[target] = None;
+        let eligible = values.iter().map(Option::is_none).collect::<Vec<_>>();
+        let full = extrapolate_regular_mesh(
+            grid,
+            &values,
+            &eligible,
+            RegularMeshExtrapolationOptions::default(),
+        )
+        .unwrap();
+        let scoped = extrapolate_regular_mesh_scoped(
+            grid,
+            &values,
+            &eligible,
+            RegularMeshExtrapolationOptions::default(),
+            RegularMeshExtrapolationScope::Targets(vec![RegularMeshExtrapolationTarget {
+                vertex_index: target,
+            }]),
+        )
+        .unwrap();
+        assert_eq!(scoped.requested_targets.len(), 1);
+        assert_eq!(scoped.requested_targets[0].vertex_index, target);
+        assert!(scoped.required_dependencies.is_empty());
+        assert_eq!(scoped.requested_targets[0], full.values[0]);
+    }
+
+    #[test]
+    fn target_scope_includes_the_layered_dependency_closure() {
+        let grid = grid();
+        let mut values = grid
+            .compositions()
+            .map(|[a, b, c]| Some(800.0 + 100.0 * a + 30.0 * b + 10.0 * c))
+            .collect::<Vec<_>>();
+        let target = grid
+            .vertex_id(LatticeCoordinate { i: 0, j: 4, k: 0 })
+            .unwrap()
+            .0;
+        let toward_a = grid
+            .vertex_id(LatticeCoordinate { i: 1, j: 3, k: 0 })
+            .unwrap()
+            .0;
+        let toward_c = grid
+            .vertex_id(LatticeCoordinate { i: 0, j: 3, k: 1 })
+            .unwrap()
+            .0;
+        values[target] = None;
+        values[toward_a] = None;
+        values[toward_c] = None;
+        let eligible = values.iter().map(Option::is_none).collect::<Vec<_>>();
+        let scoped = extrapolate_regular_mesh_scoped(
+            grid,
+            &values,
+            &eligible,
+            RegularMeshExtrapolationOptions {
+                maximum_layers: 2,
+                minimum_directional_support: 1,
+                ..RegularMeshExtrapolationOptions::default()
+            },
+            RegularMeshExtrapolationScope::Targets(vec![RegularMeshExtrapolationTarget {
+                vertex_index: target,
+            }]),
+        )
+        .unwrap();
+        assert_eq!(scoped.requested_targets.len(), 1);
+        assert_eq!(scoped.requested_targets[0].layer, 2);
+        assert!(!scoped.required_dependencies.is_empty());
+        assert!(
+            scoped
+                .required_dependencies
+                .iter()
+                .all(|dependency| dependency.layer < scoped.requested_targets[0].layer)
+        );
+    }
+    #[test]
+    fn target_scope_rejects_a_defined_source_cell() {
+        let grid = grid();
+        let values = vec![Some(1.0); grid.vertex_count()];
+        let eligible = vec![false; grid.vertex_count()];
+        assert_eq!(
+            extrapolate_regular_mesh_scoped(
+                grid,
+                &values,
+                &eligible,
+                RegularMeshExtrapolationOptions::default(),
+                RegularMeshExtrapolationScope::Targets(vec![RegularMeshExtrapolationTarget {
+                    vertex_index: 0,
+                }]),
+            ),
+            Err(RegularMeshExtrapolationError::TargetIsNotMissing { vertex_index: 0 })
+        );
     }
 
     #[test]

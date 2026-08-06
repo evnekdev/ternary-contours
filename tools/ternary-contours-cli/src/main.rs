@@ -525,6 +525,8 @@ fn extrapolate_mesh(args: ExtrapolateMeshArgs) -> Result<(), Box<dyn Error>> {
             .map(|field| MeshExtrapolationField::parse(field))
             .collect::<Result<_, _>>()?,
         all_fields: args.all_fields,
+
+        target_rows: Vec::new(),
         options: RegularMeshExtrapolationOptions {
             method: args.method.into(),
             maximum_layers: args.max_layers,
