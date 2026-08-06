@@ -19,22 +19,30 @@ The supported global declarations are `title = value`,
 TSV cell is an error; only declared missing tokens represent undefined optional
 values.
 
-Scalar cells also support classified point states used by grid inspection:
+Scalar cells support finite and classified grid values:
 
 ```text
-1250.0    Calculated (finite scalar)
-NE        NonExisting (phase absent or too remote)
-CO        CutOff (explicit high-temperature limit)
-CO:3000   CutOff with retained limit/note
-NA        Missing (not calculated or classified)
+1250.0                              Calculated (finite scalar)
+EX[1,steffen,2,3.25]=812.340000     Extrapolated with provenance
+CO                                  Cut-off (explicit high-temperature limit)
+CO:3000                             Cut-off with retained limit/note
+NA                                  Missing (not calculated or classified)
+NE                                  Legacy alias, normalized to NA on read
 ```
 
-`NE`, `CO`, and `NA` are reserved, case-insensitive state tokens. A configured
-missing token continues to map to `Missing`. `NE:<note>`, `CO:<note>`, and
-`NA:<note>` preserve a short note in the neutral dataset. Only a finite numeric
-cell contributes a defined evaluator value; the other states are undefined with
-reason-specific diagnostics and are never converted to zero, NaN, or infinity.
+`NA`, `CO`, and `EX` are reserved, case-insensitive tokens. `NE` remains
+accepted only for backward compatibility and is normalized to `NA`; serializers
+and TSV copy never write it. `EX[layer,method,support,spread]=value` requires a
+finite value, `layer >= 1`, one of `akima`, `makima`, `pchip`, or `steffen`, a
+positive directional support count, and a finite non-negative spread.
+Serializers use the lowercase method spelling and deterministic precision.
 
+An `EX` value is a persistent regular-mesh estimate, not a calculated input.
+It contributes a finite source value to interpolation while retaining provenance.
+`CO` is deliberately not eligible for automatic extrapolation. A manual field
+edit clears all EX cells in that field back to `NA`, avoiding stale estimates.
+Only finite numeric and EX cells contribute a defined evaluator value; classified
+cells are never converted to zero, NaN, or infinity.
 
 The following sections occur once each:
 
@@ -132,8 +140,7 @@ are used.
 
 ## Missing data and diagnostics
 
-`Missing`, `NonExisting`, and `CutOff` cells are distinct undefined scalar
-states. A required T field must still be declared for every phase, but individual
+`Missing` and `CutOff` cells are distinct undefined scalar states. Legacy `NE` is normalized to `Missing`; `Extrapolated` carries a finite value with persistent provenance. A required T field must still be declared for every phase, but individual
 T samples may be classified undefined; calculation reports coverage and state
 counts instead of inventing values. Other non-numeric tokens, non-finite values,
 and blank cells are errors. Diagnostics carry source path, line, section/grid,

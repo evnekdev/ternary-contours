@@ -321,8 +321,6 @@ fn state_for_triangle(
         .collect::<Vec<_>>();
     if states.contains(&TabulatedValueState::Missing) {
         InterpolatedResultState::UndefinedMissing
-    } else if states.contains(&TabulatedValueState::NonExisting) {
-        InterpolatedResultState::UndefinedNonExisting
     } else if states.contains(&TabulatedValueState::CutOff) {
         InterpolatedResultState::UndefinedCutOff
     } else {

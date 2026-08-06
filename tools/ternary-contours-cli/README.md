@@ -8,10 +8,7 @@ It is a repository tool and is not published to crates.io.
 ## Grid inspection and classified cells
 
 With the viewer feature, **Grid inspection** displays one selected grid, phase,
-and property as editable ternary markers. A finite scalar is **Calculated**;
-`NE` is **Non-existing**; `CO` or `CO:<limit>` is **Cut-off**; and `NA` is
-**Missing**. These are semantically distinct undefined states, not numeric
-sentinels. Only calculated values reach the liquidus evaluator.
+and property as editable ternary markers. A finite scalar is **Calculated**; `EX[...]` is a provenance-carrying **Extrapolated** finite value; `CO` or `CO:<limit>` is **Cut-off**; and `NA` is **Missing**. Legacy `NE` is accepted and normalized to `NA`, but is never written. Only calculated and EX values reach the liquidus evaluator.
 
 Use the persistent **Open**, **Save**, and **Save As** toolbar from any viewer
 tab. Open uses the native `.tct` picker, remembers the last Open/Save As
@@ -234,3 +231,19 @@ cargo run -p ternary-contours-cli --features trace -- `
 
 See [`docs/numerical-trace-schema.md`](../../docs/numerical-trace-schema.md)
 for the schema, filters, trace cap semantics, and reproduction workflow.
+## Regular-mesh extrapolation
+
+`extrapolate-mesh` previews or materializes deterministic one-dimensional cubic
+continuations along canonical regular-grid line families. It is deliberately
+regular-grid only; irregular grids return an explicit unsupported-grid error.
+
+```text
+cargo run -p ternary-contours-cli -- extrapolate-mesh input.tct \
+  --grid regular --field Lime.T --method steffen --max-layers 1 --preview
+cargo run -p ternary-contours-cli -- extrapolate-mesh input.tct \
+  --grid regular --all-fields --method steffen --max-layers 1 --output healed.tct
+```
+
+The command writes `EX[layer,method,support,spread]=value` cells only after a
+successful preview. EX cells are estimates with persistent provenance; a normal
+field edit clears its existing EX values to `NA` before changing the source.

@@ -28,7 +28,7 @@ plotters = { version = "0.3.7", default-features = false, features = [
     "ttf",
 ] }
 plotters-ternary = { path = "../../../plotters-ternary", features = ["stable-contours"] }
-ternary-contours = { path = "../..", features = ["irregular-delaunay"] }
+ternary-contours = { path = "../..", features = ["irregular-delaunay", "cubic-alpha"] }
 ternary-contours-gui-core = { path = "../ternary-contours-gui-core" }
 thiserror = "2.0.17"
 serde_json = { version = "1.0.145", optional = true }

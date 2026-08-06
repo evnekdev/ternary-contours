@@ -33,16 +33,15 @@ so grid-inspection changes are not lost.
 | State | TCT / TSV token | Marker | Calculation meaning |
 | --- | --- | --- | --- |
 | Calculated | finite number | green filled circle | defined scalar sample |
-| Non-existing | `NE` | grey cross | phase is intentionally undefined |
+| Extrapolated | `EX[...]` | blue filled square | finite regular-mesh estimate with provenance |
 | Cut-off | `CO`, `CO:<limit>` | orange triangle | explicitly limited high-temperature result |
 | Missing | `NA` | hollow circle | no result or classification yet |
 
-The optional suffix in `CO:3000` is retained as a cut-off limit/note. Notes
-may likewise be retained with `NE:<note>` or `NA:<note>`. None of the three
-undefined states is converted to zero, NaN, negative infinity, or a calculated
-sample. The numerical adapter reports reason-specific undefined evaluations,
-although tracing can treat all such vertices as outside the available source
-domain.
+Legacy `NE` is accepted as a compatibility alias for `NA`, then normalized;
+new documents and TSV copy do not emit it. EX is not a classified absence: it
+is a finite estimate retaining its layer, cubic method, support count, and
+spread. `CO` remains unavailable and is not automatically healed. A field edit
+clears all EX cells in that field back to NA to avoid stale provenance.
 
 ## Inspect and edit a field
 
@@ -108,7 +107,7 @@ visible while changing zoom or returning to Vertex selection.
 ## Excel TSV
 
 **Copy selected field TSV** emits `A`, `B`, `C`, and the selected qualified
-field column with the same numeric/`NE`/`CO`/`NA` cell tokens. Paste through the
+field column with the same numeric/`EX`/`CO`/`NA` cell tokens. Paste through the
 Data tab follows the same rules:
 
 ```text
@@ -127,7 +126,7 @@ until it is applied.
 
 1. Open a populated regular or irregular TCT document.
 2. Confirm the Grid inspection selector chooses a usable `T` field.
-3. Edit one calculated value, one `NE`, and one `CO:3000` point.
+3. Edit one calculated value, one `EX[...]`, and one `CO:3000` point.
 4. Switch phase/property and return; confirm the draft edits remain.
 5. Save, reopen the document, and confirm state, value, note, and field
    ownership round-trip.

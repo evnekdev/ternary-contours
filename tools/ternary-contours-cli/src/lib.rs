@@ -9,6 +9,7 @@ pub mod editor;
 #[cfg(feature = "inspection")]
 #[path = "viewer/interpolation_inspection.rs"]
 pub mod interpolation_inspection;
+pub mod mesh_extrapolation;
 pub mod model;
 pub mod parser;
 pub mod projection;
@@ -24,6 +25,7 @@ pub mod viewer;
 
 pub use binary_edge_audit::{BinaryEdgeAuditReport, audit_cao_pbo_zno_binary_edges};
 pub use editor::*;
+pub use mesh_extrapolation::*;
 pub use model::*;
 pub use parser::{TctError, parse_path, parse_str};
 pub use projection::{

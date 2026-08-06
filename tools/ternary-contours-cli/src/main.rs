@@ -2,17 +2,20 @@ use std::{error::Error, path::PathBuf, process::ExitCode};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ternary_contours::{
-    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, StableInvariantNode,
+    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy,
+    RegularMeshExtrapolationOptions, StableInvariantNode,
 };
 #[cfg(feature = "trace")]
 use ternary_contours::{
     NumericalTraceConfig, NumericalTraceEventKind, NumericalTraceLevel, TraceBinaryBoundary,
 };
 use ternary_contours_cli::{
-    IrregularTemplateStyle, NumericFormat, OutputFormat, ProjectionOptions, RenderOptions,
-    TabulatedGrid, audit_cao_pbo_zno_binary_edges, calculate_projection, compositions_tsv,
-    irregular_template, parse_components, parse_field_specs, parse_level_spec, parse_path,
-    regular_template_tct, render_to_path,
+    IrregularTemplateStyle, MeshExtrapolationField, MeshExtrapolationRequest, NumericFormat,
+    OutputFormat, ProjectionOptions, RenderOptions, TabulatedGrid, TctSerializeOptions,
+    apply_mesh_extrapolation, audit_cao_pbo_zno_binary_edges, calculate_projection,
+    compositions_tsv, extrapolate_regular_grid_fields, irregular_template, parse_components,
+    parse_field_specs, parse_level_spec, parse_path, regular_template_tct, render_to_path,
+    save_tct_atomic, serialize_tct,
 };
 
 #[derive(Parser)]
@@ -53,6 +56,8 @@ enum Command {
         kind: TemplateCommand,
     },
     /// Audit exact finite overlap and linear roots on CaO–PbO–ZnO source edges.
+    /// Fill eligible NA cells on a regular mesh with provenance-preserving EX values.
+    ExtrapolateMesh(ExtrapolateMeshArgs),
     AuditBinaryEdges(AuditBinaryEdgesArgs),
     /// Produce an opt-in numerical projection trace (requires `--features trace`).
     TraceProjection(TraceProjectionArgs),
@@ -195,6 +200,34 @@ impl PlotOptions {
     }
 }
 
+#[derive(Args)]
+struct ExtrapolateMeshArgs {
+    input: PathBuf,
+    #[arg(long)]
+    grid: String,
+    /// Phase/property field, e.g. Lime.T. May be repeated.
+    #[arg(long = "field")]
+    fields: Vec<String>,
+    #[arg(long, conflicts_with = "fields")]
+    all_fields: bool,
+    #[arg(long, value_enum, default_value_t = CubicMethodArg::Steffen)]
+    method: CubicMethodArg,
+    #[arg(long, default_value_t = 1)]
+    max_layers: u16,
+    #[arg(long, default_value_t = 3)]
+    minimum_support: usize,
+    #[arg(long)]
+    max_spread: Option<f64>,
+    #[arg(long)]
+    minimum_value: Option<f64>,
+    #[arg(long)]
+    maximum_value: Option<f64>,
+    /// Review the proposed EX cells without writing an output TCT.
+    #[arg(long)]
+    preview: bool,
+    #[arg(short, long)]
+    output: Option<PathBuf>,
+}
 #[derive(Args)]
 struct AuditBinaryEdgesArgs {
     input: PathBuf,
@@ -340,6 +373,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         }) => plot(input, output, options),
         Some(Command::Compositions(args)) => compositions(args),
         Some(Command::Template { kind }) => template(kind),
+        Some(Command::ExtrapolateMesh(args)) => extrapolate_mesh(args),
         Some(Command::AuditBinaryEdges(args)) => audit_binary_edges(args),
         Some(Command::TraceProjection(args)) => trace_projection(args),
         Some(Command::AnalyzeTrace { input }) => analyze_trace_command(input),
@@ -373,7 +407,7 @@ fn inspect(input: PathBuf) -> Result<(), Box<dyn Error>> {
                 .fold((0, 0), |(defined, undefined), field| {
                     let values = field.values.iter();
                     (
-                        defined + values.clone().filter(|value| value.is_calculated()).count(),
+                        defined + values.clone().filter(|value| value.is_defined()).count(),
                         undefined + values.filter(|value| !value.is_calculated()).count(),
                     )
                 });
@@ -481,6 +515,60 @@ fn template(kind: TemplateCommand) -> Result<(), Box<dyn Error>> {
     }
 }
 
+fn extrapolate_mesh(args: ExtrapolateMeshArgs) -> Result<(), Box<dyn Error>> {
+    let mut dataset = parse_path(&args.input)?;
+    let request = MeshExtrapolationRequest {
+        grid: args.grid.clone(),
+        fields: args
+            .fields
+            .iter()
+            .map(|field| MeshExtrapolationField::parse(field))
+            .collect::<Result<_, _>>()?,
+        all_fields: args.all_fields,
+        options: RegularMeshExtrapolationOptions {
+            method: args.method.into(),
+            maximum_layers: args.max_layers,
+            minimum_directional_support: args.minimum_support,
+            maximum_directional_spread: args.max_spread,
+            minimum_value: args.minimum_value,
+            maximum_value: args.maximum_value,
+            ..RegularMeshExtrapolationOptions::default()
+        },
+    };
+    let preview = extrapolate_regular_grid_fields(&dataset, &request)?;
+    println!("Grid: {}", preview.grid_name);
+    println!("Fields processed: {}", preview.fields.len());
+    println!("Method: {:?}", preview.options.method);
+    for field in &preview.fields {
+        println!(
+            "{}.{}: EX values created: {}; layers completed: {}; remaining NA: {}; rejected for insufficient support: {}; rejected for directional disagreement: {}",
+            field.phase_id.0,
+            field.property,
+            field.diagnostics.values_created,
+            field.diagnostics.layers_completed,
+            field.diagnostics.remaining_eligible_missing_values,
+            field.diagnostics.rejected_insufficient_support,
+            field.diagnostics.rejected_directional_spread,
+        );
+    }
+    if args.preview {
+        return Ok(());
+    }
+    let output = args
+        .output
+        .ok_or("--output is required unless --preview is specified")?;
+    let summary = apply_mesh_extrapolation(&mut dataset, preview)?;
+    let contents = serialize_tct(&dataset, &TctSerializeOptions::default())?;
+    save_tct_atomic(&output, &contents)?;
+    println!(
+        "Wrote {} ({} EX values across {} fields; maximum layer EX{})",
+        output.display(),
+        summary.values_created,
+        summary.fields_changed,
+        summary.maximum_layer
+    );
+    Ok(())
+}
 fn audit_binary_edges(args: AuditBinaryEdgesArgs) -> Result<(), Box<dyn Error>> {
     let dataset = parse_path(&args.input)?;
     let source_interpolation = match args.source_interpolation {

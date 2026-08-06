@@ -875,7 +875,7 @@ impl DatasetEditorState {
         Ok(field.values.iter().fold([0; 4], |mut counts, value| {
             counts[match value.state {
                 crate::TabulatedValueState::Calculated => 0,
-                crate::TabulatedValueState::NonExisting => 1,
+                crate::TabulatedValueState::Extrapolated => 1,
                 crate::TabulatedValueState::CutOff => 2,
                 crate::TabulatedValueState::Missing => 3,
             }] += 1;
@@ -923,8 +923,14 @@ impl DatasetEditorState {
             return Err("selected grid point no longer exists".into());
         }
         self.snapshot_draft();
-        *grid_field_mut(&mut self.draft.grids[grid_index], field_index)
-            .and_then(|field| field.values.get_mut(row))
+        let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
+            .ok_or("selected grid field no longer exists")?;
+        for existing in &mut field.values {
+            existing.clear_if_extrapolated();
+        }
+        *field
+            .values
+            .get_mut(row)
             .ok_or("selected grid point no longer exists")? = value;
         self.dirty = true;
         Ok(())
@@ -957,10 +963,14 @@ impl DatasetEditorState {
         self.snapshot_draft();
         let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
             .ok_or("selected grid field no longer exists")?;
+        for existing in &mut field.values {
+            existing.clear_if_extrapolated();
+        }
         for row in rows {
             field.values[*row] = TabulatedValue {
                 state,
                 value: None,
+                extrapolation: None,
                 note: note.clone().filter(|note| !note.trim().is_empty()),
             };
         }
@@ -988,6 +998,9 @@ impl DatasetEditorState {
         self.snapshot_draft();
         let field = grid_field_mut(&mut self.draft.grids[grid_index], field_index)
             .ok_or("selected grid field no longer exists")?;
+        for existing in &mut field.values {
+            existing.clear_if_extrapolated();
+        }
         for row in rows {
             field.values[*row].note = None;
         }
@@ -1530,7 +1543,7 @@ mod tests {
         assert_eq!(preview.fields[0].values[0].calculated_value(), Some(100.0));
         assert_eq!(
             preview.fields[0].values[1].state,
-            crate::TabulatedValueState::NonExisting
+            crate::TabulatedValueState::Missing
         );
         assert_eq!(
             preview.fields[0].values[2].state,

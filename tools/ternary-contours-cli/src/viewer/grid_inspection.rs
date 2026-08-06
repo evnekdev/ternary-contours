@@ -199,7 +199,7 @@ impl GridInspectionUi {
         self.edit_row = Some(row);
         self.edit_state = value.state;
         self.edit_value = value
-            .calculated_value()
+            .defined_value()
             .map(|number| number.to_string())
             .unwrap_or_default();
         self.edit_note = value.note.clone().unwrap_or_default();
@@ -394,7 +394,7 @@ pub fn show_controls(
     );
     ui.checkbox(
         &mut state.show_non_existing,
-        format!("Non-existing: {}", counts[1]),
+        format!("Extrapolated: {}", counts[1]),
     );
     ui.checkbox(&mut state.show_cut_off, format!("Cut-off: {}", counts[2]));
     ui.checkbox(&mut state.show_missing, format!("Missing: {}", counts[3]));
@@ -461,10 +461,6 @@ pub fn show_controls(
     let selected = state.selected_rows.iter().copied().collect::<Vec<_>>();
     ui.horizontal_wrapped(|ui| {
         for (label, value) in [
-            (
-                "Set selected to Non-existing",
-                TabulatedValueState::NonExisting,
-            ),
             ("Set selected to Cut-off", TabulatedValueState::CutOff),
             ("Set selected to Missing", TabulatedValueState::Missing),
         ] {
@@ -677,11 +673,6 @@ fn point_editor(
         );
         ui.selectable_value(
             &mut state.edit_state,
-            TabulatedValueState::NonExisting,
-            "Non-existing",
-        );
-        ui.selectable_value(
-            &mut state.edit_state,
             TabulatedValueState::CutOff,
             "Cut-off",
         );
@@ -725,6 +716,7 @@ fn point_editor(
             classified => Ok(TabulatedValue {
                 state: classified,
                 value: None,
+                extrapolation: None,
                 note: (!state.edit_note.trim().is_empty())
                     .then(|| state.edit_note.trim().to_owned()),
             }),
@@ -1287,13 +1279,13 @@ fn complete_grid_tsv(dataset: &crate::TabulatedTernaryDataset, grid_index: usize
 
 fn label(value: &TabulatedValue, row: usize, mode: GridLabelMode, precision: usize) -> String {
     let scalar = value
-        .calculated_value()
+        .defined_value()
         .map(|number| format!("{number:.precision$}"))
         .unwrap_or_else(|| value.state.token().into());
     match mode {
         GridLabelMode::None => String::new(),
         GridLabelMode::Value => value
-            .calculated_value()
+            .defined_value()
             .map(|number| format!("{number:.precision$}"))
             .unwrap_or_else(|| value.state.token().into()),
         GridLabelMode::State => value.state.token().into(),
@@ -1314,8 +1306,9 @@ fn label_mode_name(mode: GridLabelMode) -> &'static str {
 
 fn visible(value: TabulatedValueState, state: &GridInspectionUi) -> bool {
     match value {
-        TabulatedValueState::Calculated => state.show_calculated,
-        TabulatedValueState::NonExisting => state.show_non_existing,
+        TabulatedValueState::Calculated | TabulatedValueState::Extrapolated => {
+            state.show_calculated
+        }
         TabulatedValueState::CutOff => state.show_cut_off,
         TabulatedValueState::Missing => state.show_missing,
     }
@@ -1351,21 +1344,14 @@ fn draw_marker(painter: &egui::Painter, point: egui::Pos2, state: TabulatedValue
         TabulatedValueState::Calculated => {
             painter.circle_filled(point, size, egui::Color32::from_rgb(46, 204, 113));
         }
-        TabulatedValueState::NonExisting => {
-            let stroke = egui::Stroke::new(2.0_f32, egui::Color32::GRAY);
-            painter.line_segment(
-                [
-                    point - egui::vec2(size, size),
-                    point + egui::vec2(size, size),
-                ],
-                stroke,
-            );
-            painter.line_segment(
-                [
-                    point + egui::vec2(size, -size),
-                    point - egui::vec2(size, -size),
-                ],
-                stroke,
+        TabulatedValueState::Extrapolated => {
+            painter.circle_filled(point, size, egui::Color32::from_rgb(74, 144, 226));
+            painter.text(
+                point,
+                egui::Align2::CENTER_CENTER,
+                "EX",
+                egui::FontId::proportional((size * 0.85).max(7.0)),
+                egui::Color32::WHITE,
             );
         }
         TabulatedValueState::CutOff => {
@@ -1412,8 +1398,8 @@ mod tests {
         assert!(!visible(TabulatedValueState::Missing, &state));
         assert!(visible(TabulatedValueState::CutOff, &state));
         assert_eq!(
-            label(&TabulatedValue::non_existing(), 3, GridLabelMode::State, 3),
-            "NE"
+            label(&TabulatedValue::missing(), 3, GridLabelMode::State, 3),
+            "NA"
         );
         assert_eq!(
             label(

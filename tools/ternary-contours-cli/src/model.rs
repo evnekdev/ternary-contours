@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use ternary_contours::{RegularTernaryGrid, StablePhaseId};
+use ternary_contours::{CubicAlphaMethod, RegularTernaryGrid, StablePhaseId};
 
 /// TCT format version declared by the file header.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -71,16 +71,12 @@ pub struct SourceRange {
 }
 
 /// Classification of one tabulated scalar entry.
-///
-/// These states remain independent from the GUI. Only a calculated entry
-/// contributes a finite scalar to a liquidus projection; the other states keep
-/// the reason why the input is unavailable.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum TabulatedValueState {
-    /// A finite scalar result exists.
+    /// A finite scalar supplied by the source calculation.
     Calculated,
-    /// The phase is not present or meaningful at this composition.
-    NonExisting,
+    /// A finite scalar estimated from a regular mesh with persistent provenance.
+    Extrapolated,
     /// The calculation exceeded an explicit high-temperature limit.
     CutOff,
     /// The point has not yet been calculated or classified.
@@ -89,26 +85,31 @@ pub enum TabulatedValueState {
 }
 
 impl TabulatedValueState {
-    /// Compact deterministic token used in TSV and TCT output.
     pub const fn token(self) -> &'static str {
         match self {
             Self::Calculated => "OK",
-            Self::NonExisting => "NE",
+            Self::Extrapolated => "EX",
             Self::CutOff => "CO",
             Self::Missing => "NA",
         }
     }
 }
 
-/// One classified scalar input cell.
-///
-/// `value` is meaningful only for [`TabulatedValueState::Calculated`]. The
-/// optional note is metadata (for example a cut-off limit); it is never used
-/// by interpolation.
+/// Machine-readable provenance for an [`TabulatedValueState::Extrapolated`] cell.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExtrapolatedValueMetadata {
+    pub layer: u16,
+    pub method: CubicAlphaMethod,
+    pub support_count: u16,
+    pub spread: f64,
+}
+
+/// One typed scalar cell. Only calculated and extrapolated cells carry values.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TabulatedValue {
     pub state: TabulatedValueState,
     pub value: Option<f64>,
+    pub extrapolation: Option<ExtrapolatedValueMetadata>,
     pub note: Option<String>,
 }
 
@@ -119,35 +120,41 @@ impl TabulatedValue {
             .then_some(Self {
                 state: TabulatedValueState::Calculated,
                 value: Some(value),
+                extrapolation: None,
                 note: None,
             })
             .ok_or_else(|| "calculated values must be finite".into())
     }
-
     pub const fn missing() -> Self {
         Self {
             state: TabulatedValueState::Missing,
             value: None,
+            extrapolation: None,
             note: None,
         }
     }
-
-    pub const fn non_existing() -> Self {
-        Self {
-            state: TabulatedValueState::NonExisting,
-            value: None,
-            note: None,
-        }
-    }
-
     pub const fn cut_off() -> Self {
         Self {
             state: TabulatedValueState::CutOff,
             value: None,
+            extrapolation: None,
             note: None,
         }
     }
-
+    pub fn extrapolated(
+        value: f64,
+        extrapolation: ExtrapolatedValueMetadata,
+    ) -> Result<Self, String> {
+        let result = Self {
+            state: TabulatedValueState::Extrapolated,
+            value: Some(value),
+            extrapolation: Some(extrapolation),
+            note: None,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+    /// Explicit source-calculation scalar, excluding EX values.
     pub const fn calculated_value(&self) -> Option<f64> {
         match self {
             Self {
@@ -158,12 +165,40 @@ impl TabulatedValue {
             _ => None,
         }
     }
-
+    /// Finite scalar accepted by source interpolation.
+    pub const fn defined_value(&self) -> Option<f64> {
+        match self {
+            Self {
+                state: TabulatedValueState::Calculated | TabulatedValueState::Extrapolated,
+                value: Some(value),
+                ..
+            } => Some(*value),
+            _ => None,
+        }
+    }
     pub const fn is_calculated(&self) -> bool {
         matches!(self.state, TabulatedValueState::Calculated)
     }
+    pub const fn is_defined(&self) -> bool {
+        matches!(
+            self.state,
+            TabulatedValueState::Calculated | TabulatedValueState::Extrapolated
+        )
+    }
+    /// Clears persistent extrapolation provenance when an input field is edited.
+    ///
+    /// Extrapolated cells are derived from their field neighbours. A coarse
+    /// field-level invalidation rule deliberately turns every `EX` cell in a
+    /// manually edited field back into typed `NA`.
+    pub fn clear_if_extrapolated(&mut self) -> bool {
+        if self.state == TabulatedValueState::Extrapolated {
+            *self = Self::missing();
+            true
+        } else {
+            false
+        }
+    }
 
-    /// Validate the state/value invariant before applying or serializing data.
     pub fn validate(&self) -> Result<(), String> {
         if self
             .note
@@ -172,24 +207,41 @@ impl TabulatedValue {
         {
             return Err("classified-value notes cannot contain tabs or line breaks".into());
         }
-        match (self.state, self.value, self.note.as_deref()) {
-            (TabulatedValueState::Calculated, Some(value), None) if value.is_finite() => Ok(()),
-            (TabulatedValueState::Calculated, Some(_), Some(_)) => {
-                Err("calculated values cannot carry a classified-state note".into())
+        match (
+            self.state,
+            self.value,
+            self.extrapolation.as_ref(),
+            self.note.as_deref(),
+        ) {
+            (TabulatedValueState::Calculated, Some(value), None, None) if value.is_finite() => {
+                Ok(())
             }
-            (TabulatedValueState::Calculated, _, _) => {
-                Err("calculated values require one finite scalar".into())
+            (TabulatedValueState::Calculated, _, _, _) => {
+                Err("calculated values require one finite scalar and no provenance or note".into())
             }
-            (_, None, _) => Ok(()),
-            (state, Some(_), _) => Err(format!(
+            (TabulatedValueState::Extrapolated, Some(value), Some(metadata), None)
+                if value.is_finite()
+                    && metadata.layer >= 1
+                    && metadata.support_count >= 1
+                    && metadata.spread.is_finite()
+                    && metadata.spread >= 0.0 =>
+            {
+                Ok(())
+            }
+            (TabulatedValueState::Extrapolated, _, _, _) => {
+                Err("extrapolated values require one finite scalar and valid provenance".into())
+            }
+            (TabulatedValueState::Missing | TabulatedValueState::CutOff, None, None, _) => Ok(()),
+            (state, Some(_), _, _) => Err(format!(
                 "{} values must not carry an active calculated scalar",
+                state.token()
+            )),
+            (state, None, Some(_), _) => Err(format!(
+                "{} values must not carry extrapolation provenance",
                 state.token()
             )),
         }
     }
-
-    /// Render a cell for TSV or TCT. `missing_token` configures only generic
-    /// missing values; `NE` and `CO` remain distinct and unambiguous.
     pub fn token_with_format(
         &self,
         numeric: impl FnOnce(f64) -> String,
@@ -201,10 +253,22 @@ impl TabulatedValue {
                 .filter(|value| value.is_finite())
                 .map(numeric)
                 .unwrap_or_else(|| missing_token.to_owned()),
+            TabulatedValueState::Extrapolated => self
+                .value
+                .filter(|value| value.is_finite())
+                .zip(self.extrapolation.as_ref())
+                .map(|(value, metadata)| {
+                    format!(
+                        "EX[{},{},{},{:.17}]={}",
+                        metadata.layer,
+                        cubic_method_token(metadata.method),
+                        metadata.support_count,
+                        metadata.spread,
+                        numeric(value)
+                    )
+                })
+                .unwrap_or_else(|| missing_token.to_owned()),
             TabulatedValueState::Missing => state_token("NA", self.note.as_deref(), missing_token),
-            TabulatedValueState::NonExisting => {
-                state_token("NE", self.note.as_deref(), missing_token)
-            }
             TabulatedValueState::CutOff => state_token("CO", self.note.as_deref(), missing_token),
         }
     }
@@ -218,11 +282,7 @@ fn state_token(state: &str, note: Option<&str>, missing_token: &str) -> String {
     }
 }
 
-/// Parse one scalar cell shared by TCT and Excel-compatible TSV imports.
-///
-/// `NE`, `CO`, and `NA` are recognized by default. A suffixed note such as
-/// `CO:3000` or `NE:outside domain` is retained as metadata. Configured
-/// missing tokens also map to [`TabulatedValueState::Missing`].
+/// Parse TCT and TSV scalar cells. Legacy `NE` is normalized to `NA`.
 pub fn parse_tabulated_value_token(
     token: &str,
     missing_tokens: &[String],
@@ -236,6 +296,13 @@ pub fn parse_tabulated_value_token(
                 "blank cells are not zero; enable blank-as-missing to accept them".into()
             });
     }
+    if token.len() >= 5
+        && token
+            .get(..2)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("EX"))
+    {
+        return parse_extrapolated_value(token);
+    }
     let state = |prefix: &str, state: TabulatedValueState| {
         let exact = token.eq_ignore_ascii_case(prefix);
         let annotated = token
@@ -246,13 +313,14 @@ pub fn parse_tabulated_value_token(
         (exact || annotated.is_some()).then(|| TabulatedValue {
             state,
             value: None,
+            extrapolation: None,
             note: annotated
                 .map(|suffix| suffix[1..].trim())
                 .filter(|note| !note.is_empty())
                 .map(ToOwned::to_owned),
         })
     };
-    if let Some(value) = state("NE", TabulatedValueState::NonExisting)
+    if let Some(value) = state("NE", TabulatedValueState::Missing)
         .or_else(|| state("CO", TabulatedValueState::CutOff))
         .or_else(|| state("NA", TabulatedValueState::Missing))
     {
@@ -261,12 +329,76 @@ pub fn parse_tabulated_value_token(
     if missing_tokens.iter().any(|missing| missing == token) {
         return Ok(TabulatedValue::missing());
     }
-    let value = token
+    token
         .parse::<f64>()
-        .map_err(|_| "invalid numeric or classified-state token".to_owned())?;
-    TabulatedValue::calculated(value)
+        .map_err(|_| "invalid numeric or classified-state token".to_owned())
+        .and_then(TabulatedValue::calculated)
 }
 
+fn cubic_method_token(method: CubicAlphaMethod) -> &'static str {
+    match method {
+        CubicAlphaMethod::Akima => "akima",
+        CubicAlphaMethod::Makima => "makima",
+        CubicAlphaMethod::Pchip => "pchip",
+        CubicAlphaMethod::Steffen => "steffen",
+        _ => "unknown",
+    }
+}
+fn parse_extrapolated_value(token: &str) -> Result<TabulatedValue, String> {
+    let (metadata, value) = token
+        .split_once("]=")
+        .ok_or_else(|| "EX values must use EX[layer,method,support,spread]=value".to_owned())?;
+    let metadata = metadata
+        .get(..3)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("EX["))
+        .and_then(|_| metadata.get(3..))
+        .ok_or_else(|| "EX values must begin with EX[".to_owned())?;
+    let values = metadata.split(',').map(str::trim).collect::<Vec<_>>();
+    if values.len() != 4 {
+        return Err("EX values require layer, method, support count, and spread".into());
+    }
+    let layer = values[0]
+        .parse::<u16>()
+        .ok()
+        .filter(|layer| *layer >= 1)
+        .ok_or_else(|| "EX layer must be an integer of at least one".to_owned())?;
+    let method = if values[1].eq_ignore_ascii_case("akima") {
+        CubicAlphaMethod::Akima
+    } else if values[1].eq_ignore_ascii_case("makima") {
+        CubicAlphaMethod::Makima
+    } else if values[1].eq_ignore_ascii_case("pchip") {
+        CubicAlphaMethod::Pchip
+    } else if values[1].eq_ignore_ascii_case("steffen") {
+        CubicAlphaMethod::Steffen
+    } else {
+        return Err("EX method must be akima, makima, pchip, or steffen".into());
+    };
+    let support_count = values[2]
+        .parse::<u16>()
+        .ok()
+        .filter(|count| *count >= 1)
+        .ok_or_else(|| "EX support count must be an integer of at least one".to_owned())?;
+    let spread = values[3]
+        .parse::<f64>()
+        .ok()
+        .filter(|spread| spread.is_finite() && *spread >= 0.0)
+        .ok_or_else(|| "EX spread must be finite and nonnegative".to_owned())?;
+    let value = value
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .ok_or_else(|| "EX scalar value must be finite".to_owned())?;
+    TabulatedValue::extrapolated(
+        value,
+        ExtrapolatedValueMetadata {
+            layer,
+            method,
+            support_count,
+            spread,
+        },
+    )
+}
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabulatedField {
     pub phase_id: StablePhaseId,
@@ -734,7 +866,7 @@ mod tests {
         );
         assert!(TabulatedValue::calculated(f64::NAN).is_err());
         for value in [
-            TabulatedValue::non_existing(),
+            TabulatedValue::missing(),
             TabulatedValue::cut_off(),
             TabulatedValue::missing(),
         ] {
@@ -745,6 +877,7 @@ mod tests {
             TabulatedValue {
                 state: TabulatedValueState::CutOff,
                 value: Some(1.0),
+                extrapolation: None,
                 note: None,
             }
             .validate()
@@ -759,7 +892,7 @@ mod tests {
             parse_tabulated_value_token("NE", &missing, false)
                 .unwrap()
                 .state,
-            TabulatedValueState::NonExisting
+            TabulatedValueState::Missing
         );
         let cutoff = parse_tabulated_value_token("CO:3000", &missing, false).unwrap();
         assert_eq!(cutoff.state, TabulatedValueState::CutOff);

@@ -1125,7 +1125,7 @@ mod tests {
         assert_eq!(values[2].state, crate::TabulatedValueState::Missing);
         assert_eq!(
             dataset.grids[0].fields()[1].values[0].state,
-            crate::TabulatedValueState::NonExisting
+            crate::TabulatedValueState::Missing
         );
     }
 

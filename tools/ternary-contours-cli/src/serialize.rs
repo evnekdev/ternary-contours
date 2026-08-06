@@ -345,7 +345,7 @@ mod tests {
         let dataset = parse_str(include_str!("../fixtures/classified-states.tct")).unwrap();
         let text = serialize_tct(&dataset, &TctSerializeOptions::default()).unwrap();
         assert!(text.contains("CO:3000"));
-        assert!(text.contains("\tNE"));
+        assert!(text.contains("\tNA"));
         let reparsed = parse_str(&text).unwrap();
         assert_eq!(
             reparsed.grids[0].fields()[0].values,

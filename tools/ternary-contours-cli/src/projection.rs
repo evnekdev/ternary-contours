@@ -98,6 +98,12 @@ pub struct ProjectionDiagnostics {
     pub univariant_count: usize,
     /// Local interpolation summaries for partial regular cubic-alpha fields.
     pub partial_cubic_summaries: Vec<String>,
+    /// Finite EX source cells accepted by this projection request.
+    pub extrapolated_source_values_used: usize,
+    /// Largest EX layer accepted by this projection request.
+    pub maximum_extrapolation_layer_used: Option<u16>,
+    /// Distinct EX methods used by accepted source cells in deterministic order.
+    pub extrapolation_methods_used: Vec<String>,
 }
 
 /// Numerical output shared by terminal reporting and static renderers.
@@ -264,7 +270,7 @@ pub(crate) fn interpolate_tabulated(
                 .get(index)
                 .ok_or(StablePhaseUndefinedReason::MissingTabulatedInput)?;
             let value = sample
-                .calculated_value()
+                .defined_value()
                 .ok_or_else(|| undefined_reason(sample))?;
             Ok(interpolated + weight * value)
         })
@@ -272,8 +278,9 @@ pub(crate) fn interpolate_tabulated(
 
 pub(crate) fn undefined_reason(value: &TabulatedValue) -> StablePhaseUndefinedReason {
     match value.state {
-        TabulatedValueState::Calculated => StablePhaseUndefinedReason::NonFiniteResult,
-        TabulatedValueState::NonExisting => StablePhaseUndefinedReason::ClassifiedNonExisting,
+        TabulatedValueState::Calculated | TabulatedValueState::Extrapolated => {
+            StablePhaseUndefinedReason::NonFiniteResult
+        }
         TabulatedValueState::CutOff => StablePhaseUndefinedReason::ClassifiedCutOff,
         TabulatedValueState::Missing => StablePhaseUndefinedReason::MissingTabulatedInput,
     }
@@ -369,6 +376,9 @@ pub(crate) fn calculate_projection_with_trace_session(
     let mut extrema = Vec::new();
     let mut unavailable_fields = Vec::new();
     let mut source_coverage = Vec::new();
+    let mut extrapolated_source_values_used = 0usize;
+    let mut maximum_extrapolation_layer_used = None;
+    let mut extrapolation_methods_used = std::collections::BTreeSet::new();
     #[allow(unused_mut)]
     let mut partial_cubic_summaries = Vec::new();
     for grid in &dataset.grids {
@@ -383,9 +393,19 @@ pub(crate) fn calculate_projection_with_trace_session(
             let calculated = field
                 .values
                 .iter()
-                .filter_map(TabulatedValue::calculated_value)
+                .filter_map(TabulatedValue::defined_value)
                 .collect::<Vec<_>>();
             let counts = tabulated_state_counts(&field.values);
+            for value in &field.values {
+                if let Some(metadata) = value.extrapolation.as_ref() {
+                    extrapolated_source_values_used += 1;
+                    maximum_extrapolation_layer_used = Some(
+                        maximum_extrapolation_layer_used
+                            .map_or(metadata.layer, |maximum: u16| maximum.max(metadata.layer)),
+                    );
+                    extrapolation_methods_used.insert(format!("{:?}", metadata.method));
+                }
+            }
             if trace.is_enabled(NumericalTraceLevel::Decisions) {
                 trace.emit(
                     NumericalTraceLevel::Decisions,
@@ -463,7 +483,7 @@ pub(crate) fn calculate_projection_with_trace_session(
                     let values = field
                         .values
                         .iter()
-                        .map(TabulatedValue::calculated_value)
+                        .map(TabulatedValue::defined_value)
                         .collect::<Vec<_>>();
                     if options.partial_domain_policy == CubicPartialDomainPolicy::Strict
                         && values.iter().any(Option::is_none)
@@ -710,6 +730,9 @@ pub(crate) fn calculate_projection_with_trace_session(
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),
         partial_cubic_summaries,
+        extrapolated_source_values_used,
+        maximum_extrapolation_layer_used,
+        extrapolation_methods_used: extrapolation_methods_used.into_iter().collect(),
     };
     Ok(LiquidusProjection {
         levels,
@@ -775,7 +798,7 @@ fn tabulated_state_counts(values: &[TabulatedValue]) -> [usize; 4] {
     values.iter().fold([0usize; 4], |mut counts, value| {
         counts[match value.state {
             TabulatedValueState::Calculated => 0,
-            TabulatedValueState::NonExisting => 1,
+            TabulatedValueState::Extrapolated => 1,
             TabulatedValueState::CutOff => 2,
             TabulatedValueState::Missing => 3,
         }] += 1;

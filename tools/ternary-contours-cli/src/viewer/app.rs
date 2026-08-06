@@ -1284,19 +1284,19 @@ impl LiquidusViewerApp {
                         .map(|phase| phase.name.as_str())
                         .unwrap_or("unknown phase");
                     let mut calculated = 0;
-                    let mut non_existing = 0;
+                    let mut extrapolated = 0;
                     let mut cut_off = 0;
                     let mut missing = 0;
                     for value in &field.values {
                         match value.state {
                             crate::TabulatedValueState::Calculated => calculated += 1,
-                            crate::TabulatedValueState::NonExisting => non_existing += 1,
+                            crate::TabulatedValueState::Extrapolated => extrapolated += 1,
                             crate::TabulatedValueState::CutOff => cut_off += 1,
                             crate::TabulatedValueState::Missing => missing += 1,
                         }
                     }
                     ui.small(format!(
-                        "{} / {phase_name}.T: calculated {calculated}, non-existing {non_existing}, cut-off {cut_off}, missing {missing}",
+                        "{} / {phase_name}.T: calculated {calculated}, extrapolated {extrapolated}, cut-off {cut_off}, missing {missing}",
                         grid.name()
                     ));
                 }
