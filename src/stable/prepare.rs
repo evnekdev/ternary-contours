@@ -5,10 +5,13 @@ use crate::{
 };
 
 use super::{
-    StableContourDiagnostics, StableContourError, StableContourLevel, StableContourQuantity,
-    StableContourSet, StableGridOptions, StablePhaseId, StablePhaseSource,
+    StableBoundaryNetwork, StableContourDiagnostics, StableContourError, StableContourLevel,
+    StableContourQuantity, StableContourSet, StableGridOptions, StablePhaseId, StablePhaseSource,
+    continuous::{
+        apply_boundary_geometry_state, isolate_transfer_junctions, refine_paths_continuously,
+    },
     partition::{StableSamplingCell, build_stable_partition},
-    paths::assemble_level,
+    paths::{assemble_level, assemble_level_with_junctions, half_edges},
     sample::{
         PreparedSourceLayer, RegularSamplingGrid, SourceGeometryGroup, prepare_sources,
         sample_regular_grid,
@@ -496,6 +499,184 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
         self.contours_with_trace_session(levels, &mut trace)
     }
 
+    /// Trace contours using the accepted stable-boundary network as the
+    /// authoritative phase-transfer skeleton.  This is the projection-facing
+    /// API: every transfer root is continuously corrected and verified rather
+    /// than promoted from an affine sampled-polygon endpoint.
+    pub fn contours_with_stable_boundaries(
+        &self,
+        levels: &[f64],
+        boundaries: &StableBoundaryNetwork,
+    ) -> Result<StableContourSet, StableContourError> {
+        let mut sink = NoopTraceSink;
+        let mut trace = NumericalTraceSession::new(&mut sink);
+        self.contours_with_stable_boundaries_with_trace_session(levels, boundaries, &mut trace)
+    }
+
+    /// Shared trace-session variant of `contours_with_stable_boundaries`.
+    pub fn contours_with_stable_boundaries_with_trace_session(
+        &self,
+        levels: &[f64],
+        boundaries: &StableBoundaryNetwork,
+        trace: &mut NumericalTraceSession<'_>,
+    ) -> Result<StableContourSet, StableContourError> {
+        let levels = validated_levels(levels, self.options.value_tolerance)?;
+        let mut diagnostics = self.diagnostics.clone();
+        diagnostics.requested_levels = levels.len();
+        let mut results = Vec::with_capacity(levels.len());
+        for (level_index, level) in levels.into_iter().enumerate() {
+            if trace.is_enabled(NumericalTraceLevel::Summary) {
+                trace.emit(
+                    NumericalTraceLevel::Summary,
+                    NumericalTraceStage::Contour,
+                    decision(
+                        NumericalTraceEventKind::ContourLevelStarted,
+                        TraceDecision {
+                            level: Some(level),
+                            path_id: Some(level_index),
+                            ..TraceDecision::default()
+                        },
+                    ),
+                );
+            }
+            let segments = extract_level_segments(
+                &self.cells,
+                &self.samples,
+                &self.phase_ids,
+                self.quantity,
+                level,
+                self.options.value_tolerance,
+                self.options.stability_tolerance,
+                self.options.geometry_tolerance,
+                self.options.parameter_tolerance,
+                &mut diagnostics,
+            )?;
+            if trace.is_enabled(NumericalTraceLevel::Decisions) {
+                trace.emit(
+                    NumericalTraceLevel::Decisions,
+                    NumericalTraceStage::Contour,
+                    decision(
+                        NumericalTraceEventKind::ContourRootIsolationStarted,
+                        TraceDecision {
+                            level: Some(level),
+                            counts: Some(TraceCounts {
+                                calculated: boundaries.univariants.len(),
+                                ..TraceCounts::default()
+                            }),
+                            ..TraceDecision::default()
+                        },
+                    ),
+                );
+            }
+            let junctions = isolate_transfer_junctions(
+                &self.layers,
+                &self.phase_ids,
+                self.quantity,
+                self.options,
+                boundaries,
+                level,
+                &mut diagnostics,
+            )?;
+            if trace.is_enabled(NumericalTraceLevel::Decisions) {
+                for junction in &junctions {
+                    let event = match junction.kind {
+                        super::StableContourJunctionKind::RegularTransfer => {
+                            NumericalTraceEventKind::ContourTransferRootConverged
+                        }
+                        super::StableContourJunctionKind::InvariantLevelCoincidence => {
+                            NumericalTraceEventKind::ContourInvariantLevelCoincidence
+                        }
+                        _ => NumericalTraceEventKind::ContourTransferRootRejected,
+                    };
+                    trace.emit(
+                        NumericalTraceLevel::Decisions,
+                        NumericalTraceStage::Contour,
+                        decision(
+                            event,
+                            TraceDecision {
+                                level: Some(level),
+                                phase_pair: junction
+                                    .phases
+                                    .first()
+                                    .zip(junction.phases.get(1))
+                                    .map(|(left, right)| [left.0, right.0]),
+                                node_id: Some(junction.id.0),
+                                composition: Some(junction.point.as_array()),
+                                residual: junction
+                                    .verification
+                                    .as_ref()
+                                    .map(|verification| verification.equality_residual),
+                                reason: Some(format!(
+                                    "{:?}; branch={:?}",
+                                    junction.kind, junction.branch
+                                )),
+                                ..TraceDecision::default()
+                            },
+                        ),
+                    );
+                }
+            }
+            let (mut paths, mut junctions) = assemble_level_with_junctions(
+                segments,
+                self.quantity,
+                level,
+                self.options.geometry_tolerance,
+                self.options.parameter_tolerance,
+                junctions,
+                self.samples.grid.subdivisions(),
+                &mut diagnostics,
+            )?;
+            apply_boundary_geometry_state(&mut paths, &junctions, boundaries);
+            refine_paths_continuously(
+                &self.layers,
+                &self.phase_ids,
+                self.quantity,
+                self.options,
+                level,
+                &mut paths,
+                &mut diagnostics,
+            )?;
+            let half_edges = half_edges(&paths);
+            let incidence_failures_before = diagnostics.contour_transfer_incidence_failures;
+            super::continuous::validate_transfer_incidence(
+                &mut junctions,
+                &half_edges,
+                level,
+                &mut diagnostics,
+            )?;
+            if diagnostics.contour_transfer_incidence_failures > incidence_failures_before
+                && trace.is_enabled(NumericalTraceLevel::Decisions)
+            {
+                trace.emit(
+                    NumericalTraceLevel::Decisions,
+                    NumericalTraceStage::Contour,
+                    decision(
+                        NumericalTraceEventKind::ContourTransferIncidenceInvalid,
+                        TraceDecision {
+                            level: Some(level),
+                            reason: Some(
+                                "continuous transfer retained as typed degenerate event".into(),
+                            ),
+                            ..TraceDecision::default()
+                        },
+                    ),
+                );
+            }
+            emit_contour_trace(trace, level_index, level, &paths, &junctions);
+            results.push(StableContourLevel {
+                value: level,
+                paths,
+                junctions,
+                half_edges,
+            });
+        }
+        Ok(StableContourSet {
+            quantity: self.quantity,
+            levels: results,
+            diagnostics,
+        })
+    }
+
     /// Shared-session variant for integrations that need one sequence across a complete projection.
     pub fn contours_with_trace_session(
         &self,
@@ -625,6 +806,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             }
             results.push(StableContourLevel {
                 value: level,
+                half_edges: half_edges(&paths),
                 paths,
                 junctions,
             });
@@ -658,6 +840,80 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
     /// Return the validated sampling-grid and verification options.
     pub const fn options(&self) -> StableGridOptions {
         self.options
+    }
+}
+
+fn emit_contour_trace(
+    trace: &mut NumericalTraceSession<'_>,
+    level_index: usize,
+    level: f64,
+    paths: &[super::StableContourPath],
+    junctions: &[super::StableContourJunction],
+) {
+    if trace.is_enabled(NumericalTraceLevel::Decisions) {
+        for (path_index, path) in paths.iter().enumerate() {
+            trace.emit(
+                NumericalTraceLevel::Decisions,
+                NumericalTraceStage::Contour,
+                decision(
+                    NumericalTraceEventKind::ContourPathCompleted,
+                    TraceDecision {
+                        phase: Some(path.phase.0),
+                        level: Some(level),
+                        path_id: Some(path_index),
+                        composition: path.points.first().map(|point| point.as_array()),
+                        counts: Some(TraceCounts {
+                            calculated: path.points.len(),
+                            ..TraceCounts::default()
+                        }),
+                        reason: Some(if path.closed {
+                            "closed".into()
+                        } else {
+                            "open".into()
+                        }),
+                        ..TraceDecision::default()
+                    },
+                ),
+            );
+        }
+        for junction in junctions {
+            trace.emit(
+                NumericalTraceLevel::Decisions,
+                NumericalTraceStage::Contour,
+                decision(
+                    NumericalTraceEventKind::ContourJunctionCreated,
+                    TraceDecision {
+                        level: Some(level),
+                        node_id: Some(junction.id.0),
+                        composition: Some(junction.point.as_array()),
+                        reason: Some(format!(
+                            "phases={:?}, kind={:?}, branch={:?}",
+                            junction.phases, junction.kind, junction.branch
+                        )),
+                        ..TraceDecision::default()
+                    },
+                ),
+            );
+        }
+    }
+    if trace.is_enabled(NumericalTraceLevel::Summary) {
+        trace.emit(
+            NumericalTraceLevel::Summary,
+            NumericalTraceStage::Contour,
+            decision(
+                NumericalTraceEventKind::ContourLevelCompleted,
+                TraceDecision {
+                    level: Some(level),
+                    path_id: Some(level_index),
+                    counts: Some(TraceCounts {
+                        calculated: paths.len(),
+                        ..TraceCounts::default()
+                    }),
+                    reason: Some(format!("junctions={}", junctions.len())),
+                    ..TraceDecision::default()
+                },
+            ),
+        );
     }
 }
 

@@ -146,6 +146,197 @@ fn two_affine_phases_share_one_height_junction_but_not_one_path() {
 }
 
 #[test]
+fn continuous_network_transfer_has_one_phase_labelled_half_edge_per_side() {
+    let a = field(8, |[a, _, _]| a);
+    let b = field(8, |[_, b, _]| b);
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [phase(1, &a), phase(2, &b)],
+        StableContourQuantity::Height,
+        options(8),
+    )
+    .unwrap();
+    let network = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let result = prepared
+        .contours_with_stable_boundaries(&[0.4], &network)
+        .unwrap();
+    let level = &result.levels[0];
+    let junction = level
+        .junctions
+        .iter()
+        .find(|junction| junction.kind == StableContourJunctionKind::RegularTransfer)
+        .expect("continuously corrected A-B transfer");
+    assert_eq!(junction.phases, vec![StablePhaseId(1), StablePhaseId(2)]);
+    assert!(junction.verification.is_some());
+    let incident = level
+        .half_edges
+        .iter()
+        .filter(|edge| edge.junction == junction.id)
+        .collect::<Vec<_>>();
+    assert_eq!(incident.len(), 2);
+    assert_eq!(
+        incident
+            .iter()
+            .filter(|edge| edge.phase == StablePhaseId(1))
+            .count(),
+        1
+    );
+    assert_eq!(
+        incident
+            .iter()
+            .filter(|edge| edge.phase == StablePhaseId(2))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn continuous_branch_isolation_retains_multiple_level_transfers() {
+    let first = |[_a, b, c]: [f64; 3]| StablePhaseEvaluation::Defined {
+        value: (36.0 * b).sin() + (b - c),
+    };
+    let second = |[_a, b, c]: [f64; 3]| StablePhaseEvaluation::Defined {
+        value: (36.0 * b).sin() - (b - c),
+    };
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [
+            StablePhaseSource::new(StablePhaseId(1), StableScalarSource::evaluator(&first)),
+            StablePhaseSource::new(StablePhaseId(2), StableScalarSource::evaluator(&second)),
+        ],
+        StableContourQuantity::Height,
+        options(32),
+    )
+    .unwrap();
+    let network = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let result = prepared
+        .contours_with_stable_boundaries(&[0.0], &network)
+        .unwrap();
+    let transfers = result.levels[0]
+        .junctions
+        .iter()
+        .filter(|junction| junction.kind == StableContourJunctionKind::RegularTransfer)
+        .collect::<Vec<_>>();
+    assert!(
+        transfers.len() >= 3,
+        "expected every oscillatory branch root, got {}",
+        transfers.len()
+    );
+    for pair in transfers.windows(2) {
+        assert!(
+            crate::simplex::logical_from_composition(pair[0].point.as_array())
+                != crate::simplex::logical_from_composition(pair[1].point.as_array())
+        );
+    }
+}
+
+#[test]
+fn raw_and_regularized_contours_keep_identical_transfer_topology() {
+    let a = field(12, |[a, _, _]| a);
+    let b = field(12, |[_, b, _]| b);
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [phase(1, &a), phase(2, &b)],
+        StableContourQuantity::Height,
+        options(12),
+    )
+    .unwrap();
+    let raw = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let regularized = prepared
+        .stable_boundaries(StableBoundaryOptions {
+            regularization: Some(crate::PathRegularizationOptions {
+                spacing: 0.02,
+                protected_endpoint_distance: 0.0,
+                ..crate::PathRegularizationOptions::default()
+            }),
+            ..StableBoundaryOptions::default()
+        })
+        .unwrap();
+    let raw_contours = prepared
+        .contours_with_stable_boundaries(&[0.4], &raw)
+        .unwrap();
+    let regularized_contours = prepared
+        .contours_with_stable_boundaries(&[0.4], &regularized)
+        .unwrap();
+    let comparison = compare_stable_contours(
+        &stable_contour_signature(&raw_contours, StableTopologyComparisonMode::TopologyOnly),
+        &stable_contour_signature(
+            &regularized_contours,
+            StableTopologyComparisonMode::TopologyOnly,
+        ),
+    );
+    assert!(comparison.equal, "{}", comparison.differences.join("\n"));
+}
+
+#[test]
+fn secondary_boundary_contact_is_one_sided_when_other_phase_misses_level() {
+    let h_a = field(12, |[a, _, _]| a);
+    let h_b = field(12, |[_, b, _]| b);
+    let q_a = field(12, |[_, _, c]| c);
+    let q_b = field(12, |[a, _, c]| c + 0.2 * a);
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [
+            phase(1, &h_a).with_secondary(regular(&q_a)),
+            phase(2, &h_b).with_secondary(regular(&q_b)),
+        ],
+        StableContourQuantity::Secondary,
+        options(12),
+    )
+    .unwrap();
+    let network = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let result = prepared
+        .contours_with_stable_boundaries(&[0.2], &network)
+        .unwrap();
+    assert!(
+        result.levels[0].junctions.iter().any(|junction| {
+            junction.kind == StableContourJunctionKind::OneSidedSecondaryContact
+        })
+    );
+    assert!(
+        result.levels[0]
+            .junctions
+            .iter()
+            .all(|junction| { junction.kind != StableContourJunctionKind::RegularTransfer })
+    );
+}
+
+#[test]
+fn invariant_temperature_is_not_reduced_to_a_two_phase_transfer() {
+    let a = field(12, |[a, _, _]| 3.0 * a);
+    let b = field(12, |[a, b, _]| 2.0 * a + b);
+    let c = field(12, |[a, _, c]| 2.0 * a + c);
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [phase(1, &a), phase(2, &b), phase(3, &c)],
+        StableContourQuantity::Height,
+        options(12),
+    )
+    .unwrap();
+    let network = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let interior = network
+        .nodes
+        .iter()
+        .find_map(|node| match node {
+            StableInvariantNode::Interior(node) => Some(node),
+            _ => None,
+        })
+        .expect("canonical ternary invariant");
+    let result = prepared
+        .contours_with_stable_boundaries(&[interior.temperature], &network)
+        .unwrap();
+    assert!(result.levels[0].junctions.iter().any(|junction| {
+        junction.kind == StableContourJunctionKind::InvariantLevelCoincidence
+            && junction.invariant == Some(interior.id)
+    }));
+}
+
+#[test]
 fn metastable_pairwise_equality_below_third_phase_is_not_a_junction() {
     let a = field(8, |[a, _, _]| a);
     let b = field(8, |[_, b, _]| b);
@@ -195,7 +386,7 @@ fn narrow_phase_with_no_triangle_vertex_win_is_found_by_clipping() {
 }
 
 #[test]
-fn three_and_four_phase_invariants_keep_all_tied_phase_ids() {
+fn three_phase_invariants_are_retained_and_four_phase_level_events_are_rejected() {
     // Adding the same affine drift preserves phase ownership but makes the
     // invariant height a contour endpoint rather than the convex envelope's
     // isolated minimum.
@@ -221,20 +412,16 @@ fn three_and_four_phase_invariants_keep_all_tied_phase_ids() {
     );
 
     let d = field(9, |[a, b, c]| 2.0 * a + 0.6 * a + 0.3 * b + 0.1 * c);
-    let four = PreparedStablePhaseEnsemble::new(
-        [phase(1, &a), phase(2, &b), phase(3, &c), phase(4, &d)],
-        StableContourQuantity::Height,
-        options(9),
-    )
-    .unwrap()
-    .contours(&[1.0])
-    .unwrap();
-    let invariant = four.levels[0]
-        .junctions
-        .iter()
-        .find(|junction| junction.kind == StableContourJunctionKind::Invariant)
-        .unwrap();
-    assert_eq!(invariant.phases.len(), 4);
+    assert!(matches!(
+        PreparedStablePhaseEnsemble::new(
+            [phase(1, &a), phase(2, &b), phase(3, &c), phase(4, &d)],
+            StableContourQuantity::Height,
+            options(9),
+        )
+        .unwrap()
+        .contours(&[1.0]),
+        Err(StableContourError::OverdeterminedInvariantLevel { phases, .. }) if phases.len() == 4
+    ));
 }
 
 #[test]

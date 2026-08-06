@@ -74,9 +74,13 @@ sources use `IrregularCubicAlphaOptions` and the already prepared synchronous
 edge-alpha field. Muggianu, Kohler, and RawBarycentric remain continuation
 policies inside those cubic-alpha models.
 
-After sampling, every sampling-grid scalar is piecewise affine. A cubic source does
-not produce cubic stable contours. It only changes the values sampled at
-sampling-grid vertices.
+The compatibility `PreparedStablePhaseEnsemble::contours` entry point returns
+the deterministic sampled-affine representation. Projection calculations use
+`contours_with_stable_boundaries`: sampled cells provide finite deterministic
+search regions, while transfer junctions and returned interior path points are
+corrected through the prepared continuous source evaluator. Thus cubic-alpha
+source choices affect the physical roots used by the Viewer and CLI projection;
+they are not reduced to a second unrelated affine contour algorithm.
 
 ## One common regular topology
 
@@ -185,8 +189,9 @@ At every stable-boundary endpoint, all triangle heights are evaluated and all
 phases within `stability_tolerance` of the maximum are sorted.
 
 - Two tied phases at a height contour produce `Univariant`.
-- Three or more tied phases produce `Invariant`; the implementation does not
-  assume exactly three.
+- Exactly three tied liquidus phases produce `Invariant`. Four or more tied
+  solids are an overdetermined fixed-pressure ternary event and return a typed
+  error rather than becoming graph or contour topology.
 - A secondary contour endpoint produces `StableBoundaryContact`.
 
 For height contours, phase-specific paths end at one canonical shared coordinate
@@ -346,3 +351,41 @@ Run the complete numerical example with:
 ```text
 cargo run --example stable_phase_contours --features irregular-delaunay
 ```
+
+## Continuous level topology
+
+Projection-facing contour extraction is level-specific but consumes the accepted
+level-free `StableBoundaryNetwork`; it never rediscovers phase ownership from
+sampled polygon edges.  For every stable univariant `(A,B)` and requested
+height level `L`, a transfer candidate is isolated along the branch and
+continuously corrected with:
+
+```text
+H_A - H_B = 0
+H_A - L = 0
+```
+
+`H_B - L` is then verified.  A regular transfer has exactly one `A` and one
+`B` phase-labelled contour half-edge.  The API records these incidences in
+`StableContourLevel::half_edges`; it does not infer a phase switch merely from
+two path endpoints that happen to be geometrically close.
+
+Secondary scalar contours use the same stable height skeleton.  A phase switch
+requires `S_A=L` *and* `S_B=L`; when only one phase satisfies its scalar level,
+the result is an explicit `OneSidedSecondaryContact` rather than a fabricated
+exit.  A requested height equal to a canonical three-solid interior invariant
+is `InvariantLevelCoincidence`, not a generic two-phase transfer.  Four-solid
+nodes are overdetermined in the fixed-pressure ternary model and are rejected.
+
+Root isolation samples every accepted branch interval deterministically before
+continuous correction.  Multiple roots keep their branch ID, phase pair, full
+precision point, and verification evidence; triangle IDs and rounded display
+coordinates are never their identity.  Degenerate or insufficiently assembled
+incidence is retained as a typed junction diagnostic, so unrelated level paths
+remain available.
+
+`stable_contour_signature` and `compare_stable_contours` provide topology-only,
+tolerance-aware, and exact-diagnostic comparisons for repeatability, level
+cache tests, and raw/regularized audits.  Changing requested levels reuses the
+accepted stable-boundary network; only level roots and phase-labelled contour
+paths are rebuilt.

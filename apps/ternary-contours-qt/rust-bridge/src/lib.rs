@@ -284,6 +284,11 @@ pub struct TcqtProjectionSummary {
     pub interior_invariant_count: u32,
     pub univariant_count: u32,
     pub contour_path_count: u32,
+    pub contour_transfer_junction_count: u32,
+    pub contour_one_sided_contact_count: u32,
+    pub contour_invariant_level_coincidence_count: u32,
+    pub contour_degenerate_event_count: u32,
+    pub maximum_contour_level_residual: f64,
     pub effective_automatic_range: bool,
     pub effective_minimum: f64,
     pub effective_maximum: f64,
@@ -2850,6 +2855,11 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 interior_invariant_count: 0,
                 univariant_count: 0,
                 contour_path_count: 0,
+                contour_transfer_junction_count: 0,
+                contour_one_sided_contact_count: 0,
+                contour_invariant_level_coincidence_count: 0,
+                contour_degenerate_event_count: 0,
+                maximum_contour_level_residual: 0.0,
                 effective_automatic_range: effective.automatic_range,
                 effective_minimum: effective.minimum,
                 effective_maximum: effective.maximum,
@@ -2909,6 +2919,17 @@ pub unsafe extern "C" fn tcqt_projection_summary(
             interior_invariant_count,
             univariant_count: projection.diagnostics.univariant_count as u32,
             contour_path_count: projection.diagnostics.contour_path_count as u32,
+            contour_transfer_junction_count: projection.diagnostics.contour_transfer_junction_count
+                as u32,
+            contour_one_sided_contact_count: projection.diagnostics.contour_one_sided_contact_count
+                as u32,
+            contour_invariant_level_coincidence_count: projection
+                .diagnostics
+                .contour_invariant_level_coincidence_count
+                as u32,
+            contour_degenerate_event_count: projection.diagnostics.contour_degenerate_event_count
+                as u32,
+            maximum_contour_level_residual: projection.diagnostics.maximum_contour_level_residual,
             effective_automatic_range: effective.automatic_range,
             effective_minimum,
             effective_maximum,

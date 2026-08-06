@@ -75,4 +75,20 @@ pub struct StableContourDiagnostics {
     pub invariant_junctions: usize,
     pub isolated_target_points: usize,
     pub path_assembly_ambiguities: usize,
+
+    // Continuous contour root isolation and transfer assembly.
+    pub continuous_phase_contour_segments: usize,
+    pub continuous_phase_contour_points: usize,
+    pub continuous_phase_contour_rejections: usize,
+    pub continuous_boundary_branches_searched: usize,
+    pub contour_root_isolation_regions: usize,
+    pub continuous_solver_launches: usize,
+    pub contour_root_rejections: usize,
+    pub contour_duplicate_roots_removed: usize,
+    pub continuous_transfer_junctions: usize,
+    pub one_sided_secondary_contacts: usize,
+    pub invariant_level_coincidences: usize,
+    pub tangent_boundary_contacts: usize,
+    pub domain_truncated_contour_paths: usize,
+    pub contour_transfer_incidence_failures: usize,
 }

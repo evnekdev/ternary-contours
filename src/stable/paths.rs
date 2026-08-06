@@ -3,8 +3,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::{TernaryCoordinate, simplex::logical_from_composition};
 
 use super::{
-    StableContourDiagnostics, StableContourError, StableContourJunction, StableContourJunctionKind,
-    StableContourPath, StableContourQuantity, StableJunctionId, StablePhaseId,
+    StableContourDiagnostics, StableContourError, StableContourHalfEdge, StableContourHalfEdgeId,
+    StableContourJunction, StableContourJunctionKind, StableContourPath,
+    StableContourPathGeometryState, StableContourQuantity, StableJunctionId, StablePhaseId,
     segments::{EndpointSource, LocalEndpoint, LocalStableSegment, lex_cmp, points_close},
 };
 
@@ -44,11 +45,68 @@ pub(crate) fn assemble_level(
     parameter_tolerance: f64,
     diagnostics: &mut StableContourDiagnostics,
 ) -> Result<(Vec<StableContourPath>, Vec<StableContourJunction>), StableContourError> {
-    let junctions = build_junctions(&segments, quantity, tolerance);
+    let junctions = build_junctions(&segments, quantity, level, tolerance)?;
+    assemble_level_with_junctions_impl(
+        segments,
+        level,
+        tolerance,
+        parameter_tolerance,
+        junctions,
+        None,
+        diagnostics,
+    )
+}
+
+/// Assemble sampled phase-local contour segments using continuously verified
+/// stable-boundary junctions.  `sampling_subdivisions` supplies only a bounded
+/// attachment search radius; root identity remains branch+phase-pair+full
+/// precision composition.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assemble_level_with_junctions(
+    segments: Vec<LocalStableSegment>,
+    _quantity: StableContourQuantity,
+    level: f64,
+    tolerance: f64,
+    parameter_tolerance: f64,
+    junctions: Vec<StableContourJunction>,
+    sampling_subdivisions: usize,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<(Vec<StableContourPath>, Vec<StableContourJunction>), StableContourError> {
+    let attachment = tolerance.max(1.5 / sampling_subdivisions.max(1) as f64);
+    assemble_level_with_junctions_impl(
+        segments,
+        level,
+        tolerance,
+        parameter_tolerance,
+        junctions,
+        Some(attachment),
+        diagnostics,
+    )
+}
+
+fn assemble_level_with_junctions_impl(
+    segments: Vec<LocalStableSegment>,
+    level: f64,
+    tolerance: f64,
+    parameter_tolerance: f64,
+    junctions: Vec<StableContourJunction>,
+    attachment_tolerance: Option<f64>,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<(Vec<StableContourPath>, Vec<StableContourJunction>), StableContourError> {
     let mut by_phase = BTreeMap::<StablePhaseId, Vec<WorkSegment>>::new();
     for segment in segments {
-        let start = work_endpoint(&segment.start, &junctions, tolerance);
-        let end = work_endpoint(&segment.end, &junctions, tolerance);
+        let start = work_endpoint(
+            &segment.start,
+            &junctions,
+            attachment_tolerance.unwrap_or(tolerance),
+            attachment_tolerance.is_some(),
+        );
+        let end = work_endpoint(
+            &segment.end,
+            &junctions,
+            attachment_tolerance.unwrap_or(tolerance),
+            attachment_tolerance.is_some(),
+        );
         if !points_close(start.point, end.point, tolerance) {
             by_phase
                 .entry(segment.phase)
@@ -85,9 +143,17 @@ pub(crate) fn assemble_level(
         match junction.kind {
             StableContourJunctionKind::Univariant => diagnostics.univariant_junctions += 1,
             StableContourJunctionKind::Invariant => diagnostics.invariant_junctions += 1,
-            StableContourJunctionKind::StableBoundaryContact => {
+            StableContourJunctionKind::StableBoundaryContact
+            | StableContourJunctionKind::OneSidedSecondaryContact => {
                 diagnostics.stable_boundary_contacts += 1;
             }
+            StableContourJunctionKind::RegularTransfer => diagnostics.univariant_junctions += 1,
+            StableContourJunctionKind::InvariantLevelCoincidence => {
+                diagnostics.invariant_junctions += 1
+            }
+            StableContourJunctionKind::TangentBoundaryContact
+            | StableContourJunctionKind::DomainTruncated
+            | StableContourJunctionKind::Degenerate => {}
         }
     }
     Ok((paths, junctions))
@@ -96,8 +162,9 @@ pub(crate) fn assemble_level(
 fn build_junctions(
     segments: &[LocalStableSegment],
     quantity: StableContourQuantity,
+    level: f64,
     tolerance: f64,
-) -> Vec<StableContourJunction> {
+) -> Result<Vec<StableContourJunction>, StableContourError> {
     let mut candidates: Vec<JunctionCandidate> = Vec::new();
     for endpoint in segments
         .iter()
@@ -123,10 +190,21 @@ fn build_junctions(
             });
         }
     }
+    if quantity == StableContourQuantity::Height
+        && let Some(candidate) = candidates
+            .iter()
+            .find(|candidate| candidate.phases.len() > 3)
+    {
+        return Err(StableContourError::OverdeterminedInvariantLevel {
+            level,
+            point: candidate.point,
+            phases: candidate.phases.clone(),
+        });
+    }
     candidates.sort_by(|left, right| {
         lex_cmp(left.point, right.point).then_with(|| left.phases.cmp(&right.phases))
     });
-    candidates
+    Ok(candidates
         .into_iter()
         .enumerate()
         .map(|(index, candidate)| StableContourJunction {
@@ -134,8 +212,11 @@ fn build_junctions(
             point: candidate.point,
             phases: candidate.phases,
             kind: candidate.kind,
+            branch: None,
+            invariant: None,
+            verification: None,
         })
-        .collect()
+        .collect())
 }
 
 fn junction_kind(
@@ -155,11 +236,12 @@ fn work_endpoint(
     endpoint: &LocalEndpoint,
     junctions: &[StableContourJunction],
     tolerance: f64,
+    continuous_junctions: bool,
 ) -> WorkEndpoint {
     let junction = endpoint.junction_kind.and_then(|_| {
-        junctions
+        let matches = junctions
             .iter()
-            .find(|junction| {
+            .filter(|junction| {
                 points_close(junction.point, endpoint.point, tolerance)
                     && endpoint
                         .tied_phases
@@ -167,17 +249,32 @@ fn work_endpoint(
                         .all(|phase| junction.phases.contains(phase))
             })
             .map(|junction| junction.id)
+            .collect::<Vec<_>>();
+        // A broad sampling-cell search may locate candidates, but it is never
+        // final root identity.  Refuse to bind an affine endpoint when more
+        // than one continuously verified root is compatible; this prevents
+        // close roots in one cell from being silently merged by insertion
+        // order or a geometric bucket.
+        if matches.len() == 1 {
+            Some(matches[0])
+        } else {
+            None
+        }
     });
     let point = junction
         .map(|id| junctions[id.0].point)
         .unwrap_or(endpoint.point);
-    let source_break = match endpoint.source {
-        EndpointSource::StableBoundary | EndpointSource::Invariant => true,
-        EndpointSource::SamplingEdge { edge } => {
-            let _canonical_edge = edge;
-            false
+    let source_break = if continuous_junctions {
+        false
+    } else {
+        match endpoint.source {
+            EndpointSource::StableBoundary | EndpointSource::Invariant => true,
+            EndpointSource::SamplingEdge { edge } => {
+                let _canonical_edge = edge;
+                false
+            }
+            EndpointSource::Interior => false,
         }
-        EndpointSource::Interior => false,
     };
     WorkEndpoint {
         point,
@@ -403,7 +500,49 @@ fn walk(
         closed,
         start_junction,
         end_junction,
+        geometry_state: StableContourPathGeometryState::Raw,
     })
+}
+
+/// Build stable, phase-labelled endpoint incidence records after path assembly.
+/// A path owns at most one half-edge at each non-closed end.  Consumers can
+/// validate cross-phase transfer semantics without guessing from coordinates.
+pub(crate) fn half_edges(paths: &[StableContourPath]) -> Vec<StableContourHalfEdge> {
+    let mut edges = Vec::new();
+    for (path_index, path) in paths.iter().enumerate() {
+        if path.closed {
+            continue;
+        }
+        if let Some(junction) = path.start_junction {
+            edges.push(StableContourHalfEdge {
+                id: StableContourHalfEdgeId(edges.len()),
+                phase: path.phase,
+                path_index,
+                at_start: true,
+                junction,
+            });
+        }
+        if let Some(junction) = path.end_junction {
+            edges.push(StableContourHalfEdge {
+                id: StableContourHalfEdgeId(edges.len()),
+                phase: path.phase,
+                path_index,
+                at_start: false,
+                junction,
+            });
+        }
+    }
+    edges.sort_by(|left, right| {
+        left.junction
+            .cmp(&right.junction)
+            .then_with(|| left.phase.cmp(&right.phase))
+            .then_with(|| left.path_index.cmp(&right.path_index))
+            .then_with(|| left.at_start.cmp(&right.at_start))
+    });
+    for (index, edge) in edges.iter_mut().enumerate() {
+        edge.id = StableContourHalfEdgeId(index);
+    }
+    edges
 }
 
 fn forward_tangent_alignment(

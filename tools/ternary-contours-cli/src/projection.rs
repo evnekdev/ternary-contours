@@ -117,6 +117,16 @@ pub struct ProjectionDiagnostics {
     /// rebuilt only levels and stable contour paths.
     pub stable_topology_reused: bool,
     pub contour_path_count: usize,
+    /// Continuously verified regular A-to-B transfers across the requested levels.
+    pub contour_transfer_junction_count: usize,
+    /// Secondary contacts that intentionally do not switch phase ownership.
+    pub contour_one_sided_contact_count: usize,
+    /// Requested height levels coincident with a canonical ternary invariant.
+    pub contour_invariant_level_coincidence_count: usize,
+    /// Tangent, unresolved, or incidence-incomplete contacts retained as typed diagnostics.
+    pub contour_degenerate_event_count: usize,
+    /// Continuous scalar residual maximum across retained junction evidence.
+    pub maximum_contour_level_residual: f64,
     pub invariant_count: usize,
     pub stable_polygon_count: usize,
     pub univariant_count: usize,
@@ -807,7 +817,7 @@ fn calculate_projection_with_trace_session_reusing_topology(
         );
     }
     let stable_contours = prepared
-        .contours_with_trace_session(&levels, trace)
+        .contours_with_stable_boundaries_with_trace_session(&levels, &stable_boundaries, trace)
         .map_err(|error| ProjectionError::Preparation {
             error,
             details: source_coverage.join("; "),
@@ -838,6 +848,57 @@ fn calculate_projection_with_trace_session_reusing_topology(
             .iter()
             .map(|level| level.paths.len())
             .sum(),
+        contour_transfer_junction_count: stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| &level.junctions)
+            .filter(|junction| {
+                junction.kind == ternary_contours::StableContourJunctionKind::RegularTransfer
+            })
+            .count(),
+        contour_one_sided_contact_count: stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| &level.junctions)
+            .filter(|junction| {
+                junction.kind
+                    == ternary_contours::StableContourJunctionKind::OneSidedSecondaryContact
+            })
+            .count(),
+        contour_invariant_level_coincidence_count: stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| &level.junctions)
+            .filter(|junction| {
+                junction.kind
+                    == ternary_contours::StableContourJunctionKind::InvariantLevelCoincidence
+            })
+            .count(),
+        contour_degenerate_event_count: stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| &level.junctions)
+            .filter(|junction| {
+                matches!(
+                    junction.kind,
+                    ternary_contours::StableContourJunctionKind::Degenerate
+                        | ternary_contours::StableContourJunctionKind::TangentBoundaryContact
+                        | ternary_contours::StableContourJunctionKind::DomainTruncated
+                )
+            })
+            .count(),
+        maximum_contour_level_residual: stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| &level.junctions)
+            .filter_map(|junction| junction.verification.as_ref())
+            .flat_map(|verification| {
+                verification
+                    .level_residuals
+                    .iter()
+                    .map(|(_, residual)| residual.abs())
+            })
+            .fold(0.0_f64, f64::max),
         stable_polygon_count: stable_contours.diagnostics.nonempty_stable_polygons,
         invariant_count: stable_boundaries.nodes.len(),
         univariant_count: stable_boundaries.univariants.len(),

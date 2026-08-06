@@ -102,3 +102,22 @@ it must not introduce `println!` diagnostics or GUI-side reconstructed events.
 A trace-output error is separate from numerical success. The calculation result
 remains valid and the Viewer retains its last accepted projection; the output
 status states that the trace could not be written.
+
+
+## Continuous contour observations
+
+Contour calculations emit `contour_root_isolation_started` for every requested
+level, then one deterministic decision for every retained continuous root:
+`contour_transfer_root_converged`,
+`contour_invariant_level_coincidence`, or
+`contour_transfer_root_rejected`.  The decision carries the requested level,
+phase pair when applicable, branch/path ID, full composition, and equality
+residual.  `contour_transfer_incidence_invalid` means a numerically verified
+root could not be assembled into exactly one half-edge for each transfer phase
+at the available contour sampling resolution; it is retained as a typed
+degenerate event rather than silently joined to the nearest path.
+
+`contour_junction_created` is emitted after canonical level assembly and names
+the final junction classification and stable-boundary branch.  These events are
+observation-only: trace configuration is excluded from calculation options,
+revisions, cache keys, and document state.

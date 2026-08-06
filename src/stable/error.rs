@@ -95,10 +95,41 @@ pub enum StableContourError {
         triangle: usize,
         phase: StablePhaseId,
     },
+    /// Four or more liquidus phases were tied at one ordinary fixed-pressure
+    /// ternary invariant-level event. Such a node is overdetermined and is
+    /// never promoted into contour topology.
+    OverdeterminedInvariantLevel {
+        level: f64,
+        point: TernaryCoordinate,
+        phases: Vec<StablePhaseId>,
+    },
     AmbiguousPathAssembly {
         level: f64,
         phase: StablePhaseId,
         degree: usize,
+    },
+    /// A continuously verified A-B transfer has no half-edge for one phase.
+    MissingTransferExit {
+        level: f64,
+        point: TernaryCoordinate,
+        phases: [StablePhaseId; 2],
+        present_phase: Option<StablePhaseId>,
+    },
+    /// A continuously verified transfer has an incidence other than one A and
+    /// one B half-edge.
+    AmbiguousTransferIncidence {
+        level: f64,
+        point: TernaryCoordinate,
+        phases: [StablePhaseId; 2],
+        phase_a_degree: usize,
+        phase_b_degree: usize,
+    },
+    /// A half-edge attached to a transfer belongs to neither transfer phase.
+    TransferPhaseMismatch {
+        level: f64,
+        point: TernaryCoordinate,
+        expected: [StablePhaseId; 2],
+        actual: StablePhaseId,
     },
     NonMonotoneLocalEvents {
         triangle: usize,
@@ -229,6 +260,15 @@ impl fmt::Display for StableContourError {
                 formatter,
                 "stable polygon clipping failed in sampling-grid triangle {triangle} for phase {phase:?}"
             ),
+            Self::OverdeterminedInvariantLevel {
+                level,
+                point,
+                phases,
+            } => write!(
+                formatter,
+                "overdetermined ternary invariant-level event at level {level} near {:?}: {phases:?}",
+                point.as_array()
+            ),
             Self::AmbiguousPathAssembly {
                 level,
                 phase,
@@ -236,6 +276,40 @@ impl fmt::Display for StableContourError {
             } => write!(
                 formatter,
                 "stable path assembly is ambiguous at level {level} for phase {phase:?} (degree {degree})"
+            ),
+            Self::MissingTransferExit {
+                level,
+                point,
+                phases,
+                present_phase,
+            } => write!(
+                formatter,
+                "stable contour transfer {:?} at level {level} near {:?} is missing an exit (present {present_phase:?})",
+                phases,
+                point.as_array()
+            ),
+            Self::AmbiguousTransferIncidence {
+                level,
+                point,
+                phases,
+                phase_a_degree,
+                phase_b_degree,
+            } => write!(
+                formatter,
+                "stable contour transfer {:?} at level {level} near {:?} has ambiguous incidence ({phase_a_degree}, {phase_b_degree})",
+                phases,
+                point.as_array()
+            ),
+            Self::TransferPhaseMismatch {
+                level,
+                point,
+                expected,
+                actual,
+            } => write!(
+                formatter,
+                "stable contour transfer {:?} at level {level} near {:?} received phase {actual:?}",
+                expected,
+                point.as_array()
             ),
             Self::NonMonotoneLocalEvents {
                 triangle,

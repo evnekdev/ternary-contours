@@ -1446,6 +1446,20 @@ void MainWindow::runRustCalculation() {
                     .arg(projection.interior_invariant_count == 1 ? QString() : QStringLiteral("s"))
                     .arg(projection.univariant_count)
                     .arg(projection.contour_path_count);
+                if (projection.contour_transfer_junction_count != 0
+                    || projection.contour_one_sided_contact_count != 0
+                    || projection.contour_invariant_level_coincidence_count != 0
+                    || projection.contour_degenerate_event_count != 0) {
+                    projection_summary += tr("; %1 phase transfer%2, %3 one-sided contact%4, %5 invariant-level coincidence%6, %7 degenerate event%8")
+                        .arg(projection.contour_transfer_junction_count)
+                        .arg(projection.contour_transfer_junction_count == 1 ? QString() : QStringLiteral("s"))
+                        .arg(projection.contour_one_sided_contact_count)
+                        .arg(projection.contour_one_sided_contact_count == 1 ? QString() : QStringLiteral("s"))
+                        .arg(projection.contour_invariant_level_coincidence_count)
+                        .arg(projection.contour_invariant_level_coincidence_count == 1 ? QString() : QStringLiteral("s"))
+                        .arg(projection.contour_degenerate_event_count)
+                        .arg(projection.contour_degenerate_event_count == 1 ? QString() : QStringLiteral("s"));
+                }
                 if (projection.domain_truncated_univariant_count != 0) {
                     projection_summary += tr("; %1 domain-truncated branch%2 retained as diagnostics")
                         .arg(projection.domain_truncated_univariant_count)
@@ -1465,7 +1479,7 @@ void MainWindow::runRustCalculation() {
                 ui_->labelViewerLevelPreview->setText(projection_summary);
                 setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(
-                    tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14\nTopology builds %15, reuses %16, isotherm rebuilds %17")
+                    tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14\nTopology builds %15, reuses %16, isotherm rebuilds %17\nContour transfers %18, one-sided contacts %19, invariant coincidences %20, max residual %21, degenerate events %22")
                         .arg(projection.effective_automatic_range ? tr("automatic") : tr("manual"))
                         .arg(source.toString(projection.effective_minimum, 'g', 10))
                         .arg(source.toString(projection.effective_maximum, 'g', 10))
@@ -1482,7 +1496,12 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.request_id)
                         .arg(projection.stable_topology_build_count)
                         .arg(projection.stable_topology_reuse_count)
-                        .arg(projection.isotherm_rebuild_count));
+                        .arg(projection.isotherm_rebuild_count)
+                        .arg(projection.contour_transfer_junction_count)
+                        .arg(projection.contour_one_sided_contact_count)
+                        .arg(projection.contour_invariant_level_coincidence_count)
+                        .arg(source.toString(projection.maximum_contour_level_residual, 'g', 10))
+                        .arg(projection.contour_degenerate_event_count));
                 refreshInvariantPoints();
                 refreshViewerQueries();
                 reportBridgeStatus(text(result.message), true);
