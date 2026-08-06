@@ -49,6 +49,9 @@ const ABI_CUBIC_AKIMA: u32 = 0;
 const ABI_CUBIC_MAKIMA: u32 = 1;
 const ABI_CUBIC_PCHIP: u32 = 2;
 const ABI_CUBIC_STEFFEN: u32 = 3;
+const ABI_MESH_SCOPE_FIELD: u32 = 0;
+const ABI_MESH_SCOPE_PHASE: u32 = 1;
+const ABI_MESH_SCOPE_TARGETS: u32 = 2;
 const ABI_PARTIAL_STRICT: u32 = 0;
 const ABI_PARTIAL_ONE_SIDED: u32 = 1;
 const ABI_PARTIAL_ONE_SIDED_THEN_LINEAR: u32 = 2;
@@ -236,14 +239,18 @@ pub struct TcqtRow {
     pub b: f64,
     pub c: f64,
 }
-/// Rust-owned regular mesh extrapolation request. `field_index == u32::MAX`
-/// selects every field in the selected regular grid.
+/// Rust-owned regular mesh extrapolation request.
+/// Scope 0 = field, 1 = phase, and 2 = canonical target rows.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct TcqtMeshExtrapolationOptions {
     pub grid_index: u32,
     pub field_index: u32,
-    /// 0 Akima, 1 Makima, 2 PCHIP, 3 Steffen.
+    pub phase_id: u32,
+    pub scope: u32,
+    pub all_phase_properties: bool,
+    pub target_rows: *const u32,
+    pub target_row_count: u32,
     pub method: u32,
     pub maximum_layers: u32,
     pub minimum_directional_support: u32,
@@ -254,7 +261,6 @@ pub struct TcqtMeshExtrapolationOptions {
     pub has_maximum_value: bool,
     pub maximum_value: f64,
 }
-
 #[repr(C)]
 pub struct TcqtMeshExtrapolationSummary {
     pub success: bool,
@@ -263,6 +269,27 @@ pub struct TcqtMeshExtrapolationSummary {
     pub values_remaining: u32,
     pub maximum_layer: u32,
     pub message: [u8; MESSAGE],
+}
+/// One proposed or rejected row in the stored mesh extrapolation preview.
+#[repr(C)]
+pub struct TcqtMeshExtrapolationPreviewRow {
+    pub field_index: u32,
+    pub phase_id: u32,
+    pub row_index: u32,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub old_state: u32,
+    /// 0 requested, 1 dependency, 2 field candidate, 3 rejected.
+    pub status: u32,
+    pub has_value: bool,
+    pub value: f64,
+    pub layer: u32,
+    pub method: u32,
+    pub support_count: u32,
+    pub spread: f64,
+    pub property: [u8; NAME],
+    pub reason: [u8; MESSAGE],
 }
 #[repr(C)]
 pub struct TcqtCell {
@@ -1342,12 +1369,24 @@ pub unsafe extern "C" fn tcqt_preview_regular_mesh_extrapolation(
                     .into(),
             );
         };
-        let fields = if options.field_index == u32::MAX {
+        let target_rows = if options.target_row_count == 0 {
             Vec::new()
         } else {
+            if options.target_rows.is_null() {
+                return Err("mesh extrapolation target rows are null".into());
+            }
+            // SAFETY: the ABI requires target_row_count readable rows for this call.
+            unsafe {
+                std::slice::from_raw_parts(options.target_rows, options.target_row_count as usize)
+            }
+            .iter()
+            .map(|row| *row as usize)
+            .collect::<Vec<_>>()
+        };
+        let requested_field = |field_index: u32| -> Result<MeshExtrapolationField, String> {
             let field = regular
                 .fields
-                .get(options.field_index as usize)
+                .get(field_index as usize)
                 .ok_or("field index is out of range")?;
             let phase = state
                 .dataset
@@ -1355,10 +1394,57 @@ pub unsafe extern "C" fn tcqt_preview_regular_mesh_extrapolation(
                 .iter()
                 .find(|phase| phase.id == field.phase_id)
                 .ok_or("field references an unknown phase")?;
-            vec![MeshExtrapolationField {
+            Ok(MeshExtrapolationField {
                 phase: phase.name.clone(),
                 property: field.property.clone(),
-            }]
+            })
+        };
+        let (fields, all_fields) = match options.scope {
+            ABI_MESH_SCOPE_FIELD => {
+                if options.field_index == u32::MAX {
+                    (Vec::new(), true)
+                } else {
+                    (vec![requested_field(options.field_index)?], false)
+                }
+            }
+            ABI_MESH_SCOPE_PHASE => {
+                let phase = state
+                    .dataset
+                    .phases
+                    .iter()
+                    .find(|phase| phase.id.0 == options.phase_id)
+                    .ok_or("selected phase is unavailable")?;
+                if options.all_phase_properties {
+                    let fields = regular
+                        .fields
+                        .iter()
+                        .filter(|field| field.phase_id == phase.id)
+                        .map(|field| MeshExtrapolationField {
+                            phase: phase.name.clone(),
+                            property: field.property.clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    if fields.is_empty() {
+                        return Err("selected phase has no fields in this grid".into());
+                    }
+                    (fields, false)
+                } else {
+                    let field = requested_field(options.field_index)?;
+                    if field.phase != phase.name {
+                        return Err(
+                            "selected property does not belong to the selected phase".into()
+                        );
+                    }
+                    (vec![field], false)
+                }
+            }
+            ABI_MESH_SCOPE_TARGETS => {
+                if target_rows.is_empty() {
+                    return Err("select at least one missing vertex to extrapolate".into());
+                }
+                (vec![requested_field(options.field_index)?], false)
+            }
+            _ => return Err("unsupported mesh extrapolation scope".into()),
         };
         let method = match options.method {
             ABI_CUBIC_AKIMA => CubicAlphaMethod::Akima,
@@ -1372,7 +1458,8 @@ pub unsafe extern "C" fn tcqt_preview_regular_mesh_extrapolation(
             &MeshExtrapolationRequest {
                 grid: regular.name.clone(),
                 fields,
-                all_fields: options.field_index == u32::MAX,
+                all_fields,
+                target_rows,
                 options: RegularMeshExtrapolationOptions {
                     method,
                     maximum_layers: u16::try_from(options.maximum_layers)
@@ -1420,6 +1507,182 @@ pub unsafe extern "C" fn tcqt_preview_regular_mesh_extrapolation(
     })())
 }
 
+fn state_code(value: TabulatedValueState) -> u32 {
+    match value {
+        TabulatedValueState::Calculated => 0,
+        TabulatedValueState::CutOff => 2,
+        TabulatedValueState::Missing => 3,
+        TabulatedValueState::Extrapolated => 4,
+    }
+}
+
+fn method_code(value: CubicAlphaMethod) -> u32 {
+    match value {
+        CubicAlphaMethod::Akima => ABI_CUBIC_AKIMA,
+        CubicAlphaMethod::Makima => ABI_CUBIC_MAKIMA,
+        CubicAlphaMethod::Pchip => ABI_CUBIC_PCHIP,
+        CubicAlphaMethod::Steffen => ABI_CUBIC_STEFFEN,
+        _ => u32::MAX,
+    }
+}
+
+fn preview_row_count(preview: &MeshExtrapolationPreview) -> usize {
+    preview
+        .fields
+        .iter()
+        .map(|field| field.values.len() + field.rejections.len())
+        .sum()
+}
+
+fn preview_row(
+    state: &ProjectDocument,
+    index: usize,
+) -> Result<TcqtMeshExtrapolationPreviewRow, String> {
+    let preview = state
+        .mesh_extrapolation_preview
+        .as_ref()
+        .ok_or("create and review a mesh extrapolation preview first")?;
+    let TabulatedGrid::Regular(grid) = state
+        .dataset
+        .grids
+        .get(preview.grid_index)
+        .ok_or("preview grid is unavailable")?
+    else {
+        return Err(
+            "Automatic mesh extrapolation is currently available for regular grids only.".into(),
+        );
+    };
+    let mut current = 0usize;
+    for preview_field in &preview.fields {
+        let field_index = grid
+            .fields
+            .iter()
+            .position(|field| {
+                field.phase_id == preview_field.phase_id && field.property == preview_field.property
+            })
+            .ok_or("preview field is unavailable")?;
+        let field = &grid.fields[field_index];
+        for value in &preview_field.values {
+            if current == index {
+                let composition = grid
+                    .compositions
+                    .get(value.vertex_index)
+                    .ok_or("preview row is unavailable")?;
+                let prior = field
+                    .values
+                    .get(value.vertex_index)
+                    .ok_or("preview source is unavailable")?;
+                let status = if preview_field
+                    .requested_rows
+                    .binary_search(&value.vertex_index)
+                    .is_ok()
+                {
+                    0
+                } else if preview_field
+                    .dependency_rows
+                    .binary_search(&value.vertex_index)
+                    .is_ok()
+                {
+                    1
+                } else {
+                    2
+                };
+                return Ok(TcqtMeshExtrapolationPreviewRow {
+                    field_index: field_index as u32,
+                    phase_id: preview_field.phase_id.0,
+                    row_index: value.vertex_index as u32,
+                    a: composition[0],
+                    b: composition[1],
+                    c: composition[2],
+                    old_state: state_code(prior.state),
+                    status,
+                    has_value: true,
+                    value: value.value,
+                    layer: value.layer as u32,
+                    method: method_code(value.method),
+                    support_count: value.directional_support_count as u32,
+                    spread: value.spread,
+                    property: bytes(&preview_field.property),
+                    reason: [0; MESSAGE],
+                });
+            }
+            current += 1;
+        }
+        for rejection in &preview_field.rejections {
+            if current == index {
+                let composition = grid
+                    .compositions
+                    .get(rejection.vertex_index)
+                    .ok_or("preview rejection row is unavailable")?;
+                let prior = field
+                    .values
+                    .get(rejection.vertex_index)
+                    .ok_or("preview source is unavailable")?;
+                return Ok(TcqtMeshExtrapolationPreviewRow {
+                    field_index: field_index as u32,
+                    phase_id: preview_field.phase_id.0,
+                    row_index: rejection.vertex_index as u32,
+                    a: composition[0],
+                    b: composition[1],
+                    c: composition[2],
+                    old_state: state_code(prior.state),
+                    status: 3,
+                    has_value: false,
+                    value: 0.0,
+                    layer: rejection.layer as u32,
+                    method: u32::MAX,
+                    support_count: 0,
+                    spread: 0.0,
+                    property: bytes(&preview_field.property),
+                    reason: bytes(
+                        &rejection
+                            .reasons
+                            .iter()
+                            .map(|(_, reason)| reason.to_string())
+                            .collect::<Vec<_>>()
+                            .join("; "),
+                    ),
+                });
+            }
+            current += 1;
+        }
+    }
+    Err("preview row index is out of range".into())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_mesh_extrapolation_preview_row_count(
+    output_value: *mut u32,
+) -> TcqtStatus {
+    status((|| {
+        let output = unsafe { out(output_value, "mesh extrapolation preview row count") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let preview = state
+            .mesh_extrapolation_preview
+            .as_ref()
+            .ok_or("create and review a mesh extrapolation preview first")?;
+        *output = u32::try_from(preview_row_count(preview))
+            .map_err(|_| "mesh extrapolation preview has too many rows")?;
+        Ok(())
+    })())
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_mesh_extrapolation_preview_row_at(
+    index: u32,
+    output_value: *mut TcqtMeshExtrapolationPreviewRow,
+) -> TcqtStatus {
+    status((|| {
+        let output = unsafe { out(output_value, "mesh extrapolation preview row") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        *output = preview_row(&state, index as usize)?;
+        Ok(())
+    })())
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_materialize_regular_mesh_extrapolation(
     output_value: *mut TcqtMeshExtrapolationSummary,
@@ -1489,6 +1752,39 @@ pub extern "C" fn tcqt_clear_extrapolated_grid_values(
                             *value = TabulatedValue::missing();
                         }
                     }
+                }
+                Ok(())
+            })
+    })())
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn tcqt_clear_extrapolated_phase_values(
+    grid_index: u32,
+    phase_id: u32,
+) -> TcqtStatus {
+    status((|| {
+        document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?
+            .mutate(|dataset| {
+                let grid = dataset
+                    .grids
+                    .get_mut(grid_index as usize)
+                    .ok_or("grid index is out of range")?;
+                let mut found_phase = false;
+                for field in fields_mut(grid)
+                    .iter_mut()
+                    .filter(|field| field.phase_id.0 == phase_id)
+                {
+                    found_phase = true;
+                    for value in &mut field.values {
+                        if matches!(value.state, TabulatedValueState::Extrapolated) {
+                            *value = TabulatedValue::missing();
+                        }
+                    }
+                }
+                if !found_phase {
+                    return Err("phase has no fields in the selected grid".into());
                 }
                 Ok(())
             })
@@ -2856,6 +3152,75 @@ mod tests {
         );
     }
 
+    #[test]
+    fn target_preview_and_apply_are_one_scoped_bridge_transaction() {
+        let _guard = test_document_lock().lock().unwrap();
+        {
+            let mut state = document().lock().unwrap();
+            state.dataset = ternary_contours_cli::default_regular_dataset();
+            state.revision = 0;
+            state.saved_revision = 0;
+            state.dirty = false;
+            state.undo.clear();
+            state.redo.clear();
+            let field = &mut fields_mut(&mut state.dataset.grids[0])[0];
+            for (row, value) in field.values.iter_mut().enumerate() {
+                *value = TabulatedValue::calculated(900.0 + row as f64).unwrap();
+            }
+            field.values[0] = TabulatedValue::missing();
+            field.values[1] = TabulatedValue::missing();
+        }
+        let target_rows = [0_u32];
+        let options = TcqtMeshExtrapolationOptions {
+            grid_index: 0,
+            field_index: 0,
+            phase_id: 1,
+            scope: ABI_MESH_SCOPE_TARGETS,
+            all_phase_properties: false,
+            target_rows: target_rows.as_ptr(),
+            target_row_count: target_rows.len() as u32,
+            method: ABI_CUBIC_STEFFEN,
+            maximum_layers: 1,
+            minimum_directional_support: 1,
+            has_maximum_directional_spread: false,
+            maximum_directional_spread: 0.0,
+            has_minimum_value: false,
+            minimum_value: 0.0,
+            has_maximum_value: false,
+            maximum_value: 0.0,
+        };
+        let mut preview = unsafe { std::mem::zeroed::<TcqtMeshExtrapolationSummary>() };
+        unsafe {
+            assert!(tcqt_preview_regular_mesh_extrapolation(&options, &mut preview).success);
+        }
+        assert_eq!(preview.values_proposed, 1);
+        let mut rows = 0;
+        assert!(unsafe { tcqt_mesh_extrapolation_preview_row_count(&mut rows) }.success);
+        assert_eq!(rows, 1);
+        let mut preview_row = unsafe { std::mem::zeroed::<TcqtMeshExtrapolationPreviewRow>() };
+        unsafe {
+            assert!(tcqt_mesh_extrapolation_preview_row_at(0, &mut preview_row).success);
+        }
+        assert_eq!(preview_row.row_index, 0);
+        assert_eq!(preview_row.status, 0);
+        let mut applied = unsafe { std::mem::zeroed::<TcqtMeshExtrapolationSummary>() };
+        unsafe {
+            assert!(tcqt_materialize_regular_mesh_extrapolation(&mut applied).success);
+        }
+        assert_eq!(applied.values_proposed, 1);
+        let mut document_summary = unsafe { std::mem::zeroed::<TcqtProjectSummary>() };
+        assert!(unsafe { tcqt_project_summary(&mut document_summary) }.success);
+        assert_eq!(document_summary.revision, 1);
+        assert!(document_summary.dirty);
+        let mut target = unsafe { std::mem::zeroed::<TcqtCell>() };
+        let mut unrelated = unsafe { std::mem::zeroed::<TcqtCell>() };
+        unsafe {
+            assert!(tcqt_grid_cell_at(0, 0, 0, &mut target).success);
+            assert!(tcqt_grid_cell_at(0, 0, 1, &mut unrelated).success);
+        }
+        assert_eq!(target.state, 4);
+        assert_eq!(unrelated.state, 3);
+    }
     #[test]
     fn viewer_option_snapshot_is_validated_and_preserves_non_default_settings() {
         let raw = TcqtViewerCalculationOptions {

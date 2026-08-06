@@ -57,16 +57,47 @@ struct TcqtGrid { std::uint32_t index; std::uint32_t kind; std::uint32_t subdivi
 struct TcqtField { std::uint32_t index; std::uint32_t phase_id; char property[128]; char column_name[128]; };
 struct TcqtRow { double a; double b; double c; };
 struct TcqtMeshExtrapolationOptions {
-    std::uint32_t grid_index; std::uint32_t field_index; std::uint32_t method;
-    std::uint32_t maximum_layers; std::uint32_t minimum_directional_support;
-    bool has_maximum_directional_spread; double maximum_directional_spread;
-    bool has_minimum_value; double minimum_value;
-    bool has_maximum_value; double maximum_value;
-};
-struct TcqtMeshExtrapolationSummary {
+    std::uint32_t grid_index;
+    std::uint32_t field_index;
+    std::uint32_t phase_id;
+    // 0 = field, 1 = phase, 2 = selected canonical target rows.
+    std::uint32_t scope;
+    bool all_phase_properties;
+    const std::uint32_t* target_rows;
+    std::uint32_t target_row_count;
+    std::uint32_t method;
+    std::uint32_t maximum_layers;
+    std::uint32_t minimum_directional_support;
+    bool has_maximum_directional_spread;
+    double maximum_directional_spread;
+    bool has_minimum_value;
+    double minimum_value;
+    bool has_maximum_value;
+    double maximum_value;
+};struct TcqtMeshExtrapolationSummary {
     bool success; std::uint32_t fields_processed; std::uint32_t values_proposed;
     std::uint32_t values_remaining; std::uint32_t maximum_layer; char message[512];
-};struct TcqtCell { std::uint32_t state; bool has_value; double value; std::uint32_t extrapolation_layer; std::uint32_t extrapolation_method; std::uint32_t extrapolation_support_count; double extrapolation_spread; char note[128]; };
+};
+struct TcqtMeshExtrapolationPreviewRow {
+    std::uint32_t field_index;
+    std::uint32_t phase_id;
+    std::uint32_t row_index;
+    double a;
+    double b;
+    double c;
+    std::uint32_t old_state;
+    // 0 = requested target, 1 = dependency, 2 = field candidate, 3 = rejected.
+    std::uint32_t status;
+    bool has_value;
+    double value;
+    std::uint32_t layer;
+    std::uint32_t method;
+    std::uint32_t support_count;
+    double spread;
+    char property[128];
+    char reason[512];
+};
+struct TcqtCell { std::uint32_t state; bool has_value; double value; std::uint32_t extrapolation_layer; std::uint32_t extrapolation_method; std::uint32_t extrapolation_support_count; double extrapolation_spread; char note[128]; };
 struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; std::uint32_t path_source; char phase_1[128]; char phase_2[128]; char line_id[128]; };
 
 TcqtStatus tcqt_new_document();
@@ -82,7 +113,10 @@ TcqtStatus tcqt_grid_row_at(std::uint32_t grid_index, std::uint32_t row_index, T
 TcqtStatus tcqt_grid_cell_at(std::uint32_t grid_index, std::uint32_t field_index, std::uint32_t row_index, TcqtCell* output);
 TcqtStatus tcqt_preview_regular_mesh_extrapolation(const TcqtMeshExtrapolationOptions* options, TcqtMeshExtrapolationSummary* output);
 TcqtStatus tcqt_materialize_regular_mesh_extrapolation(TcqtMeshExtrapolationSummary* output);
+TcqtStatus tcqt_mesh_extrapolation_preview_row_count(std::uint32_t* output);
+TcqtStatus tcqt_mesh_extrapolation_preview_row_at(std::uint32_t index, TcqtMeshExtrapolationPreviewRow* output);
 TcqtStatus tcqt_clear_extrapolated_grid_values(std::uint32_t grid_index, std::uint32_t field_index);
+TcqtStatus tcqt_clear_extrapolated_phase_values(std::uint32_t grid_index, std::uint32_t phase_id);
 TcqtStatus tcqt_set_title(const char* value);
 TcqtStatus tcqt_set_component(std::uint32_t index, const char* value);
 TcqtStatus tcqt_add_phase(const char* name);
