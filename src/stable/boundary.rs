@@ -567,6 +567,13 @@ pub enum StableBoundaryError {
         parameter: f64,
         phases: StablePhasePair,
     },
+    /// More than one refined root is compatible with one sampled endpoint.
+    AmbiguousBinaryEndpointMatch {
+        boundary: BinaryBoundary,
+        parameter: f64,
+        phases: StablePhasePair,
+        candidate_nodes: Vec<StableInvariantNodeId>,
+    },
     UnresolvedPendingEnds {
         count: usize,
     },
@@ -734,6 +741,15 @@ impl fmt::Display for StableBoundaryError {
             } => write!(
                 formatter,
                 "trace hit {boundary:?} at {parameter} without a matching binary node for {phases:?}"
+            ),
+            Self::AmbiguousBinaryEndpointMatch {
+                boundary,
+                parameter,
+                phases,
+                candidate_nodes,
+            } => write!(
+                formatter,
+                "trace hit {boundary:?} at {parameter} with ambiguous binary nodes {candidate_nodes:?} for {phases:?}"
             ),
             Self::UnresolvedPendingEnds { count } => {
                 write!(
@@ -1762,44 +1778,51 @@ fn match_binary_endpoints(
     sampling_subdivisions: usize,
     options: StableBoundaryOptions,
 ) -> Result<(), StableBoundaryError> {
+    // A sampling-cell width is only a candidate-search interval: affine
+    // sampling endpoints may be displaced from the continuous binary root.
+    // The canonical endpoint itself is always the unique refined root.
+    let search_half_width = 1.0 / sampling_subdivisions as f64
+        + options
+            .binary_parameter_tolerance
+            .max(options.geometry_tolerance * 4.0);
     for fragment in fragments.iter_mut() {
         for endpoint in &mut fragment.endpoints {
             let TraceFeature::StableBoundary(boundary, parameter) = endpoint.feature else {
                 continue;
             };
-            let candidate = traces
+            let mut candidates = traces
                 .iter()
                 .filter(|trace| trace.boundary == boundary)
                 .flat_map(|trace| trace.invariants.iter())
                 .filter(|node| {
                     node.phases.contains(&fragment.pair.first)
                         && node.phases.contains(&fragment.pair.second)
+                        && (node.boundary_parameter - parameter).abs() <= search_half_width
                 })
-                .min_by(|left, right| {
-                    (left.boundary_parameter - parameter)
-                        .abs()
-                        .total_cmp(&(right.boundary_parameter - parameter).abs())
-                        .then_with(|| left.id.cmp(&right.id))
-                });
-            let Some(candidate) = candidate else {
-                return Err(StableBoundaryError::NoMatchingBinaryNode {
-                    boundary,
-                    parameter,
-                    phases: fragment.pair,
-                });
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                left.boundary_parameter
+                    .total_cmp(&right.boundary_parameter)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            let candidate = match candidates.as_slice() {
+                [] => {
+                    return Err(StableBoundaryError::NoMatchingBinaryNode {
+                        boundary,
+                        parameter,
+                        phases: fragment.pair,
+                    });
+                }
+                [candidate] => *candidate,
+                _ => {
+                    return Err(StableBoundaryError::AmbiguousBinaryEndpointMatch {
+                        boundary,
+                        parameter,
+                        phases: fragment.pair,
+                        candidate_nodes: candidates.iter().map(|node| node.id).collect(),
+                    });
+                }
             };
-            let sampling_resolution = 1.0 / sampling_subdivisions as f64;
-            let tolerance = options
-                .binary_parameter_tolerance
-                .max(options.geometry_tolerance * 4.0)
-                .max(sampling_resolution);
-            if (candidate.boundary_parameter - parameter).abs() > tolerance {
-                return Err(StableBoundaryError::NoMatchingBinaryNode {
-                    boundary,
-                    parameter,
-                    phases: fragment.pair,
-                });
-            }
             let canonical = nodes.get(candidate.id.0).ok_or_else(|| {
                 StableBoundaryError::MalformedGraphConnectivity {
                     message: "binary node ID does not index the canonical node vector".into(),
@@ -3634,6 +3657,69 @@ mod tests {
             network.incident_univariants(interior.id()).unwrap().len(),
             3
         );
+    }
+
+    #[test]
+    fn ambiguous_binary_endpoint_match_is_typed_not_nearest_node() {
+        let pair = StablePhasePair::new(StablePhaseId(1), StablePhaseId(2));
+        let make_node = |id, parameter| BinaryInvariantNode {
+            id: StableInvariantNodeId(id),
+            boundary: BinaryBoundary::Ab,
+            boundary_parameter: parameter,
+            point: BinaryBoundary::Ab.composition_unchecked(parameter),
+            temperature: 1000.0,
+            phases: vec![pair.first, pair.second],
+            left_stable_phase: pair.first,
+            right_stable_phase: pair.second,
+        };
+        let nodes = vec![
+            StableInvariantNode::Binary(make_node(0, 0.48)),
+            StableInvariantNode::Binary(make_node(1, 0.52)),
+        ];
+        let trace = BinaryBoundaryTrace {
+            boundary: BinaryBoundary::Ab,
+            regions: Vec::new(),
+            invariants: vec![make_node(0, 0.48), make_node(1, 0.52)],
+            incomplete_transitions: Vec::new(),
+            diagnostics: BinaryBoundaryTraceDiagnostics::default(),
+        };
+        let mut fragments = vec![LocalBoundaryFragment {
+            pair,
+            triangle: 0,
+            endpoints: [
+                FragmentEndpoint {
+                    key: point_key(TernaryCoordinate::new(0.5, 0.5, 0.0), 1.0e-9),
+                    point: TernaryCoordinate::new(0.5, 0.5, 0.0),
+                    temperature: 1000.0,
+                    tied_phases: vec![pair.first, pair.second],
+                    feature: TraceFeature::StableBoundary(BinaryBoundary::Ab, 0.5),
+                    node: None,
+                },
+                FragmentEndpoint {
+                    key: point_key(TernaryCoordinate::new(0.4, 0.5, 0.1), 1.0e-9),
+                    point: TernaryCoordinate::new(0.4, 0.5, 0.1),
+                    temperature: 1000.0,
+                    tied_phases: vec![pair.first, pair.second],
+                    feature: TraceFeature::Interior,
+                    node: None,
+                },
+            ],
+        }];
+        assert!(matches!(
+            match_binary_endpoints(
+                &mut fragments,
+                &[trace],
+                &nodes,
+                10,
+                StableBoundaryOptions::default(),
+            ),
+            Err(StableBoundaryError::AmbiguousBinaryEndpointMatch {
+                boundary: BinaryBoundary::Ab,
+                phases,
+                candidate_nodes,
+                ..
+            }) if phases == pair && candidate_nodes == vec![StableInvariantNodeId(0), StableInvariantNodeId(1)]
+        ));
     }
 
     #[test]
