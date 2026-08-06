@@ -68,6 +68,7 @@ void TernaryCanvas::setVertexLabelSettings(int mode, int decimals, bool selected
     update();
 }
 void TernaryCanvas::setQueries(const QVector<CanvasQuery>& queries) { queries_ = queries; update(); }
+void TernaryCanvas::setInterpolationPreview(const std::optional<CanvasInterpolationPreview>& preview) { interpolation_preview_ = preview; update(); }
 void TernaryCanvas::setContainingTriangleVisible(bool visible) { show_containing_triangle_ = visible; update(); }
 void TernaryCanvas::setMarkerSize(int size) { marker_size_ = std::clamp(size, 2, 20); update(); }
 void TernaryCanvas::setVertexVisibility(bool calculated, bool extrapolated, bool cut_off, bool missing) {
@@ -119,17 +120,22 @@ void TernaryCanvas::mousePressEvent(QMouseEvent* event) {
     }
     double a = 0.0, b = 0.0, c = 0.0;
     if (event->button() == Qt::LeftButton && compositionForPoint(event->position(), &a, &b, &c)) {
-        selected_composition_ = QPointF(a, b);
-        if (interaction_mode_ == 1) emit interpolationRequested(a, b, c);
-        else if (const auto row = vertexAt(event->position())) emit vertexSelected(*row, event->modifiers().testFlag(Qt::ShiftModifier));
-        else emit compositionSelected(a, b, c);
+        if (interaction_mode_ == 0) {
+            selected_composition_ = QPointF(a, b);
+            if (const auto row = vertexAt(event->position())) emit vertexSelected(*row, event->modifiers().testFlag(Qt::ShiftModifier));
+            else emit compositionSelected(a, b, c);
+        }
         update();
     }
 }
 void TernaryCanvas::mouseDoubleClickEvent(QMouseEvent* event) {
-    if (event->button() == Qt::LeftButton && interaction_mode_ == 0) {
+    if (event->button() != Qt::LeftButton) return;
+    if (interaction_mode_ == 0) {
         if (const auto row = vertexAt(event->position())) emit vertexDoubleClicked(*row, event->globalPosition().toPoint());
+        return;
     }
+    double a = 0.0, b = 0.0, c = 0.0;
+    if (compositionForPoint(event->position(), &a, &b, &c)) emit interpolationRequested(a, b, c);
 }
 void TernaryCanvas::mouseMoveEvent(QMouseEvent* event) { if (!panning_) return; pan_ += event->position() - pan_origin_; pan_origin_ = event->position(); update(); }
 void TernaryCanvas::mouseReleaseEvent(QMouseEvent* event) {
@@ -211,7 +217,29 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
             }
         }
     }
-if (show_containing_triangle_) {
+    if (interpolation_preview_) {
+        painter.setPen(QPen(QColor(146, 68, 173), 2.2, Qt::DashLine));
+        painter.setBrush(QColor(146, 68, 173, 34));
+        QPolygonF preview_triangle;
+        for (const auto& source : interpolation_preview_->containing_triangle) {
+            preview_triangle << pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y());
+        }
+        if (preview_triangle.size() == 3) painter.drawPolygon(preview_triangle);
+        for (const auto& vertex : inspection_vertices_) {
+            if (!interpolation_preview_->source_rows.contains(vertex.row)) continue;
+            const auto point = pointForComposition(vertex.composition.x(), vertex.composition.y(), 1.0 - vertex.composition.x() - vertex.composition.y());
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(point, marker_size_ + 3.0, marker_size_ + 3.0);
+        }
+        const auto point = pointForComposition(interpolation_preview_->composition.x(), interpolation_preview_->composition.y(),
+                                                1.0 - interpolation_preview_->composition.x() - interpolation_preview_->composition.y());
+        painter.setPen(QPen(QColor(146, 68, 173), 2.5));
+        painter.setBrush(QColor(255, 255, 255, 120));
+        painter.drawEllipse(point, 7.0, 7.0);
+        painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
+        painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
+    }
+    if (show_containing_triangle_) {
         painter.setPen(QPen(QColor(185, 60, 185), 1.8, Qt::DashLine));
         painter.setBrush(QColor(185, 60, 185, 28));
         for (const auto& query : queries_) {

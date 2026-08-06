@@ -32,6 +32,11 @@ struct CanvasPath {
     QString phase_pair;
 };
 
+struct CanvasInterpolationPreview {
+    QPointF composition;
+    QPolygonF containing_triangle;
+    QSet<std::uint32_t> source_rows;
+};
 struct CanvasQuery {
     std::uint64_t id = 0;
     QPointF composition;
@@ -64,6 +69,7 @@ public:
                                  bool univariant_ids, bool phase_pair_labels);
     void setVertexLabelSettings(int mode, int decimals, bool selected_only);
     void setQueries(const QVector<CanvasQuery>& queries);
+    void setInterpolationPreview(const std::optional<CanvasInterpolationPreview>& preview);
     void setContainingTriangleVisible(bool visible);
     void setMarkerSize(int size);
     void setVertexVisibility(bool calculated, bool extrapolated, bool cut_off, bool missing);
@@ -127,6 +133,7 @@ private:
     QVector<CanvasVertex> inspection_vertices_;
     QVector<CanvasPath> projection_paths_;
     QVector<CanvasQuery> queries_;
+    std::optional<CanvasInterpolationPreview> interpolation_preview_;
     QSet<std::uint32_t> selected_rows_;
     QPointF selected_composition_{-1.0, -1.0};
     QPointF pan_origin_;

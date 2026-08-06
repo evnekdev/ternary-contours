@@ -1,5 +1,6 @@
 #include "main_window.hpp"
 #include "collapsible_section.hpp"
+#include "interpolation_point_dialog.hpp"
 
 #include "grid_table_model.hpp"
 #include "rust_bridge.hpp"
@@ -1752,10 +1753,53 @@ void MainWindow::updateViewerSelectionDetails() {
         .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
         .arg(ui_->comboViewerPhase->currentText()).arg(viewer_.phase_id).arg(viewer_.property).arg(state, value, note));
 }
+void MainWindow::setInterpolationPreview(const TcqtLocatedPoint& location) {
+    CanvasInterpolationPreview preview;
+    preview.composition = QPointF(location.a, location.b);
+    for (const auto row_index : {location.source_row0, location.source_row1, location.source_row2}) {
+        TcqtRow row{};
+        if (tcqt_grid_row_at(viewer_.grid_index, row_index, &row).success) {
+            preview.containing_triangle << QPointF(row.a, row.b);
+            preview.source_rows.insert(row_index);
+        }
+    }
+    ui_->canvasTernary->setInterpolationPreview(preview);
+}
+
+void MainWindow::clearInterpolationPreview() {
+    ui_->canvasTernary->setInterpolationPreview(std::nullopt);
+}
+
 void MainWindow::addInterpolationQuery(double a, double b, double c) {
-    if (viewer_.property.isEmpty()) { reportBridgeStatus(tr("Select a grid, phase, and property before adding a query."), false); return; }
-    ViewerQuery query; query.id = viewer_.next_query_id++; query.a = a; query.b = b; query.c = c;
-    viewer_.queries.append(query); refreshViewerQueries(); updateViewerActionState();
+    if (viewer_.property.isEmpty()) {
+        reportBridgeStatus(tr("Select a grid, phase, and property before adding a query."), false);
+        return;
+    }
+    TcqtLocatedPoint initial{};
+    const auto initial_status = tcqt_locate_grid_point(viewer_.grid_index, a, b, c, &initial);
+    if (!initial_status.success) {
+        reportBridgeStatus(statusText(initial_status), false);
+        return;
+    }
+    TcqtProjectSummary summary{};
+    if (!tcqt_project_summary(&summary).success) return;
+    const QStringList components{text(summary.component_a), text(summary.component_b), text(summary.component_c)};
+    setInterpolationPreview(initial);
+    InterpolationPointDialog dialog(viewer_.grid_index, components, initial, this);
+    connect(&dialog, &InterpolationPointDialog::previewLocationChanged, this,
+            [this](const TcqtLocatedPoint& location) { setInterpolationPreview(location); });
+    const auto accepted = dialog.exec() == QDialog::Accepted;
+    clearInterpolationPreview();
+    if (!accepted) return;
+    const auto location = dialog.acceptedLocation();
+    ViewerQuery query;
+    query.id = viewer_.next_query_id++;
+    query.a = location.a;
+    query.b = location.b;
+    query.c = location.c;
+    viewer_.queries.append(query);
+    refreshViewerQueries();
+    updateViewerActionState();
 }
 
 void MainWindow::selectViewerVertex(std::uint32_t row, bool additive) {

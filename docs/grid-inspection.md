@@ -74,6 +74,14 @@ triangle. **Vertex selection** keeps the existing classified-point editing
 workflow; it never changes a point merely by hovering. The inspection canvas
 uses the same configured background as Plot.
 
+In the Qt Viewer, double-click inside the simplex opens a coordinate-entry
+dialog before a query is registered. The dialog shows editable global A/B/C and
+editable local lambda0/lambda1/lambda2 values for Rust's deterministic
+containing triangle. Focus loss only validates; Enter normalizes the active
+triplet and moves a temporary preview marker. For edited coordinates, the first
+OK synchronizes the two representations and keeps the dialog open; the second
+OK creates one query. Cancel removes the preview without changing the result
+table or TCT document.
 Clicking inside the simplex keeps the semantic `A`, `B`, `C` composition (the
 component names appear in the results header), locates the source triangle with
 the prepared numerical evaluator, and appends a row in the independently

@@ -539,7 +539,10 @@ impl RegularTernaryGrid {
         Ok(triangles)
     }
 
-    pub(crate) fn triangle(&self, id: usize) -> Result<GridTriangle, FieldError> {
+    /// Return one elementary triangle by its stable canonical identifier.
+    ///
+    /// The vertex order is the local barycentric order returned by [`Self::locate`].
+    pub fn triangle(&self, id: usize) -> Result<GridTriangle, FieldError> {
         let triangle_count = self.triangle_count()?;
         if id >= triangle_count {
             return Err(FieldError::InvalidVertexIndex {

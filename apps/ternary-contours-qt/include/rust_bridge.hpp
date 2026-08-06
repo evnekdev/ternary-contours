@@ -32,7 +32,16 @@ struct TcqtInspectionResult {
     bool has_source_rows; std::uint32_t source_row0; std::uint32_t source_row1; std::uint32_t source_row2;
     std::uint32_t local_mode; bool uses_extrapolated_sources; std::uint32_t maximum_extrapolation_layer;
     char extrapolation_methods[128]; std::uint32_t extrapolated_source_row_count; char unit[128]; char message[512];
-};struct TcqtProjectSummary {
+};
+struct TcqtLocatedPoint {
+    bool success;
+    double a; double b; double c;
+    std::uint32_t triangle_index;
+    std::uint32_t source_row0; std::uint32_t source_row1; std::uint32_t source_row2;
+    double lambda0; double lambda1; double lambda2;
+    char message[512];
+};
+struct TcqtProjectSummary {
     char title[128]; char path[512]; char component_a[128]; char component_b[128]; char component_c[128];
     std::uint32_t phase_count; std::uint32_t property_count; std::uint32_t grid_count;
     bool dirty; std::uint64_t revision; std::uint64_t saved_revision;
@@ -142,6 +151,9 @@ TcqtStatus tcqt_viewer_calculation_options(TcqtViewerCalculationOptions* output)
 TcqtStatus tcqt_viewer_calculation_state(TcqtViewerCalculationState* output);
 TcqtCalculationResult tcqt_calculate_viewer(const TcqtViewerCalculationOptions* options, std::uint64_t expected_revision, std::uint64_t expected_options_revision, std::uint64_t request_id);
 TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
+TcqtStatus tcqt_validate_coordinate_triplet(double a, double b, double c);
+TcqtStatus tcqt_locate_grid_point(std::uint32_t grid_index, double a, double b, double c, TcqtLocatedPoint* output);
+TcqtStatus tcqt_locate_grid_local_point(std::uint32_t grid_index, std::uint32_t triangle_index, double lambda0, double lambda1, double lambda2, TcqtLocatedPoint* output);
 TcqtStatus tcqt_evaluate_field(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const TcqtViewerCalculationOptions* options, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);
 TcqtStatus tcqt_set_field_vertex(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, std::uint32_t row_index, const char* token);
 TcqtStatus tcqt_bulk_set_field_state(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const std::uint32_t* rows, std::uint32_t row_count, std::uint32_t state_code);

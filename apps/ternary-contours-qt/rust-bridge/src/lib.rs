@@ -15,9 +15,10 @@ use std::{
 };
 
 use ternary_contours::{
-    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, NumericalTraceConfig,
-    NumericalTraceLevel, RegularMeshExtrapolationOptions, RegularTernaryGrid, StableInvariantNode,
-    StablePhaseId,
+    BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy, IrregularTernaryMesh,
+    IrregularTriangleId, NumericalTraceConfig, NumericalTraceLevel,
+    RegularMeshExtrapolationOptions, RegularTernaryGrid, StableInvariantNode, StablePhaseId,
+    composition_from_local_barycentric, normalize_ternary_triplet,
 };
 use ternary_contours_cli::{
     CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, JsonLinesTraceSink,
@@ -172,6 +173,23 @@ pub struct TcqtInspectionResult {
     pub extrapolation_methods: [u8; NAME],
     pub extrapolated_source_row_count: u32,
     pub unit: [u8; NAME],
+    pub message: [u8; MESSAGE],
+}
+/// Field-independent point location returned in canonical source-row order.
+/// Rows are zero-based at the ABI; the Qt dialog presents them as one-based.
+#[repr(C)]
+pub struct TcqtLocatedPoint {
+    pub success: bool,
+    pub a: f64,
+    pub b: f64,
+    pub c: f64,
+    pub triangle_index: u32,
+    pub source_row0: u32,
+    pub source_row1: u32,
+    pub source_row2: u32,
+    pub lambda0: f64,
+    pub lambda1: f64,
+    pub lambda2: f64,
     pub message: [u8; MESSAGE],
 }
 #[repr(C)]
@@ -556,6 +574,96 @@ fn viewer_options(raw: &TcqtViewerCalculationOptions) -> Result<ProjectionOption
     })
 }
 
+fn locate_tabulated_grid_point(
+    grid: &TabulatedGrid,
+    composition: [f64; 3],
+) -> Result<TcqtLocatedPoint, String> {
+    let composition = normalize_ternary_triplet(composition).map_err(|error| error.to_string())?;
+    let (triangle_index, source_rows, local_barycentric) = match grid {
+        TabulatedGrid::Regular(grid) => {
+            let numerical = RegularTernaryGrid::new(grid.subdivisions)
+                .map_err(|error| format!("cannot prepare regular grid location: {error}"))?;
+            let location = numerical.locate(composition).map_err(|error| {
+                format!("global composition is outside the regular grid: {error}")
+            })?;
+            let rows = location.triangle.vertices.map(|vertex| vertex.0);
+            if rows.iter().any(|row| *row >= grid.compositions.len()) {
+                return Err("regular-grid triangle refers to an unavailable source row".into());
+            }
+            (location.triangle.id, rows, location.barycentric)
+        }
+        TabulatedGrid::Irregular(grid) => {
+            let mesh = IrregularTernaryMesh::new(grid.compositions.iter().copied())
+                .map_err(|error| format!("cannot prepare irregular grid location: {error}"))?;
+            let location = mesh.locate(composition).map_err(|error| {
+                format!("global composition is outside the irregular grid: {error}")
+            })?;
+            (
+                location.triangle.id.0,
+                location.triangle.vertices.map(|vertex| vertex.0),
+                location.barycentric,
+            )
+        }
+    };
+    Ok(TcqtLocatedPoint {
+        success: true,
+        a: composition[0],
+        b: composition[1],
+        c: composition[2],
+        triangle_index: triangle_index as u32,
+        source_row0: source_rows[0] as u32,
+        source_row1: source_rows[1] as u32,
+        source_row2: source_rows[2] as u32,
+        lambda0: local_barycentric[0],
+        lambda1: local_barycentric[1],
+        lambda2: local_barycentric[2],
+        message: bytes("OK"),
+    })
+}
+
+fn locate_tabulated_grid_local_point(
+    grid: &TabulatedGrid,
+    triangle_index: u32,
+    local: [f64; 3],
+) -> Result<TcqtLocatedPoint, String> {
+    let vertices = match grid {
+        TabulatedGrid::Regular(grid) => {
+            let numerical = RegularTernaryGrid::new(grid.subdivisions)
+                .map_err(|error| format!("cannot prepare regular grid location: {error}"))?;
+            let triangle = numerical
+                .triangle(triangle_index as usize)
+                .map_err(|error| {
+                    format!("regular triangle {triangle_index} is unavailable: {error}")
+                })?;
+            triangle.vertices.map(|vertex| {
+                grid.compositions.get(vertex.0).copied().ok_or_else(|| {
+                    "regular-grid triangle refers to an unavailable source row".to_owned()
+                })
+            })
+        }
+        TabulatedGrid::Irregular(grid) => {
+            let mesh = IrregularTernaryMesh::new(grid.compositions.iter().copied())
+                .map_err(|error| format!("cannot prepare irregular grid location: {error}"))?;
+            let triangle = mesh
+                .triangle(IrregularTriangleId(triangle_index as usize))
+                .map_err(|error| {
+                    format!("irregular triangle {triangle_index} is unavailable: {error}")
+                })?;
+            triangle.vertices.map(|vertex| {
+                grid.compositions.get(vertex.0).copied().ok_or_else(|| {
+                    "irregular triangle refers to an unavailable source row".to_owned()
+                })
+            })
+        }
+    };
+    let [first, second, third] = vertices;
+    let vertices = [first?, second?, third?];
+    let composition =
+        composition_from_local_barycentric(vertices, local).map_err(|error| error.to_string())?;
+    // Always re-locate after the transform. This applies the exact same
+    // canonical shared-edge and vertex ownership as field evaluation.
+    locate_tabulated_grid_point(grid, composition)
+}
 fn default_viewer_options() -> TcqtViewerCalculationOptions {
     TcqtViewerCalculationOptions {
         automatic_range: true,
@@ -2600,6 +2708,68 @@ pub unsafe extern "C" fn tcqt_projection_summary(
         Ok(())
     })())
 }
+/// Validate a finite, non-negative coordinate triplet without normalizing or
+/// changing a document. The dialog uses this on ordinary focus loss.
+#[unsafe(no_mangle)]
+pub extern "C" fn tcqt_validate_coordinate_triplet(a: f64, b: f64, c: f64) -> TcqtStatus {
+    status(
+        normalize_ternary_triplet([a, b, c])
+            .map(|_| ())
+            .map_err(|error| error.to_string()),
+    )
+}
+/// Normalize a semantic global triplet and locate its deterministic source triangle.
+/// This operation is field-independent and never changes document state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_locate_grid_point(
+    grid_index: u32,
+    a: f64,
+    b: f64,
+    c: f64,
+    output_value: *mut TcqtLocatedPoint,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "located point") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let grid = state
+            .dataset
+            .grids
+            .get(grid_index as usize)
+            .ok_or_else(|| "selected grid is unavailable".to_owned())?;
+        *output_value = locate_tabulated_grid_point(grid, [a, b, c])?;
+        Ok(())
+    })())
+}
+
+/// Normalize triangle-local barycentric coordinates, convert to global A/B/C,
+/// then return the deterministic triangle owner for the resulting composition.
+/// This operation is field-independent and never changes document state.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_locate_grid_local_point(
+    grid_index: u32,
+    triangle_index: u32,
+    lambda0: f64,
+    lambda1: f64,
+    lambda2: f64,
+    output_value: *mut TcqtLocatedPoint,
+) -> TcqtStatus {
+    status((|| {
+        let output_value = unsafe { out(output_value, "located point") }?;
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        let grid = state
+            .dataset
+            .grids
+            .get(grid_index as usize)
+            .ok_or_else(|| "selected grid is unavailable".to_owned())?;
+        *output_value =
+            locate_tabulated_grid_local_point(grid, triangle_index, [lambda0, lambda1, lambda2])?;
+        Ok(())
+    })())
+}
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_evaluate_field(
     grid_index: u32,
@@ -3334,6 +3504,134 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn coordinate_bridge_locations_are_field_independent_and_non_mutating() {
+        let _guard = test_document_lock().lock().unwrap();
+        {
+            let mut state = document().lock().unwrap();
+            state.dataset = ternary_contours_cli::default_regular_dataset();
+            state.dirty = false;
+            state.revision = 41;
+            state.saved_revision = 41;
+            state.undo.clear();
+            state.redo.clear();
+            for field in fields_mut(&mut state.dataset.grids[0]) {
+                for (row, value) in field.values.iter_mut().enumerate() {
+                    *value = TabulatedValue::calculated(800.0 + row as f64).unwrap();
+                }
+            }
+        }
+        let mut global = unsafe { std::mem::zeroed::<TcqtLocatedPoint>() };
+        unsafe {
+            assert!(tcqt_locate_grid_point(0, 2.0, 3.0, 5.0, &mut global).success);
+        }
+        assert!((global.a - 0.2).abs() < 1.0e-12);
+        assert!((global.b - 0.3).abs() < 1.0e-12);
+        assert!((global.c - 0.5).abs() < 1.0e-12);
+        assert!(global.source_row0 < 66 && global.source_row1 < 66 && global.source_row2 < 66);
+        let property = std::ffi::CString::new("T").unwrap();
+        let options = default_viewer_options();
+        let mut evaluated = unsafe { std::mem::zeroed::<TcqtInspectionResult>() };
+        unsafe {
+            assert!(
+                tcqt_evaluate_field(
+                    0,
+                    1,
+                    property.as_ptr(),
+                    &options,
+                    global.a,
+                    global.b,
+                    global.c,
+                    0,
+                    &mut evaluated,
+                )
+                .success
+            );
+        }
+        assert_eq!(evaluated.triangle_index, global.triangle_index);
+        assert_eq!(
+            (
+                evaluated.source_row0,
+                evaluated.source_row1,
+                evaluated.source_row2
+            ),
+            (global.source_row0, global.source_row1, global.source_row2)
+        );
+        let mut local = unsafe { std::mem::zeroed::<TcqtLocatedPoint>() };
+        unsafe {
+            assert!(
+                tcqt_locate_grid_local_point(
+                    0,
+                    global.triangle_index,
+                    global.lambda0 * 2.0,
+                    global.lambda1 * 2.0,
+                    global.lambda2 * 2.0,
+                    &mut local,
+                )
+                .success
+            );
+        }
+        assert!((local.a - global.a).abs() < 1.0e-12);
+        assert!((local.b - global.b).abs() < 1.0e-12);
+        assert!((local.c - global.c).abs() < 1.0e-12);
+        let mut summary = unsafe { std::mem::zeroed::<TcqtProjectSummary>() };
+        unsafe {
+            assert!(tcqt_project_summary(&mut summary).success);
+        }
+        assert_eq!(summary.revision, 41);
+        assert!(!summary.dirty);
+
+        {
+            let mut state = document().lock().unwrap();
+            let values = &mut fields_mut(&mut state.dataset.grids[0])[0].values;
+            values[global.source_row0 as usize] = TabulatedValue::missing();
+            values[global.source_row1 as usize] = TabulatedValue::cut_off();
+        }
+        let mut unchanged = unsafe { std::mem::zeroed::<TcqtLocatedPoint>() };
+        unsafe {
+            assert!(tcqt_locate_grid_point(0, 0.2, 0.3, 0.5, &mut unchanged).success);
+        }
+        assert_eq!(
+            (
+                unchanged.triangle_index,
+                unchanged.source_row0,
+                unchanged.source_row1,
+                unchanged.source_row2
+            ),
+            (
+                global.triangle_index,
+                global.source_row0,
+                global.source_row1,
+                global.source_row2
+            )
+        );
+    }
+
+    #[test]
+    fn coordinate_bridge_rejects_invalid_triplets_and_supports_irregular_meshes() {
+        assert!(!tcqt_validate_coordinate_triplet(0.0, 0.0, 0.0).success);
+        assert!(!tcqt_validate_coordinate_triplet(-1.0, 1.0, 1.0).success);
+        assert!(!tcqt_validate_coordinate_triplet(f64::INFINITY, 0.0, 1.0).success);
+        let grid = TabulatedGrid::Irregular(IrregularTabulatedGrid {
+            name: "irregular".into(),
+            source: SourceRange {
+                first_line: 0,
+                last_line: 0,
+            },
+            compositions: vec![[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            fields: Vec::new(),
+        });
+        let global = locate_tabulated_grid_point(&grid, [1.0, 2.0, 3.0]).unwrap();
+        let local = locate_tabulated_grid_local_point(
+            &grid,
+            global.triangle_index,
+            [global.lambda0, global.lambda1, global.lambda2],
+        )
+        .unwrap();
+        assert!((local.a - 1.0 / 6.0).abs() < 1.0e-12);
+        assert!((local.b - 2.0 / 6.0).abs() < 1.0e-12);
+        assert!((local.c - 3.0 / 6.0).abs() < 1.0e-12);
+    }
     #[test]
     fn default_viewer_options_prefer_regular_cubic_alpha_akima_muggianu() {
         let options = default_viewer_options();

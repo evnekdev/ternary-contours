@@ -13,6 +13,7 @@ set(TCQT_UI_FILES
     ui/main_window.ui
     ui/settings_dialog.ui
     ui/add_grid_dialog.ui
+    ui/interpolation_point_dialog.ui
     ui/phase_editor_dialog.ui
     ui/property_editor_dialog.ui
     ui/about_dialog.ui
@@ -26,6 +27,8 @@ add_executable(ternary-contours-qt
     src/collapsible_section.hpp
     src/ternary_canvas.cpp
     src/ternary_canvas.hpp
+    src/interpolation_point_dialog.cpp
+    src/interpolation_point_dialog.hpp
     src/grid_table_model.cpp
     src/grid_table_model.hpp
     include/rust_bridge.hpp

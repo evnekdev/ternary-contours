@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>InterpolationPointDialog</class>
+ <widget class="QDialog" name="interpolationPointDialog">
+  <property name="windowTitle"><string>Interpolation query coordinates</string></property>
+  <property name="accessibleName"><string>Interpolation query coordinate entry</string></property>
+  <property name="accessibleDescription"><string>Enter global ternary composition or triangle-local barycentric coordinates for a new interpolation query.</string></property>
+  <layout class="QVBoxLayout" name="layoutInterpolationPointDialog">
+   <item>
+    <widget class="QGroupBox" name="groupGlobalComposition">
+     <property name="title"><string>Global composition</string></property>
+     <layout class="QFormLayout" name="formGlobalComposition">
+      <item row="0" column="0"><widget class="QLabel" name="labelGlobalA"><property name="text"><string>A</string></property></widget></item>
+      <item row="0" column="1"><widget class="QLineEdit" name="editGlobalA"><property name="accessibleName"><string>Global component A</string></property><property name="accessibleDescription"><string>Global semantic component A. Enter normalizes all global coordinates.</string></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel" name="labelGlobalB"><property name="text"><string>B</string></property></widget></item>
+      <item row="1" column="1"><widget class="QLineEdit" name="editGlobalB"><property name="accessibleName"><string>Global component B</string></property><property name="accessibleDescription"><string>Global semantic component B. Enter normalizes all global coordinates.</string></property></widget></item>
+      <item row="2" column="0"><widget class="QLabel" name="labelGlobalC"><property name="text"><string>C</string></property></widget></item>
+      <item row="2" column="1"><widget class="QLineEdit" name="editGlobalC"><property name="accessibleName"><string>Global component C</string></property><property name="accessibleDescription"><string>Global semantic component C. Enter normalizes all global coordinates.</string></property></widget></item>
+      <item row="3" column="0"><widget class="QLabel" name="labelGlobalSum"><property name="text"><string>Sum</string></property></widget></item>
+      <item row="3" column="1"><widget class="QLabel" name="labelGlobalSumValue"><property name="text"><string>Σ = 1</string></property><property name="accessibleName"><string>Global coordinate sum</string></property><property name="accessibleDescription"><string>Read-only global coordinate sum.</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupContainingTriangle">
+     <property name="title"><string>Containing triangle</string></property>
+     <layout class="QFormLayout" name="formContainingTriangle">
+      <item row="0" column="0"><widget class="QLabel" name="labelTriangleId"><property name="text"><string>Triangle ID</string></property></widget></item>
+      <item row="0" column="1"><widget class="QLabel" name="labelTriangleIdValue"><property name="text"><string>-</string></property><property name="accessibleName"><string>Containing triangle identifier</string></property></widget></item>
+      <item row="1" column="0" colspan="2"><widget class="QLabel" name="labelTriangleRow0"><property name="text"><string>Row 1: -</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+      <item row="2" column="0" colspan="2"><widget class="QLabel" name="labelTriangleRow1"><property name="text"><string>Row 2: -</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+      <item row="3" column="0" colspan="2"><widget class="QLabel" name="labelTriangleRow2"><property name="text"><string>Row 3: -</string></property><property name="wordWrap"><bool>true</bool></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupLocalCoordinates">
+     <property name="title"><string>Local coordinates</string></property>
+     <layout class="QFormLayout" name="formLocalCoordinates">
+      <item row="0" column="0"><widget class="QLabel" name="labelLocal0"><property name="text"><string>λ0</string></property></widget></item>
+      <item row="0" column="1"><widget class="QLineEdit" name="editLocal0"><property name="accessibleName"><string>Local lambda zero</string></property><property name="accessibleDescription"><string>Local barycentric coordinate lambda zero. Enter normalizes all local coordinates.</string></property></widget></item>
+      <item row="1" column="0"><widget class="QLabel" name="labelLocal1"><property name="text"><string>λ1</string></property></widget></item>
+      <item row="1" column="1"><widget class="QLineEdit" name="editLocal1"><property name="accessibleName"><string>Local lambda one</string></property><property name="accessibleDescription"><string>Local barycentric coordinate lambda one. Enter normalizes all local coordinates.</string></property></widget></item>
+      <item row="2" column="0"><widget class="QLabel" name="labelLocal2"><property name="text"><string>λ2</string></property></widget></item>
+      <item row="2" column="1"><widget class="QLineEdit" name="editLocal2"><property name="accessibleName"><string>Local lambda two</string></property><property name="accessibleDescription"><string>Local barycentric coordinate lambda two. Enter normalizes all local coordinates.</string></property></widget></item>
+      <item row="3" column="0"><widget class="QLabel" name="labelLocalSum"><property name="text"><string>Sum</string></property></widget></item>
+      <item row="3" column="1"><widget class="QLabel" name="labelLocalSumValue"><property name="text"><string>Σ = 1</string></property><property name="accessibleName"><string>Local coordinate sum</string></property><property name="accessibleDescription"><string>Read-only local coordinate sum.</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item><widget class="QLabel" name="labelCoordinateStatus"><property name="text"><string>Coordinates are synchronized.</string></property><property name="wordWrap"><bool>true</bool></property><property name="accessibleName"><string>Coordinate entry validation status</string></property><property name="accessibleDescription"><string>Shows coordinate normalization and validation feedback.</string></property></widget></item>
+   <item><widget class="QDialogButtonBox" name="buttonBoxInterpolationPoint"><property name="standardButtons"><set>QDialogButtonBox::Cancel|QDialogButtonBox::Ok</set></property><property name="accessibleName"><string>Interpolation query actions</string></property><property name="accessibleDescription"><string>Normalize or accept the interpolation query point, or cancel.</string></property></widget></item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

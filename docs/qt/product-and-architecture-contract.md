@@ -15,7 +15,7 @@ implementation details not stated as MUST/MUST NOT MAY change.
 Rust MUST own TCT parsing and serialization; the dataset; validation; draft-valid
 versus calculation-ready state; dirty state; saved baseline and revisions;
 undo/redo; phase/property/grid identities; classified values; bulk edits;
-interpolation; stable boundaries; invariants; univariants; isotherms; typed
+interpolation; field-independent ternary-coordinate normalization and deterministic triangle location; stable boundaries; invariants; univariants; isotherms; typed
 projection records; calculation options; calculation generations; and
 stale-result rejection.
 
@@ -45,7 +45,15 @@ results table belong in the wide right pane.
 Viewer modes are exactly **Vertex** and **Interpolate**. In Vertex mode, a
 single click inspects, Shift-click manages multi-selection, double-click opens
 the vertex editor, and right-click opens selection actions. In Interpolate mode,
-a click creates an interpolation query. There is no separate Inspect mode.
+a double-click opens the coordinate-entry dialog rather than creating a query
+directly. Rust owns global/local normalization, triangle location, boundary
+tie-breaking, source-row identity, and conversion. The dialog maintains global
+A/B/C and local triangle barycentric triplets independently while typing.
+Enter synchronizes the authoritative triplet through Rust; focus loss only
+validates and highlights. Edited coordinates use two-stage OK: the first OK
+normalizes and updates a temporary canvas preview, the second creates exactly
+one query. Cancel removes the preview and preserves prior selection. There is
+no separate Inspect mode.
 
 ## Edit and synchronization lifecycle
 

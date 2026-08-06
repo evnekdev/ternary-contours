@@ -47,6 +47,7 @@
 //! [`docs/irregular-mesh-metrics.md`](../docs/irregular-mesh-metrics.md).
 
 pub mod contour;
+pub mod coordinates;
 mod error;
 pub mod evaluation;
 #[cfg(feature = "cubic-alpha")]
@@ -112,6 +113,10 @@ pub use contour::{
     IrregularContourGeometryOptions, IrregularContourInterpolation,
     IrregularContourLevelDiagnostics, IrregularContourOptions, IrregularContourSet,
     IrregularCubicContourSourceDiagnostics,
+};
+pub use coordinates::{
+    COORDINATE_NORMALIZATION_TOLERANCE, CoordinateTransformError,
+    composition_from_local_barycentric, normalize_ternary_triplet,
 };
 pub use error::{FieldError, GridEvaluationError};
 #[cfg(feature = "cubic-alpha")]

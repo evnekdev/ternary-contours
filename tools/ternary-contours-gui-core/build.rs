@@ -62,6 +62,9 @@ fn public_widget(class: &str, object_name: &str) -> bool {
 fn main() {
     let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
     let ui_directory = manifest.join("../../apps/ternary-contours-qt/ui");
+    // Track the directory itself so adding a new Designer dialog regenerates
+    // the authoritative inventory on the next Cargo invocation.
+    println!("cargo:rerun-if-changed={}", ui_directory.display());
     let mut paths = fs::read_dir(&ui_directory)
         .expect("Qt Designer UI directory must exist")
         .map(|entry| entry.expect("read UI entry").path())

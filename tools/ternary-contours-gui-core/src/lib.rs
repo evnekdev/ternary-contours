@@ -246,6 +246,14 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         name if name.starts_with("actionAbout") => UiElementId::DiagnosticsPanel,
         name if name.starts_with("actionView") => UiElementId::PlotSettings,
         "settingsDialog" | "settingsTabs" | "settingsButtonBox" => UiElementId::DataDeclarations,
+        "interpolationPointDialog"
+        | "buttonBoxInterpolationPoint"
+        | "editGlobalA"
+        | "editGlobalB"
+        | "editGlobalC"
+        | "editLocal0"
+        | "editLocal1"
+        | "editLocal2" => UiElementId::GridInterpolation,
         "addGridDialog"
         | "addGridButtonBox"
         | "editAddGridName"
@@ -2308,6 +2316,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn interpolation_coordinate_dialog_has_a_non_committing_preview_path() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/ternary-contours-qt");
+        let dialog =
+            std::fs::read_to_string(root.join("src/interpolation_point_dialog.cpp")).unwrap();
+        let canvas = std::fs::read_to_string(root.join("src/ternary_canvas.cpp")).unwrap();
+        let window = std::fs::read_to_string(root.join("src/main_window.cpp")).unwrap();
+
+        for object_name in [
+            "interpolationPointDialog",
+            "editGlobalA",
+            "editGlobalB",
+            "editGlobalC",
+            "editLocal0",
+            "editLocal1",
+            "editLocal2",
+            "buttonBoxInterpolationPoint",
+        ] {
+            assert!(
+                QT_UI_ELEMENTS
+                    .iter()
+                    .any(|element| element.object_name == object_name),
+                "missing coordinate-dialog object {object_name}"
+            );
+        }
+        for required in [
+            "validateGlobalOnFocusLoss",
+            "validateLocalOnFocusLoss",
+            "normalizeGlobalFromEditors",
+            "normalizeLocalFromEditors",
+            "previewLocationChanged",
+            "handleOk",
+            "tcqt_locate_grid_point",
+            "tcqt_locate_grid_local_point",
+        ] {
+            assert!(
+                dialog.contains(required),
+                "missing dialog state transition {required}"
+            );
+        }
+        assert!(canvas.contains("interpolation_preview_"));
+        assert!(canvas.contains("setInterpolationPreview"));
+        assert!(window.contains("setInterpolationPreview(initial)"));
+        assert!(window.contains("clearInterpolationPreview();"));
+        assert!(window.contains("dialog.exec() == QDialog::Accepted"));
+        assert!(window.contains("viewer_.queries.append(query);"));
+    }
     #[test]
     fn designer_viewer_uses_the_required_split_pane_hierarchy() {
         for object_name in [

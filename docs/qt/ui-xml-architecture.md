@@ -20,7 +20,7 @@ status—not rebuild the widget hierarchy.
 `main_window.ui` defines the actual main window: File/Grid/View/About menus,
 Data and Viewer tabs, their explicit keyboard tab order, splitters, project tree, grid table, results table,
 status bar, and the `TernaryCanvas` Designer placeholder. The dialog files
-define static settings, add-grid, phase, property, and About shells. No TCT
+define static settings, add-grid, interpolation-coordinate, phase, property, and About shells. No TCT
 parser, numerical interpolation, dirty-state decision, or stale-result rule is
 implemented in XML or handwritten Qt layout code.
 

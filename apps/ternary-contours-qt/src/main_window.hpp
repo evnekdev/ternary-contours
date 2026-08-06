@@ -163,6 +163,8 @@ private:
     bool refreshProjectionCanvas(bool accept_empty = false);
     void scheduleViewerCalculation();
     void addInterpolationQuery(double a, double b, double c);
+    void setInterpolationPreview(const TcqtLocatedPoint& location);
+    void clearInterpolationPreview();
     void selectViewerVertex(std::uint32_t row, bool additive);
     void editViewerVertex(std::uint32_t row, const QPoint& global_position);
     void showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position);

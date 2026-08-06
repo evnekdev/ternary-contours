@@ -134,6 +134,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | buttonAddIrregularRow | main_window.ui | QPushButton | DataGridEditor |
 | buttonAddPhase | main_window.ui | QPushButton | DataPhases |
 | buttonAddProperty | main_window.ui | QPushButton | DataProperties |
+| buttonBoxInterpolationPoint | interpolation_point_dialog.ui | QDialogButtonBox | GridInterpolation |
 | buttonRemovePhase | main_window.ui | QPushButton | DataPhases |
 | buttonViewerExtrapolatePhase | main_window.ui | QPushButton | GridPointEditor |
 | buttonViewerResetAutomaticRange | main_window.ui | QPushButton | PlotLevels |
@@ -168,6 +169,12 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | editCornerA | main_window.ui | QLineEdit | DataComponents |
 | editCornerB | main_window.ui | QLineEdit | DataComponents |
 | editCornerC | main_window.ui | QLineEdit | DataComponents |
+| editGlobalA | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
+| editGlobalB | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
+| editGlobalC | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
+| editLocal0 | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
+| editLocal1 | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
+| editLocal2 | interpolation_point_dialog.ui | QLineEdit | GridInterpolation |
 | editPhaseName | phase_editor_dialog.ui | QLineEdit | DataPhases |
 | editProjectTitle | main_window.ui | QLineEdit | DataDeclarations |
 | editPropertyName | property_editor_dialog.ui | QLineEdit | DataProperties |
@@ -176,6 +183,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | editViewerStep | main_window.ui | QLineEdit | PlotLevels |
 | editViewerTmax | main_window.ui | QLineEdit | PlotLevels |
 | editViewerTmin | main_window.ui | QLineEdit | PlotLevels |
+| interpolationPointDialog | interpolation_point_dialog.ui | QDialog | GridInterpolation |
 | mainWindow | main_window.ui | QMainWindow | MainWindow |
 | menuAbout | main_window.ui | QMenu | GlobalToolbar |
 | menuAddGrid | main_window.ui | QMenu | GlobalToolbar |
