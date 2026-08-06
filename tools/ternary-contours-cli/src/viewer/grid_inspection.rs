@@ -1427,8 +1427,11 @@ mod tests {
             component_names: ["A".into(), "B".into(), "C".into()],
             unit: "K".into(),
             composition: [0.5, 0.25, 0.25],
-            source_interpolation: crate::SourceInterpolation::Linear,
-            partial_domain_policy: ternary_contours::CubicPartialDomainPolicy::OneSidedThenLinear,
+            interpolation: crate::InterpolationOptions {
+                source: crate::SourceInterpolation::Linear,
+                partial_domain_policy:
+                    ternary_contours::CubicPartialDomainPolicy::OneSidedThenLinear,
+            },
             state: InterpolatedResultState::Defined,
             value: Some(1_234.5),
             triangle_index: Some(7),
@@ -1482,19 +1485,19 @@ mod tests {
         state.register_interpolation_query(&editor, &options, [0.4, 0.3, 0.3]);
         assert_eq!(state.results.len(), 1);
         assert_eq!(
-            state.results[0].source_interpolation,
-            crate::SourceInterpolation::Linear
+            state.results[0].interpolation.source,
+            crate::InterpolationOptions::default().source
         );
         state.mode = GridInspectionMode::VertexSelection;
         assert_eq!(state.results.len(), 1);
-        options.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+        options.interpolation.source = crate::SourceInterpolation::CubicAlpha {
             method: ternary_contours::CubicAlphaMethod::Akima,
             continuation: ternary_contours::BinaryExtrapolation::RawBarycentric,
         };
         state.recalculate_interpolation_results(&editor, &options);
         assert_eq!(
-            state.results[0].source_interpolation,
-            options.source_interpolation
+            state.results[0].interpolation.source,
+            options.interpolation.source
         );
         state.select_field(&editor, 1);
         state.recalculate_interpolation_results(&editor, &options);
@@ -1522,7 +1525,7 @@ mod tests {
             .map(|result| (result.id, result.composition))
             .collect::<Vec<_>>();
         let mut changed = options;
-        changed.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+        changed.interpolation.source = crate::SourceInterpolation::CubicAlpha {
             method: ternary_contours::CubicAlphaMethod::Makima,
             continuation: ternary_contours::BinaryExtrapolation::Kohler,
         };
@@ -1540,7 +1543,7 @@ mod tests {
             state
                 .results
                 .iter()
-                .all(|result| result.source_interpolation == changed.source_interpolation)
+                .all(|result| result.interpolation.source == changed.interpolation.source)
         );
         assert!(state.results.iter().all(|result| !result.stale));
     }
@@ -1555,7 +1558,7 @@ mod tests {
         state.register_interpolation_query(&editor, &linear, [0.2, 0.3, 0.5]);
         let before = state.results[0].clone();
         let mut unavailable = linear;
-        unavailable.source_interpolation = crate::SourceInterpolation::CubicAlpha {
+        unavailable.interpolation.source = crate::SourceInterpolation::CubicAlpha {
             method: ternary_contours::CubicAlphaMethod::Akima,
             continuation: ternary_contours::BinaryExtrapolation::Muggianu,
         };

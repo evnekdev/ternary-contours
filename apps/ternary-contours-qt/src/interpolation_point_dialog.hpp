@@ -11,6 +11,8 @@ class QGroupBox;
 class QLineEdit;
 class QLabel;
 class QPushButton;
+class QObject;
+class QEvent;
 
 namespace Ui { class InterpolationPointDialog; }
 
@@ -26,6 +28,9 @@ public:
 
     [[nodiscard]] TcqtLocatedPoint acceptedLocation() const;
     [[nodiscard]] bool coordinatesSynchronized() const;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 signals:
     /// Emitted only after Rust has successfully normalized, transformed, and

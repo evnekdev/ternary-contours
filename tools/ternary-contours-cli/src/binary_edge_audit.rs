@@ -205,7 +205,7 @@ pub fn audit_cao_pbo_zno_binary_edges(
     dataset: &TabulatedTernaryDataset,
     options: &ProjectionOptions,
 ) -> Result<BinaryEdgeAuditReport, String> {
-    if options.source_interpolation != SourceInterpolation::Linear {
+    if options.interpolation.source != SourceInterpolation::Linear {
         return Err(
             "binary-edge audit currently supports exact Linear source interpolation only".into(),
         );
@@ -518,13 +518,19 @@ fn format_value(value: Option<f64>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse_str;
+    use crate::{InterpolationOptions, parse_str};
 
     #[test]
     fn cao_pbo_zno_raw_edge_intervals_and_linear_roots_are_exact() {
         let dataset = parse_str(include_str!("../../../calculations/CaO-PbO-ZnO.tct")).unwrap();
-        let report =
-            audit_cao_pbo_zno_binary_edges(&dataset, &ProjectionOptions::default()).unwrap();
+        let options = ProjectionOptions {
+            interpolation: InterpolationOptions {
+                source: SourceInterpolation::Linear,
+                ..InterpolationOptions::default()
+            },
+            ..ProjectionOptions::default()
+        };
+        let report = audit_cao_pbo_zno_binary_edges(&dataset, &options).unwrap();
         assert_eq!(report.edges.len(), 3);
         let sign_changes = report
             .edges

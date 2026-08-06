@@ -230,8 +230,18 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
         destination->setAccessibleDescription(tr("Path for the Rust-owned deterministic numerical trace output."));
         level->setAccessibleName(tr("Numerical trace level"));
         level->setAccessibleDescription(tr("Developer-only trace detail. It does not alter numerical options or document state."));
+        const auto model = viewer_.options.source_interpolation == abi_source_linear
+            ? tr("Linear")
+            : tr("Cubic alpha / %1 / %2 / %3")
+                  .arg(ui_->comboViewerCubicMethod->currentText(),
+                       ui_->comboViewerContinuation->currentText(),
+                       ui_->comboViewerPartialDomain->currentText());
+        auto* model_summary = new QLabel(tr("Calculation model: %1").arg(model), &dialog);
+        model_summary->setWordWrap(true);
+        model_summary->setAccessibleName(tr("Calculation interpolation model"));
         layout->addRow(tr("Numerical trace"), level);
         layout->addRow(tr("Trace destination"), destination);
+        layout->addRow(model_summary);
         auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
         layout->addRow(buttons);
         connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
@@ -240,7 +250,8 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
         const auto encoded = destination->text().toUtf8();
         const auto result = tcqt_set_numerical_trace(level->currentData().toUInt(), encoded.constData());
         reportBridgeStatus(statusText(result), result.success);
-    });    connect(ui_->actionGridAddRegular, &QAction::triggered, this, [this] { addGrid(true); });
+    });
+    connect(ui_->actionGridAddRegular, &QAction::triggered, this, [this] { addGrid(true); });
     connect(ui_->actionGridAddIrregular, &QAction::triggered, this, [this] { addGrid(false); });
     connect(ui_->actionGridRemove, &QAction::triggered, this, &MainWindow::removeSelectedGrid);
     connect(ui_->actionGridDuplicate, &QAction::triggered, this, &MainWindow::duplicateSelectedGrid);
@@ -364,6 +375,7 @@ void MainWindow::rebuildFromRust(std::uint32_t preferred_grid) {
     }
     ui_->canvasTernary->setSourceVertices(vertices);
     refreshViewerFieldSelectors();
+    ensureViewerGridInterpolationCompatibility();
     refreshViewerVertices();
     refreshViewerQueries();
     if (viewer_.has_last_valid_projection) viewer_.projection_is_stale = true;
@@ -704,7 +716,9 @@ void MainWindow::exportSvg() {
 void MainWindow::exportLinesCsv() {
     const auto path = QFileDialog::getSaveFileName(this, tr("Export contour lines CSV"), {}, tr("CSV files (*.csv)"));
     if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_lines_csv(encoded.constData()); reportBridgeStatus(statusText(result), result.success);
-}void MainWindow::addGrid(bool regular) {
+}
+
+void MainWindow::addGrid(bool regular) {
     QDialog dialog(this);
     Ui::AddGridDialog form;
     form.setupUi(&dialog);
@@ -783,7 +797,9 @@ void MainWindow::exportLinesCsv() {
         ui_->canvasTernary->setQueries({});
         rebuildFromRust();
     }
-}void MainWindow::removeSelectedGrid() {
+}
+
+void MainWindow::removeSelectedGrid() {
     const auto index = ui_->treeProject->currentIndex(); if (!isGridNode(static_cast<NodeKind>(index.data(node_kind_role).toInt()))) return;
     if (QMessageBox::question(this, tr("Remove grid"), tr("Remove the selected grid and its values?")) != QMessageBox::Yes) return;
     const auto result = tcqt_remove_grid(index.data(grid_id_role).toUInt()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust();
@@ -797,7 +813,9 @@ void MainWindow::renameSelectedGrid() {
     TcqtGrid grid{}; tcqt_grid_at(index.data(grid_id_role).toUInt(), &grid);
     bool accepted = false; const auto name = QInputDialog::getText(this, tr("Rename grid"), tr("Grid name:"), QLineEdit::Normal, text(grid.name), &accepted); if (!accepted) return;
     const auto encoded = name.toUtf8(); const auto result = tcqt_rename_grid(index.data(grid_id_role).toUInt(), encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
-}void MainWindow::addPhase() {
+}
+
+void MainWindow::addPhase() {
     bool accepted = false; const auto name = QInputDialog::getText(this, tr("Add phase"), tr("Phase name:"), QLineEdit::Normal, {}, &accepted); if (!accepted) return;
     const auto encoded = name.toUtf8(); const auto result = tcqt_add_phase(encoded.constData()); reportBridgeStatus(statusText(result), result.success); if (result.success) rebuildFromRust(selected_grid_);
 }
@@ -1344,7 +1362,9 @@ void MainWindow::runRustCalculation() {
     watcher->setFuture(QtConcurrent::run([options = state.options, revision, options_revision, generation] {
         return tcqt_calculate_viewer(&options, revision, options_revision, generation);
     }));
-}void MainWindow::updateComposition(double a, double b, double c) { ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4)); }
+}
+
+void MainWindow::updateComposition(double a, double b, double c) { ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4)); }
 
 void MainWindow::refreshViewerFieldSelectors() {
     TcqtProjectSummary summary{};
@@ -1489,7 +1509,7 @@ void MainWindow::refreshViewerQueries() {
     for (auto& query : viewer_.queries) {
         const auto property = viewer_.property.toUtf8();
         TcqtInspectionResult result{};
-        const auto status = tcqt_evaluate_field(viewer_.grid_index, viewer_.phase_id, property.constData(), &viewer_.options, query.a, query.b, query.c, query.id, &result);
+        const auto status = tcqt_evaluate_field_current(viewer_.grid_index, viewer_.phase_id, property.constData(), viewer_.options_revision, query.a, query.b, query.c, query.id, &result);
         if (status.success) { query.grid_index = viewer_.grid_index; query.phase_id = viewer_.phase_id; query.property = viewer_.property; query.result = result; }
         QList<QStandardItem*> row;
         row << new QStandardItem(QString::number(query.id)) << new QStandardItem(QLocale::c().toString(query.a, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.b, 'g', 10)) << new QStandardItem(QLocale::c().toString(query.c, 'g', 10));
@@ -1529,9 +1549,12 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     if (synchronizing_) return;
     bool schedule_calculation = false;
     switch (action) {
-    case ViewerWidgetCommand::SelectGrid:
+    case ViewerWidgetCommand::SelectGrid: {
         viewer_.grid_index = ui_->comboViewerGrid->currentData().toUInt(); viewer_.phase_id = 0; viewer_.property.clear(); viewer_.selected_rows.clear();
-        refreshViewerFieldSelectors(); refreshViewerVertices(); refreshViewerQueries(); break;
+        refreshViewerFieldSelectors(); refreshViewerVertices(); refreshViewerQueries();
+        schedule_calculation = ensureViewerGridInterpolationCompatibility();
+        break;
+    }
     case ViewerWidgetCommand::SelectPhase:
         viewer_.phase_id = ui_->comboViewerPhase->currentData().toUInt(); viewer_.property.clear(); viewer_.selected_rows.clear();
         refreshViewerFieldSelectors(); refreshViewerVertices(); refreshViewerQueries(); break;
@@ -1611,7 +1634,7 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
     if (source == ViewerWidgetCommand::CommitIsoStep && !finite_positive(ui_->editViewerStep, &viewer_.options.level_step, tr("Step"))) return false;
     if (source == ViewerWidgetCommand::SetRegularizationSpacing && !finite_positive(ui_->editViewerRegularizationSpacing, &viewer_.options.regularization_spacing, tr("Regularization spacing"))) return false;
     if (source == ViewerWidgetCommand::CommitIsoMinimum || source == ViewerWidgetCommand::CommitIsoMaximum || source == ViewerWidgetCommand::CommitIsoStep) viewer_.options.automatic_range = false;
-    const auto source_interpolation = sourceInterpolationAbi(ui_->comboViewerSourceInterpolation->currentIndex());
+    auto source_interpolation = sourceInterpolationAbi(ui_->comboViewerSourceInterpolation->currentIndex());
     const auto cubic_method = cubicMethodAbi(ui_->comboViewerCubicMethod->currentIndex());
     const auto partial_domain = partialDomainAbi(ui_->comboViewerPartialDomain->currentIndex());
     const auto continuation = continuationAbi(ui_->comboViewerContinuation->currentIndex());
@@ -1621,11 +1644,13 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
         return false;
     }
     TcqtGrid selected_grid{};
-    if (source_interpolation == 1
+    if (source_interpolation == abi_source_cubic_alpha
         && tcqt_grid_at(viewer_.grid_index, &selected_grid).success
         && selected_grid.kind != 0) {
-        reportBridgeStatus(tr("Cubic alpha is unavailable for irregular grids. Select Linear source interpolation."), false);
-        return false;
+        source_interpolation = abi_source_linear;
+        const QSignalBlocker blocker(ui_->comboViewerSourceInterpolation);
+        ui_->comboViewerSourceInterpolation->setCurrentIndex(sourceInterpolationIndex(source_interpolation));
+        reportBridgeStatus(tr("Irregular grids use Linear source interpolation."), true);
     }
     viewer_.options.sampling_subdivisions = static_cast<std::uint32_t>(ui_->spinViewerSamplingSubdivisions->value());
     viewer_.options.source_interpolation = source_interpolation;
@@ -1643,6 +1668,32 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
     }
     viewer_.options = authoritative.options;
     viewer_.options_revision = authoritative.options_revision;
+    return true;
+}
+
+bool MainWindow::ensureViewerGridInterpolationCompatibility() {
+    TcqtGrid grid{};
+    if (!tcqt_grid_at(viewer_.grid_index, &grid).success
+        || grid.kind == 0
+        || viewer_.options.source_interpolation == abi_source_linear) {
+        return false;
+    }
+    auto effective = viewer_.options;
+    effective.source_interpolation = abi_source_linear;
+    const auto stored = tcqt_set_viewer_calculation_options(&effective);
+    if (!stored.success) {
+        reportBridgeStatus(statusText(stored), false);
+        return false;
+    }
+    TcqtViewerCalculationState authoritative{};
+    const auto current = tcqt_viewer_calculation_state(&authoritative);
+    if (!current.success) {
+        reportBridgeStatus(statusText(current), false);
+        return false;
+    }
+    viewer_.options = authoritative.options;
+    viewer_.options_revision = authoritative.options_revision;
+    reportBridgeStatus(tr("Irregular grids use Linear source interpolation."), true);
     return true;
 }
 
@@ -1698,7 +1749,8 @@ void MainWindow::updateViewerActionState() {
         ? tr("Automatic mesh extrapolation is currently available for regular grids only.")
         : viewer_.interaction_mode != 0
             ? tr("Return to Vertex mode to extrapolate source vertices.")
-            : has_eligible_missing ? QString() : tr("The selected field contains no eligible missing values."));    ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
+            : has_eligible_missing ? QString() : tr("The selected field contains no eligible missing values."));
+    ui_->comboViewerGrid->setEnabled(summary.grid_count > 0);
     ui_->comboViewerPhase->setEnabled(field_available); ui_->comboViewerProperty->setEnabled(field_available); ui_->comboViewerMode->setEnabled(field_available);
     for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerCalculated), static_cast<QWidget*>(ui_->checkViewerExtrapolated), static_cast<QWidget*>(ui_->checkViewerCutOff), static_cast<QWidget*>(ui_->checkViewerMissing), static_cast<QWidget*>(ui_->checkViewerRegularGridEdges), static_cast<QWidget*>(ui_->spinViewerMarkerSize), static_cast<QWidget*>(ui_->comboViewerLabelMode), static_cast<QWidget*>(ui_->spinViewerLabelDecimals), static_cast<QWidget*>(ui_->checkViewerLabelsSelectedOnly)}) control->setEnabled(field_available);
     ui_->actionViewSourceVertices->setEnabled(field_available); ui_->actionViewSourceVertices->setToolTip(field_available ? QString() : tr("Select a grid field first."));
@@ -1749,7 +1801,7 @@ void MainWindow::updateViewerSelectionDetails() {
     const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 4 ? tr("Extrapolated") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
     const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("-");
     const auto note = text(cell.note);
-    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) · %7\nState: %8\nValue: %9\nNote: %10")
+    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
         .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
         .arg(ui_->comboViewerPhase->currentText()).arg(viewer_.phase_id).arg(viewer_.property).arg(state, value, note));
 }

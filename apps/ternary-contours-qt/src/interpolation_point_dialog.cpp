@@ -4,6 +4,8 @@
 
 #include <QAbstractButton>
 #include <QDialogButtonBox>
+#include <QEvent>
+#include <QKeyEvent>
 #include <QGroupBox>
 #include <QLabel>
 #include <QLocale>
@@ -11,7 +13,9 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 constexpr double coordinate_tolerance = 1.0e-12;
@@ -20,13 +24,34 @@ QString bridgeMessage(const TcqtStatus& status) {
     return QString::fromUtf8(status.message);
 }
 
+constexpr int display_decimals = 4;
+constexpr double display_scale = 10000.0;
+
 QString number(double value) {
-    return QLocale::c().toString(value, 'g', 17);
+    return QLocale::c().toString(value, 'f', display_decimals);
+}
+
+std::array<double, 3> displayedNormalizedTriplet(const std::array<double, 3>& values) {
+    std::array<long long, 3> quantized{};
+    int largest = 0;
+    for (int index = 0; index < 3; ++index) {
+        quantized[index] = std::llround(values[index] * display_scale);
+        if (values[index] > values[largest]) largest = index;
+    }
+    const auto residual = static_cast<long long>(display_scale)
+        - quantized[0] - quantized[1] - quantized[2];
+    quantized[largest] += residual;
+    Q_ASSERT(quantized[largest] >= 0);
+    return {
+        static_cast<double>(quantized[0]) / display_scale,
+        static_cast<double>(quantized[1]) / display_scale,
+        static_cast<double>(quantized[2]) / display_scale,
+    };
 }
 
 QString sumText(double sum, bool normalized) {
-    return normalized ? QStringLiteral("Σ = 1")
-                      : QStringLiteral("Σ = %1 — Not normalized").arg(number(sum));
+    return normalized ? QString::fromUtf8("\xCE\xA3 = 1.0000")
+                      : QString::fromUtf8("\xCE\xA3 = %1 \xE2\x80\x94 Not normalized").arg(number(sum));
 }
 }
 
@@ -52,12 +77,12 @@ InterpolationPointDialog::InterpolationPointDialog(
     for (auto* editor : globalEditors()) {
         connect(editor, &QLineEdit::textChanged, this, [this] { markGlobalEdited(); });
         connect(editor, &QLineEdit::editingFinished, this, &InterpolationPointDialog::validateGlobalOnFocusLoss);
-        connect(editor, &QLineEdit::returnPressed, this, &InterpolationPointDialog::normalizeGlobalFromEditors);
+        editor->installEventFilter(this);
     }
     for (auto* editor : localEditors()) {
         connect(editor, &QLineEdit::textChanged, this, [this] { markLocalEdited(); });
         connect(editor, &QLineEdit::editingFinished, this, &InterpolationPointDialog::validateLocalOnFocusLoss);
-        connect(editor, &QLineEdit::returnPressed, this, &InterpolationPointDialog::normalizeLocalFromEditors);
+        editor->installEventFilter(this);
     }
 
     setLocation(initial_location, false);
@@ -72,6 +97,24 @@ bool InterpolationPointDialog::coordinatesSynchronized() const {
         && local_state_ == CoordinateTripletState::Synchronized;
 }
 
+bool InterpolationPointDialog::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::KeyPress) {
+        const auto* key_event = static_cast<QKeyEvent*>(event);
+        if (key_event->key() == Qt::Key_Return || key_event->key() == Qt::Key_Enter) {
+            const auto globals = globalEditors();
+            const auto locals = localEditors();
+            if (std::find(globals.cbegin(), globals.cend(), watched) != globals.cend()) {
+                normalizeGlobalFromEditors();
+                return true;
+            }
+            if (std::find(locals.cbegin(), locals.cend(), watched) != locals.cend()) {
+                normalizeLocalFromEditors();
+                return true;
+            }
+        }
+    }
+    return QDialog::eventFilter(watched, event);
+}
 std::array<QLineEdit*, 3> InterpolationPointDialog::globalEditors() const {
     return {ui_->editGlobalA, ui_->editGlobalB, ui_->editGlobalC};
 }
@@ -126,7 +169,7 @@ void InterpolationPointDialog::updateTripletFeedback(bool global, bool valid, do
         editor->setStyleSheet(!valid || !normalized ? QStringLiteral("background: #fff1d6;") : QString());
     }
     auto* sum_label = global ? ui_->labelGlobalSumValue : ui_->labelLocalSumValue;
-    sum_label->setText(valid ? sumText(sum, normalized) : QStringLiteral("Σ = —"));
+    sum_label->setText(valid ? sumText(sum, normalized) : QString::fromUtf8("\xCE\xA3 = \xE2\x80\x94"));
     sum_label->setAccessibleDescription(valid ? sum_label->text() : message);
     setStatus(message, !valid || !normalized);
 }
@@ -140,8 +183,8 @@ void InterpolationPointDialog::clearFeedback() {
         editor->setProperty("coordinateWarning", false);
         editor->setStyleSheet(QString());
     }
-    ui_->labelGlobalSumValue->setText(QStringLiteral("Σ = 1"));
-    ui_->labelLocalSumValue->setText(QStringLiteral("Σ = 1"));
+    ui_->labelGlobalSumValue->setText(sumText(1.0, true));
+    ui_->labelLocalSumValue->setText(sumText(1.0, true));
     setStatus(tr("Coordinates are synchronized."), false);
 }
 
@@ -253,8 +296,8 @@ void InterpolationPointDialog::setLocation(const TcqtLocatedPoint& location, boo
     location_ = location;
     const auto globals = globalEditors();
     const auto locals = localEditors();
-    const std::array<double, 3> global_values{location.a, location.b, location.c};
-    const std::array<double, 3> local_values{location.lambda0, location.lambda1, location.lambda2};
+    const auto global_values = displayedNormalizedTriplet({location.a, location.b, location.c});
+    const auto local_values = displayedNormalizedTriplet({location.lambda0, location.lambda1, location.lambda2});
     for (int index = 0; index < 3; ++index) {
         const QSignalBlocker global_blocker(globals[index]);
         const QSignalBlocker local_blocker(locals[index]);
@@ -285,7 +328,7 @@ void InterpolationPointDialog::updateTriangleDetails() {
         } else {
             labels[index]->setText(tr("Source row %1 is unavailable").arg(row_number));
         }
-        lambda_labels[index]->setText(tr("λ%1 — row %2").arg(index).arg(row_number));
+        lambda_labels[index]->setText(QString::fromUtf8("\xCE\xBB%1 \xE2\x80\x94 row %2").arg(index).arg(row_number));
         lambda_labels[index]->setToolTip(labels[index]->text());
     }
 }

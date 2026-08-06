@@ -2365,6 +2365,27 @@ mod tests {
         assert!(window.contains("viewer_.queries.append(query);"));
     }
     #[test]
+    fn coordinate_dialog_uses_fixed_display_precision_and_consumes_enter() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/ternary-contours-qt");
+        let dialog =
+            std::fs::read_to_string(root.join("src/interpolation_point_dialog.cpp")).unwrap();
+        let header =
+            std::fs::read_to_string(root.join("src/interpolation_point_dialog.hpp")).unwrap();
+        let bridge = std::fs::read_to_string(root.join("rust-bridge/src/lib.rs")).unwrap();
+        let window = std::fs::read_to_string(root.join("src/main_window.cpp")).unwrap();
+
+        assert!(dialog.contains("toString(value, 'f', display_decimals)"));
+        assert!(dialog.contains("displayedNormalizedTriplet"));
+        assert!(dialog.contains("Qt::Key_Return || key_event->key() == Qt::Key_Enter"));
+        assert!(dialog.contains("editor->installEventFilter(this)"));
+        assert!(!dialog.contains("&QLineEdit::returnPressed"));
+        assert!(header.contains("bool eventFilter(QObject* watched, QEvent* event) override"));
+        assert!(bridge.contains("tcqt_evaluate_field_current"));
+        assert!(window.contains("tcqt_evaluate_field_current"));
+    }
+
+    #[test]
     fn designer_viewer_uses_the_required_split_pane_hierarchy() {
         for object_name in [
             "splitterViewerOuter",

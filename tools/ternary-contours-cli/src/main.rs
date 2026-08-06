@@ -585,7 +585,10 @@ fn audit_binary_edges(args: AuditBinaryEdgesArgs) -> Result<(), Box<dyn Error>> 
     let report = audit_cao_pbo_zno_binary_edges(
         &dataset,
         &ProjectionOptions {
-            source_interpolation,
+            interpolation: ternary_contours_cli::InterpolationOptions {
+                source: source_interpolation,
+                ..ternary_contours_cli::InterpolationOptions::default()
+            },
             ..ProjectionOptions::default()
         },
     )?;
@@ -593,7 +596,10 @@ fn audit_binary_edges(args: AuditBinaryEdgesArgs) -> Result<(), Box<dyn Error>> 
         automatic_level_step: Some(100.0),
         sampling_subdivisions: Some(20),
         regularize: true,
-        source_interpolation,
+        interpolation: ternary_contours_cli::InterpolationOptions {
+            source: source_interpolation,
+            ..ternary_contours_cli::InterpolationOptions::default()
+        },
         ..ProjectionOptions::default()
     };
     let scanner_projection = calculate_projection(&dataset, &scanner_options)?;
@@ -777,16 +783,18 @@ fn trace_projection_options(
         sampling_subdivisions: args.sampling_subdivisions,
         regularize: args.regularize,
         regularization_spacing: args.regularization_spacing,
-        source_interpolation: match args.source_interpolation {
-            SourceInterpolationArg::Linear => ternary_contours_cli::SourceInterpolation::Linear,
-            SourceInterpolationArg::CubicAlpha => {
-                ternary_contours_cli::SourceInterpolation::CubicAlpha {
-                    method: args.cubic_method.into(),
-                    continuation: args.continuation.into(),
+        interpolation: ternary_contours_cli::InterpolationOptions {
+            source: match args.source_interpolation {
+                SourceInterpolationArg::Linear => ternary_contours_cli::SourceInterpolation::Linear,
+                SourceInterpolationArg::CubicAlpha => {
+                    ternary_contours_cli::SourceInterpolation::CubicAlpha {
+                        method: args.cubic_method.into(),
+                        continuation: args.continuation.into(),
+                    }
                 }
-            }
+            },
+            partial_domain_policy: args.partial_domain_policy.into(),
         },
-        partial_domain_policy: args.partial_domain_policy.into(),
         ..ProjectionOptions::default()
     };
     if let (Some(minimum), Some(maximum)) = (args.tmin, args.tmax) {

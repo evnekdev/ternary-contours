@@ -1154,8 +1154,12 @@ impl LiquidusViewerApp {
         }
     }
     fn show_grid_inspection(&mut self, ctx: &egui::Context) {
-        let source_before = self.state.calculation_options.source_interpolation;
-        let fallback_before = self.state.calculation_options.partial_domain_policy;
+        let source_before = self.state.calculation_options.interpolation.source;
+        let fallback_before = self
+            .state
+            .calculation_options
+            .interpolation
+            .partial_domain_policy;
         let action = {
             let (editor, grid_ui, options) = (
                 &mut self.editor,
@@ -1215,8 +1219,13 @@ impl LiquidusViewerApp {
                 });
             }
         });
-        if source_before != self.state.calculation_options.source_interpolation
-            || fallback_before != self.state.calculation_options.partial_domain_policy
+        if source_before != self.state.calculation_options.interpolation.source
+            || fallback_before
+                != self
+                    .state
+                    .calculation_options
+                    .interpolation
+                    .partial_domain_policy
         {
             self.dispatch_contract(
                 ctx,
@@ -1246,7 +1255,7 @@ impl LiquidusViewerApp {
             ui.label(format!(
                 "Sampling grid: n = {sampling} ({sampling_points} evaluation vertices)"
             ));
-            match self.state.calculation_options.source_interpolation {
+            match self.state.calculation_options.interpolation.source {
                 SourceInterpolation::Linear => {
                     ui.label("Source interpolation: Linear (piecewise planar)");
                     ui.small("Cubic model: not selected.");
@@ -1260,7 +1269,10 @@ impl LiquidusViewerApp {
                     ));
                     ui.small(format!(
                         "Partial-domain cubic fallback: {:?}. Undefined samples remain local.",
-                        self.state.calculation_options.partial_domain_policy
+                        self.state
+                            .calculation_options
+                            .interpolation
+                            .partial_domain_policy
                     ));
                     if let Some(projection) = self.state.raw_projection.as_ref() {
                         for summary in &projection.diagnostics.partial_cubic_summaries {

@@ -38,25 +38,49 @@ pub enum SourceInterpolation {
     },
 }
 
-impl SourceInterpolation {
+/// Canonical source-field interpolation model shared by inspection, projection
+/// construction, topology tracing, regularization, and numerical tracing.
+///
+/// This is intentionally independent of the surrounding projection options so
+/// that every caller can retain one immutable interpolation snapshot. Its
+/// `Default` implementation is the only regular-grid default in the product.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InterpolationOptions {
+    pub source: SourceInterpolation,
+    pub partial_domain_policy: CubicPartialDomainPolicy,
+}
+
+impl Default for InterpolationOptions {
+    fn default() -> Self {
+        Self {
+            source: SourceInterpolation::CubicAlpha {
+                method: CubicAlphaMethod::Akima,
+                continuation: BinaryExtrapolation::Muggianu,
+            },
+            partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+        }
+    }
+}
+
+impl InterpolationOptions {
     pub const fn cubic_options(self) -> Option<CubicAlphaBuildOptions> {
-        match self {
-            Self::Linear => None,
-            Self::CubicAlpha {
+        match self.source {
+            SourceInterpolation::Linear => None,
+            SourceInterpolation::CubicAlpha {
                 method,
                 continuation,
             } => Some(CubicAlphaBuildOptions {
                 method,
                 boundary_policy: CubicBoundaryPolicy::LinearFallback,
                 extrapolation: continuation,
-                partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+                partial_domain_policy: self.partial_domain_policy,
             }),
         }
     }
 }
 
 /// Controls for a stable liquidus calculation.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ProjectionOptions {
     pub levels: Vec<f64>,
     /// When present, derive levels from stable topology: the lowest finite
@@ -66,10 +90,20 @@ pub struct ProjectionOptions {
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
     pub regularization_spacing: Option<f64>,
-    pub source_interpolation: SourceInterpolation,
-    /// Policy used when cubic-alpha source fields contain classified undefined
-    /// samples. The viewer defaults to one-sided cubic followed by linear.
-    pub partial_domain_policy: CubicPartialDomainPolicy,
+    pub interpolation: InterpolationOptions,
+}
+
+impl Default for ProjectionOptions {
+    fn default() -> Self {
+        Self {
+            levels: Vec::new(),
+            automatic_level_step: None,
+            sampling_subdivisions: None,
+            regularize: false,
+            regularization_spacing: None,
+            interpolation: InterpolationOptions::default(),
+        }
+    }
 }
 
 /// Authoritative range used by automatic Viewer isotherms.
@@ -458,7 +492,7 @@ pub(crate) fn calculate_projection_with_trace_session(
                 .find(|phase| phase.id == field.phase_id)
                 .map(|phase| phase.name.clone())
                 .unwrap_or_else(|| format!("Phase {}", field.phase_id.0));
-            let source = match (options.source_interpolation, grid) {
+            let source = match (options.interpolation.source, grid) {
                 (SourceInterpolation::Linear, TabulatedGrid::Regular(grid)) => {
                     PhaseSourceModel::Evaluator(RuntimePhase {
                         field: RuntimeField::Regular {
@@ -488,7 +522,8 @@ pub(crate) fn calculate_projection_with_trace_session(
                         .iter()
                         .map(TabulatedValue::defined_value)
                         .collect::<Vec<_>>();
-                    if options.partial_domain_policy == CubicPartialDomainPolicy::Strict
+                    if options.interpolation.partial_domain_policy
+                        == CubicPartialDomainPolicy::Strict
                         && values.iter().any(Option::is_none)
                     {
                         return Err(ProjectionError::CubicSourceIncomplete {
@@ -522,11 +557,10 @@ pub(crate) fn calculate_projection_with_trace_session(
                                         property: field.property.clone(),
                                         message: error.to_string(),
                                     })?;
-                            let mut cubic_options = options
-                                .source_interpolation
+                            let cubic_options = options
+                                .interpolation
                                 .cubic_options()
                                 .expect("cubic source model carries cubic options");
-                            cubic_options.partial_domain_policy = options.partial_domain_policy;
                             let preview =
                                 PartialCubicGridField::new(partial.clone(), cubic_options)
                                     .map_err(|error| ProjectionError::CubicSourceConstruction {
@@ -604,11 +638,10 @@ pub(crate) fn calculate_projection_with_trace_session(
             let source = match model {
                 PhaseSourceModel::Evaluator(evaluator) => StableScalarSource::evaluator(evaluator),
                 PhaseSourceModel::CubicRegular(field) => {
-                    let mut cubic_options = options
-                        .source_interpolation
+                    let cubic_options = options
+                        .interpolation
                         .cubic_options()
                         .expect("cubic source model carries cubic options");
-                    cubic_options.partial_domain_policy = options.partial_domain_policy;
                     StableScalarSource::regular(
                         field,
                         FieldInterpolation::CubicAlpha(cubic_options),
@@ -616,11 +649,10 @@ pub(crate) fn calculate_projection_with_trace_session(
                 }
                 #[cfg(feature = "inspection")]
                 PhaseSourceModel::CubicPartial(field) => {
-                    let mut cubic_options = options
-                        .source_interpolation
+                    let cubic_options = options
+                        .interpolation
                         .cubic_options()
                         .expect("cubic source model carries cubic options");
-                    cubic_options.partial_domain_policy = options.partial_domain_policy;
                     StableScalarSource::partial_regular(
                         field,
                         FieldInterpolation::CubicAlpha(cubic_options),
@@ -783,9 +815,9 @@ fn trace_run_started(
             .map(|property| property.unit.clone())
             .unwrap_or_default(),
         sampling_subdivisions: options.sampling_subdivisions,
-        interpolation: format!("{:?}", options.source_interpolation),
-        partial_domain_policy: format!("{:?}", options.partial_domain_policy),
-        continuation: match options.source_interpolation {
+        interpolation: format!("{:?}", options.interpolation.source),
+        partial_domain_policy: format!("{:?}", options.interpolation.partial_domain_policy),
+        continuation: match options.interpolation.source {
             SourceInterpolation::Linear => "not_applicable".into(),
             SourceInterpolation::CubicAlpha { continuation, .. } => format!("{continuation:?}"),
         },
@@ -947,13 +979,37 @@ fn parse_level(value: &str) -> Result<f64, ProjectionError> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn canonical_regular_interpolation_default_is_cubic_akima_muggianu_with_local_fallback() {
+        let interpolation = InterpolationOptions::default();
+        assert!(matches!(
+            interpolation.source,
+            SourceInterpolation::CubicAlpha {
+                method: CubicAlphaMethod::Akima,
+                continuation: BinaryExtrapolation::Muggianu,
+            }
+        ));
+        assert_eq!(
+            interpolation.partial_domain_policy,
+            CubicPartialDomainPolicy::OneSidedThenLinear
+        );
+        assert_eq!(ProjectionOptions::default().interpolation, interpolation);
+    }
+
     use super::*;
     use crate::parse_str;
 
     #[test]
     fn partial_phase_domains_are_supported_without_global_rejection() {
         let dataset = parse_str(include_str!("../fixtures/partial-phase-domain.tct")).unwrap();
-        let projection = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        let options = ProjectionOptions {
+            interpolation: InterpolationOptions {
+                source: SourceInterpolation::Linear,
+                ..InterpolationOptions::default()
+            },
+            ..ProjectionOptions::default()
+        };
+        let projection = calculate_projection(&dataset, &options).unwrap();
         assert_eq!(projection.input_summary.phase_count, 2);
         assert!(projection.input_summary.temperature_range[0].is_finite());
     }
@@ -989,9 +1045,12 @@ mod tests {
         let projection = calculate_projection(
             &dataset,
             &ProjectionOptions {
-                source_interpolation: SourceInterpolation::CubicAlpha {
-                    method: CubicAlphaMethod::Makima,
-                    continuation: BinaryExtrapolation::Kohler,
+                interpolation: InterpolationOptions {
+                    source: SourceInterpolation::CubicAlpha {
+                        method: CubicAlphaMethod::Makima,
+                        continuation: BinaryExtrapolation::Kohler,
+                    },
+                    ..InterpolationOptions::default()
                 },
                 ..ProjectionOptions::default()
             },
@@ -1027,11 +1086,13 @@ mod tests {
                         &ProjectionOptions {
                             automatic_level_step: Some(10.0),
                             sampling_subdivisions: Some(12),
-                            source_interpolation: SourceInterpolation::CubicAlpha {
-                                method,
-                                continuation,
+                            interpolation: InterpolationOptions {
+                                source: SourceInterpolation::CubicAlpha {
+                                    method,
+                                    continuation,
+                                },
+                                partial_domain_policy,
                             },
-                            partial_domain_policy,
                             ..ProjectionOptions::default()
                         },
                     )
@@ -1063,9 +1124,12 @@ mod tests {
         let projection = calculate_projection(
             &dataset,
             &ProjectionOptions {
-                source_interpolation: SourceInterpolation::CubicAlpha {
-                    method: CubicAlphaMethod::Akima,
-                    continuation: BinaryExtrapolation::Muggianu,
+                interpolation: InterpolationOptions {
+                    source: SourceInterpolation::CubicAlpha {
+                        method: CubicAlphaMethod::Akima,
+                        continuation: BinaryExtrapolation::Muggianu,
+                    },
+                    ..InterpolationOptions::default()
                 },
                 ..ProjectionOptions::default()
             },
@@ -1090,11 +1154,13 @@ mod tests {
         let error = calculate_projection(
             &dataset,
             &ProjectionOptions {
-                source_interpolation: SourceInterpolation::CubicAlpha {
-                    method: CubicAlphaMethod::Akima,
-                    continuation: BinaryExtrapolation::Muggianu,
+                interpolation: InterpolationOptions {
+                    source: SourceInterpolation::CubicAlpha {
+                        method: CubicAlphaMethod::Akima,
+                        continuation: BinaryExtrapolation::Muggianu,
+                    },
+                    partial_domain_policy: CubicPartialDomainPolicy::Strict,
                 },
-                partial_domain_policy: CubicPartialDomainPolicy::Strict,
                 ..ProjectionOptions::default()
             },
         )
@@ -1160,6 +1226,9 @@ mod tests {
         assert_eq!(started.dataset_revision, Some(7));
         assert_eq!(started.options_revision, Some(11));
         assert_eq!(started.request_id, Some(13));
+        assert!(started.interpolation.contains("CubicAlpha"));
+        assert_eq!(started.partial_domain_policy, "OneSidedThenLinear");
+        assert_eq!(started.continuation, "Muggianu");
     }
 
     #[test]
@@ -1169,7 +1238,10 @@ mod tests {
             automatic_level_step: Some(100.0),
             sampling_subdivisions: Some(20),
             regularize: true,
-            partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+            interpolation: InterpolationOptions {
+                partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+                ..InterpolationOptions::default()
+            },
             ..ProjectionOptions::default()
         };
         let projection = calculate_projection(&dataset, &options).unwrap();

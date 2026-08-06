@@ -31,7 +31,7 @@ struct TcqtInspectionResult {
     bool has_contributions; double linear_part; double excess_part;
     bool has_source_rows; std::uint32_t source_row0; std::uint32_t source_row1; std::uint32_t source_row2;
     std::uint32_t local_mode; bool uses_extrapolated_sources; std::uint32_t maximum_extrapolation_layer;
-    char extrapolation_methods[128]; std::uint32_t extrapolated_source_row_count; char unit[128]; char message[512];
+    char extrapolation_methods[128]; std::uint32_t extrapolated_source_row_count; std::uint64_t options_revision; std::uint32_t effective_source_interpolation; std::uint32_t effective_cubic_method; std::uint32_t effective_partial_domain_policy; std::uint32_t effective_continuation; char unit[128]; char message[512];
 };
 struct TcqtLocatedPoint {
     bool success;
@@ -154,7 +154,7 @@ TcqtStatus tcqt_projection_summary(TcqtProjectionSummary* output);
 TcqtStatus tcqt_validate_coordinate_triplet(double a, double b, double c);
 TcqtStatus tcqt_locate_grid_point(std::uint32_t grid_index, double a, double b, double c, TcqtLocatedPoint* output);
 TcqtStatus tcqt_locate_grid_local_point(std::uint32_t grid_index, std::uint32_t triangle_index, double lambda0, double lambda1, double lambda2, TcqtLocatedPoint* output);
-TcqtStatus tcqt_evaluate_field(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const TcqtViewerCalculationOptions* options, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);
+TcqtStatus tcqt_evaluate_field_current(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, std::uint64_t expected_options_revision, double a, double b, double c, std::uint64_t query_index, TcqtInspectionResult* output);
 TcqtStatus tcqt_set_field_vertex(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, std::uint32_t row_index, const char* token);
 TcqtStatus tcqt_bulk_set_field_state(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const std::uint32_t* rows, std::uint32_t row_count, std::uint32_t state_code);
 TcqtStatus tcqt_clear_field_notes(std::uint32_t grid_index, std::uint32_t phase_id, const char* property, const std::uint32_t* rows, std::uint32_t row_count);

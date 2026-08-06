@@ -102,7 +102,7 @@ struct ViewerState {
     bool pending_recalculation = false;
     bool has_last_valid_projection = false;
     bool projection_is_stale = false;
-    TcqtViewerCalculationOptions options{true, 0.0, 0.0, 100.0, 20, true, 0.02, 0, 3, 2, 1};
+    TcqtViewerCalculationOptions options{};
 };
 
 class MainWindow final : public QMainWindow {
@@ -170,6 +170,7 @@ private:
     void showViewerVertexContextMenu(std::uint32_t row, const QPoint& global_position);
     bool commitViewerNumber(QLineEdit* editor, double* target, const QString& label);
     bool commitViewerCalculationOptions(ViewerWidgetCommand source);
+    bool ensureViewerGridInterpolationCompatibility();
     void syncViewerPanelControls();
     void updateViewerSelectionDetails();
     void setViewerCalculationStatus(const QString& message, bool error = false);

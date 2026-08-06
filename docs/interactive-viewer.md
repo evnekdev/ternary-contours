@@ -52,9 +52,11 @@ The Plot-side panel owns all current options:
   Committed numerical changes are debounced for a short interval and coalesced
   into one worker request. **Recalculate now** remains available as a manual
   recovery action.
-- Sampling resolution refines envelope/path extraction. With the default Linear
-  source it does not make the source field higher order: that source remains
-  piecewise planar between its tabulated vertices.
+- Sampling resolution refines envelope/path extraction. The canonical regular
+  source default is Cubic alpha / Akima / Muggianu with one-sided-then-linear
+  partial-domain fallback; selecting Linear retains a piecewise-planar source.
+  Rust owns this interpolation snapshot and its revision for queries, projection,
+  topology, regularization, and numerical tracing.
 - **Source interpolation** selects Linear or Cubic alpha for regular `T` fields.
   Cubic alpha offers Akima, Makima, PCHIP, and Steffen edge-slope estimation,
   plus Raw barycentric, Muggianu, or Kohler continuation. The **Partial-domain

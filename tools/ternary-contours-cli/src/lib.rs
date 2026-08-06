@@ -29,9 +29,10 @@ pub use mesh_extrapolation::*;
 pub use model::*;
 pub use parser::{TctError, parse_path, parse_str};
 pub use projection::{
-    AutomaticIsoRange, LiquidusProjection, NumericalTraceRunContext, ProjectionOptions,
-    SourceInterpolation, automatic_iso_levels, automatic_iso_range, calculate_projection,
-    calculate_projection_with_trace, calculate_projection_with_trace_context, parse_level_spec,
+    AutomaticIsoRange, InterpolationOptions, LiquidusProjection, NumericalTraceRunContext,
+    ProjectionOptions, SourceInterpolation, automatic_iso_levels, automatic_iso_range,
+    calculate_projection, calculate_projection_with_trace, calculate_projection_with_trace_context,
+    parse_level_spec,
 };
 pub use projection_csv::{
     ProjectionCsvError, ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,

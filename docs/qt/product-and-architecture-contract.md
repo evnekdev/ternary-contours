@@ -138,9 +138,15 @@ provenance through Rust projection, records, C ABI, Qt grouping, and canvas
 objects.
 
 For regular Viewer fields, the default source model is Cubic alpha / Akima /
-Muggianu with one-sided-cubic-then-linear partial-domain fallback. Irregular
-fields require explicit Linear selection; cubic-only controls are disabled with
-an explanation. The selected raw or regularized projection is calculated first.
+Muggianu with one-sided-cubic-then-linear partial-domain fallback. This default
+is defined once by Rust `InterpolationOptions`; Qt, the bridge, inspection,
+projection, stable-boundary discovery, univariant tracing, regularization, and
+numerical tracing consume one immutable Rust-owned snapshot and its option
+revision. Inspection requests must use that current snapshot, never a
+widget-reconstructed interpolation model. Irregular fields use effective Linear
+interpolation; cubic-only controls are disabled and the visible selector is
+returned to Linear rather than displaying an inapplicable Cubic alpha choice.
+The selected raw or regularized projection is calculated first.
 A failed optional sibling variant must be reported as unavailable without
 discarding the selected projection or its canvas geometry.
 

@@ -22,8 +22,8 @@ pub fn show_source_interpolation_controls(
     cubic_supported: bool,
     id_salt: &'static str,
 ) -> bool {
-    let before = options.source_interpolation;
-    let before_policy = options.partial_domain_policy;
+    let before = options.interpolation.source;
+    let before_policy = options.interpolation.partial_domain_policy;
     ui.label("Source interpolation");
     let mut interpolation = before;
     egui::ComboBox::from_id_salt(("source_interpolation", id_salt))
@@ -38,12 +38,12 @@ pub fn show_source_interpolation_controls(
     if !cubic_supported {
         ui.small("Cubic alpha is unavailable for this selected irregular source field.");
     }
-    options.source_interpolation = interpolation;
+    options.interpolation.source = interpolation;
 
     if let SourceInterpolation::CubicAlpha {
         mut method,
         mut continuation,
-    } = options.source_interpolation
+    } = options.interpolation.source
     {
         egui::ComboBox::from_id_salt(("cubic_slope_method", id_salt))
             .selected_text(cubic_method_name(method))
@@ -54,7 +54,7 @@ pub fn show_source_interpolation_controls(
                 ui.selectable_value(&mut method, CubicAlphaMethod::Steffen, "Steffen");
             });
         ui.label("Partial-domain cubic fallback");
-        let mut partial_policy = options.partial_domain_policy;
+        let mut partial_policy = options.interpolation.partial_domain_policy;
         egui::ComboBox::from_id_salt(("cubic_partial_domain_policy", id_salt))
             .selected_text(partial_domain_policy_name(partial_policy))
             .show_ui(ui, |ui| {
@@ -91,13 +91,14 @@ pub fn show_source_interpolation_controls(
                 ui.selectable_value(&mut continuation, BinaryExtrapolation::Muggianu, "Muggianu");
                 ui.selectable_value(&mut continuation, BinaryExtrapolation::Kohler, "Kohler");
             });
-        options.source_interpolation = SourceInterpolation::CubicAlpha {
+        options.interpolation.source = SourceInterpolation::CubicAlpha {
             method,
             continuation,
         };
-        options.partial_domain_policy = partial_policy;
+        options.interpolation.partial_domain_policy = partial_policy;
     }
-    before != options.source_interpolation || before_policy != options.partial_domain_policy
+    before != options.interpolation.source
+        || before_policy != options.interpolation.partial_domain_policy
 }
 
 pub fn show(ui: &mut egui::Ui, state: &mut ViewerState) -> ControlChange {
@@ -570,7 +571,12 @@ mod tests {
             method: CubicAlphaMethod::Makima,
             continuation: BinaryExtrapolation::Kohler,
         };
-        let options = interpolation.cubic_options().unwrap();
+        let options = crate::InterpolationOptions {
+            source: interpolation,
+            ..crate::InterpolationOptions::default()
+        }
+        .cubic_options()
+        .unwrap();
         assert_eq!(options.method, CubicAlphaMethod::Makima);
         assert_eq!(options.extrapolation, BinaryExtrapolation::Kohler);
     }

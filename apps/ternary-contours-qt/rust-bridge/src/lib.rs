@@ -21,14 +21,14 @@ use ternary_contours::{
     composition_from_local_barycentric, normalize_ternary_triplet,
 };
 use ternary_contours_cli::{
-    CompositionColumns, GridType, HeaderMode, IrregularTabulatedGrid, JsonLinesTraceSink,
-    LiquidusProjection, MeshExtrapolationField, MeshExtrapolationPreview, MeshExtrapolationRequest,
-    NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition, ProjectionCsvLayerFilter,
-    ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions, ProjectionPathSource,
-    PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange,
-    TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
-    TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, calculate_projection,
-    calculate_projection_with_trace_context, empty_project_dataset,
+    CompositionColumns, GridType, HeaderMode, InterpolationOptions, IrregularTabulatedGrid,
+    JsonLinesTraceSink, LiquidusProjection, MeshExtrapolationField, MeshExtrapolationPreview,
+    MeshExtrapolationRequest, NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition,
+    ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
+    ProjectionPathSource, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode,
+    RowOrder, SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
+    TabulatedValueState, TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels,
+    calculate_projection, calculate_projection_with_trace_context, empty_project_dataset,
     extrapolate_regular_grid_fields,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
@@ -98,6 +98,153 @@ pub struct TcqtViewerCalculationOptions {
     pub continuation: u32,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ViewerCalculationOptions {
+    automatic_range: bool,
+    minimum: f64,
+    maximum: f64,
+    level_step: f64,
+    sampling_subdivisions: u32,
+    regularize: bool,
+    regularization_spacing: f64,
+    interpolation: InterpolationOptions,
+}
+
+impl Default for ViewerCalculationOptions {
+    fn default() -> Self {
+        Self {
+            automatic_range: true,
+            minimum: 0.0,
+            maximum: 0.0,
+            level_step: 100.0,
+            sampling_subdivisions: 20,
+            regularize: true,
+            regularization_spacing: 0.0,
+            interpolation: InterpolationOptions::default(),
+        }
+    }
+}
+
+impl ViewerCalculationOptions {
+    fn from_abi(raw: &TcqtViewerCalculationOptions) -> Result<Self, String> {
+        let source = match raw.source_interpolation {
+            ABI_SOURCE_LINEAR => ternary_contours_cli::SourceInterpolation::Linear,
+            ABI_SOURCE_CUBIC_ALPHA => ternary_contours_cli::SourceInterpolation::CubicAlpha {
+                method: match raw.cubic_method {
+                    ABI_CUBIC_AKIMA => CubicAlphaMethod::Akima,
+                    ABI_CUBIC_MAKIMA => CubicAlphaMethod::Makima,
+                    ABI_CUBIC_PCHIP => CubicAlphaMethod::Pchip,
+                    ABI_CUBIC_STEFFEN => CubicAlphaMethod::Steffen,
+                    _ => return Err("unsupported cubic slope method".into()),
+                },
+                continuation: match raw.continuation {
+                    ABI_CONTINUATION_RAW_BARYCENTRIC => BinaryExtrapolation::RawBarycentric,
+                    ABI_CONTINUATION_MUGGIANU => BinaryExtrapolation::Muggianu,
+                    ABI_CONTINUATION_KOHLER => BinaryExtrapolation::Kohler,
+                    _ => return Err("unsupported ternary continuation".into()),
+                },
+            },
+            _ => return Err("unsupported source interpolation".into()),
+        };
+        let partial_domain_policy = match raw.partial_domain_policy {
+            ABI_PARTIAL_STRICT => CubicPartialDomainPolicy::Strict,
+            ABI_PARTIAL_ONE_SIDED => CubicPartialDomainPolicy::OneSided,
+            ABI_PARTIAL_ONE_SIDED_THEN_LINEAR => CubicPartialDomainPolicy::OneSidedThenLinear,
+            ABI_PARTIAL_LINEAR_NEAR_BOUNDARIES => CubicPartialDomainPolicy::LinearNearDomain,
+            _ => return Err("unsupported partial-domain policy".into()),
+        };
+        if !raw.level_step.is_finite() || raw.level_step <= 0.0 {
+            return Err("isotherm step must be finite and positive".into());
+        }
+        if raw.regularization_spacing.is_finite() && raw.regularization_spacing < 0.0 {
+            return Err("regularization spacing must be positive when supplied".into());
+        }
+        if !raw.automatic_range {
+            automatic_iso_levels(raw.minimum, raw.maximum, raw.level_step)
+                .map_err(|error| format!("invalid manual isotherm range: {error}"))?;
+        }
+        Ok(Self {
+            automatic_range: raw.automatic_range,
+            minimum: raw.minimum,
+            maximum: raw.maximum,
+            level_step: raw.level_step,
+            sampling_subdivisions: raw.sampling_subdivisions,
+            regularize: raw.regularize,
+            regularization_spacing: raw.regularization_spacing,
+            interpolation: InterpolationOptions {
+                source,
+                partial_domain_policy,
+            },
+        })
+    }
+
+    fn to_abi(&self) -> TcqtViewerCalculationOptions {
+        let (source_interpolation, cubic_method, continuation) = match self.interpolation.source {
+            ternary_contours_cli::SourceInterpolation::Linear => (
+                ABI_SOURCE_LINEAR,
+                ABI_CUBIC_AKIMA,
+                ABI_CONTINUATION_MUGGIANU,
+            ),
+            ternary_contours_cli::SourceInterpolation::CubicAlpha {
+                method,
+                continuation,
+            } => {
+                let cubic_method = match method {
+                    CubicAlphaMethod::Akima => ABI_CUBIC_AKIMA,
+                    CubicAlphaMethod::Makima => ABI_CUBIC_MAKIMA,
+                    CubicAlphaMethod::Pchip => ABI_CUBIC_PCHIP,
+                    CubicAlphaMethod::Steffen => ABI_CUBIC_STEFFEN,
+                    _ => unreachable!("unsupported cubic method cannot cross the Qt ABI"),
+                };
+                let continuation = match continuation {
+                    BinaryExtrapolation::RawBarycentric => ABI_CONTINUATION_RAW_BARYCENTRIC,
+                    BinaryExtrapolation::Muggianu => ABI_CONTINUATION_MUGGIANU,
+                    BinaryExtrapolation::Kohler => ABI_CONTINUATION_KOHLER,
+                    _ => unreachable!("unsupported continuation cannot cross the Qt ABI"),
+                };
+                (ABI_SOURCE_CUBIC_ALPHA, cubic_method, continuation)
+            }
+        };
+        let partial_domain_policy = match self.interpolation.partial_domain_policy {
+            CubicPartialDomainPolicy::Strict => ABI_PARTIAL_STRICT,
+            CubicPartialDomainPolicy::OneSided => ABI_PARTIAL_ONE_SIDED,
+            CubicPartialDomainPolicy::OneSidedThenLinear => ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
+            CubicPartialDomainPolicy::LinearNearDomain => ABI_PARTIAL_LINEAR_NEAR_BOUNDARIES,
+            _ => unreachable!("unsupported partial-domain policy cannot cross the Qt ABI"),
+        };
+        TcqtViewerCalculationOptions {
+            automatic_range: self.automatic_range,
+            minimum: self.minimum,
+            maximum: self.maximum,
+            level_step: self.level_step,
+            sampling_subdivisions: self.sampling_subdivisions,
+            regularize: self.regularize,
+            regularization_spacing: self.regularization_spacing,
+            source_interpolation,
+            cubic_method,
+            partial_domain_policy,
+            continuation,
+        }
+    }
+
+    fn projection_options(&self) -> ProjectionOptions {
+        ProjectionOptions {
+            levels: if self.automatic_range {
+                Vec::new()
+            } else {
+                automatic_iso_levels(self.minimum, self.maximum, self.level_step)
+                    .expect("validated Viewer range")
+            },
+            automatic_level_step: self.automatic_range.then_some(self.level_step),
+            sampling_subdivisions: (self.sampling_subdivisions != 0)
+                .then_some(self.sampling_subdivisions as usize),
+            regularize: self.regularize,
+            regularization_spacing: (self.regularization_spacing > 0.0)
+                .then_some(self.regularization_spacing),
+            interpolation: self.interpolation,
+        }
+    }
+}
 /// Rust-authoritative Viewer numerical configuration and its monotonic revision.
 #[repr(C)]
 pub struct TcqtViewerCalculationState {
@@ -172,6 +319,11 @@ pub struct TcqtInspectionResult {
     pub maximum_extrapolation_layer: u32,
     pub extrapolation_methods: [u8; NAME],
     pub extrapolated_source_row_count: u32,
+    pub options_revision: u64,
+    pub effective_source_interpolation: u32,
+    pub effective_cubic_method: u32,
+    pub effective_partial_domain_policy: u32,
+    pub effective_continuation: u32,
     pub unit: [u8; NAME],
     pub message: [u8; MESSAGE],
 }
@@ -393,7 +545,7 @@ struct ProjectDocument {
     projection_request_id: u64,
     // Numerical Viewer settings are validated and retained in Rust. Qt keeps
     // only a presentation mirror for its controls.
-    viewer_options: TcqtViewerCalculationOptions,
+    viewer_options: ViewerCalculationOptions,
     trace_request: NumericalTraceRequest,
     mesh_extrapolation_preview: Option<MeshExtrapolationPreview>,
 }
@@ -418,7 +570,7 @@ impl ProjectDocument {
             options_revision: 1,
             projection_options_revision: 0,
             projection_request_id: 0,
-            viewer_options: default_viewer_options(),
+            viewer_options: ViewerCalculationOptions::default(),
             trace_request: NumericalTraceRequest::default(),
             mesh_extrapolation_preview: None,
         }
@@ -438,11 +590,11 @@ impl ProjectDocument {
         &mut self,
         raw_options: TcqtViewerCalculationOptions,
     ) -> Result<bool, String> {
-        viewer_options(&raw_options)?;
-        if self.viewer_options == raw_options {
+        let options = ViewerCalculationOptions::from_abi(&raw_options)?;
+        if self.viewer_options == options {
             return Ok(false);
         }
-        self.viewer_options = raw_options;
+        self.viewer_options = options;
         self.options_revision = self.options_revision.saturating_add(1);
         self.invalidate_calculation();
         Ok(true)
@@ -521,59 +673,6 @@ fn status(result: Result<(), String>) -> TcqtStatus {
         },
     }
 }
-fn viewer_options(raw: &TcqtViewerCalculationOptions) -> Result<ProjectionOptions, String> {
-    let source_interpolation = match raw.source_interpolation {
-        ABI_SOURCE_LINEAR => ternary_contours_cli::SourceInterpolation::Linear,
-        ABI_SOURCE_CUBIC_ALPHA => ternary_contours_cli::SourceInterpolation::CubicAlpha {
-            method: match raw.cubic_method {
-                ABI_CUBIC_AKIMA => CubicAlphaMethod::Akima,
-                ABI_CUBIC_MAKIMA => CubicAlphaMethod::Makima,
-                ABI_CUBIC_PCHIP => CubicAlphaMethod::Pchip,
-                ABI_CUBIC_STEFFEN => CubicAlphaMethod::Steffen,
-                _ => return Err("unsupported cubic slope method".into()),
-            },
-            continuation: match raw.continuation {
-                ABI_CONTINUATION_RAW_BARYCENTRIC => BinaryExtrapolation::RawBarycentric,
-                ABI_CONTINUATION_MUGGIANU => BinaryExtrapolation::Muggianu,
-                ABI_CONTINUATION_KOHLER => BinaryExtrapolation::Kohler,
-                _ => return Err("unsupported ternary continuation".into()),
-            },
-        },
-        _ => return Err("unsupported source interpolation".into()),
-    };
-    let partial_domain_policy = match raw.partial_domain_policy {
-        ABI_PARTIAL_STRICT => CubicPartialDomainPolicy::Strict,
-        ABI_PARTIAL_ONE_SIDED => CubicPartialDomainPolicy::OneSided,
-        ABI_PARTIAL_ONE_SIDED_THEN_LINEAR => CubicPartialDomainPolicy::OneSidedThenLinear,
-        ABI_PARTIAL_LINEAR_NEAR_BOUNDARIES => CubicPartialDomainPolicy::LinearNearDomain,
-        _ => return Err("unsupported partial-domain policy".into()),
-    };
-    if !raw.level_step.is_finite() || raw.level_step <= 0.0 {
-        return Err("isotherm step must be finite and positive".into());
-    }
-    let levels = if raw.automatic_range {
-        Vec::new()
-    } else {
-        automatic_iso_levels(raw.minimum, raw.maximum, raw.level_step)
-            .map_err(|error| format!("invalid manual isotherm range: {error}"))?
-    };
-    // Zero is the explicit C ABI sentinel for an unspecified spacing; a supplied spacing must be positive.
-    if raw.regularization_spacing.is_finite() && raw.regularization_spacing < 0.0 {
-        return Err("regularization spacing must be positive when supplied".into());
-    }
-    Ok(ProjectionOptions {
-        levels,
-        automatic_level_step: raw.automatic_range.then_some(raw.level_step),
-        sampling_subdivisions: (raw.sampling_subdivisions != 0)
-            .then_some(raw.sampling_subdivisions as usize),
-        regularize: raw.regularize,
-        regularization_spacing: (raw.regularization_spacing > 0.0)
-            .then_some(raw.regularization_spacing),
-        source_interpolation,
-        partial_domain_policy,
-    })
-}
-
 fn locate_tabulated_grid_point(
     grid: &TabulatedGrid,
     composition: [f64; 3],
@@ -664,22 +763,6 @@ fn locate_tabulated_grid_local_point(
     // canonical shared-edge and vertex ownership as field evaluation.
     locate_tabulated_grid_point(grid, composition)
 }
-fn default_viewer_options() -> TcqtViewerCalculationOptions {
-    TcqtViewerCalculationOptions {
-        automatic_range: true,
-        minimum: 0.0,
-        maximum: 0.0,
-        level_step: 100.0,
-        sampling_subdivisions: 20,
-        regularize: true,
-        regularization_spacing: 0.0,
-        source_interpolation: ABI_SOURCE_CUBIC_ALPHA,
-        cubic_method: ABI_CUBIC_AKIMA,
-        partial_domain_policy: 2,
-        continuation: 1,
-    }
-}
-
 /// Store a validated numerical Viewer configuration without changing the TCT
 /// document revision or dirty state. Rendering preferences remain Qt-owned.
 #[unsafe(no_mangle)]
@@ -740,7 +823,7 @@ pub unsafe extern "C" fn tcqt_viewer_calculation_options(
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
-        *output_value = state.viewer_options;
+        *output_value = state.viewer_options.to_abi();
         Ok(())
     })())
 }
@@ -757,7 +840,7 @@ pub unsafe extern "C" fn tcqt_viewer_calculation_state(
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
         *output_value = TcqtViewerCalculationState {
-            options: state.viewer_options,
+            options: state.viewer_options.to_abi(),
             options_revision: state.options_revision,
         };
         Ok(())
@@ -2409,10 +2492,11 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         Ok(value) => *value,
         Err(error) => return failure(error, 0, 0),
     };
-    let projection_options = match viewer_options(&abi_options) {
+    let requested_options = match ViewerCalculationOptions::from_abi(&abi_options) {
         Ok(options) => options,
         Err(error) => return failure(error, 0, 0),
     };
+    let projection_options = requested_options.projection_options();
     let (dataset, options_revision, trace_request) = match document().lock() {
         Ok(mut state) => {
             if state.revision != expected_revision {
@@ -2423,7 +2507,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
                 );
             }
             if state.options_revision != expected_options_revision
-                || state.viewer_options != abi_options
+                || state.viewer_options != requested_options
             {
                 return failure(
                     "viewer settings changed before calculation started".to_owned(),
@@ -2461,7 +2545,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         request_id: Some(request_id),
         ..NumericalTraceRunContext::default()
     };
-    let selected_regularized = abi_options.regularize;
+    let selected_regularized = requested_options.regularize;
     let mut selected_options = projection_options.clone();
     selected_options.regularize = selected_regularized;
     let (selected_result, trace_status) =
@@ -2614,7 +2698,7 @@ pub unsafe extern "C" fn tcqt_projection_summary(
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
-        let effective = state.viewer_options;
+        let effective = state.viewer_options.to_abi();
         let Some(projection) = state.projection.as_ref() else {
             *output_value = TcqtProjectionSummary {
                 available: false,
@@ -2771,11 +2855,11 @@ pub unsafe extern "C" fn tcqt_locate_grid_local_point(
     })())
 }
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn tcqt_evaluate_field(
+pub unsafe extern "C" fn tcqt_evaluate_field_current(
     grid_index: u32,
     phase_id: u32,
     property: *const c_char,
-    raw_options: *const TcqtViewerCalculationOptions,
+    expected_options_revision: u64,
     a: f64,
     b: f64,
     c: f64,
@@ -2784,8 +2868,6 @@ pub unsafe extern "C" fn tcqt_evaluate_field(
 ) -> TcqtStatus {
     status((|| {
         let property = unsafe { input(property, "field property") }?;
-        let raw_options = *unsafe { out(raw_options.cast_mut(), "viewer calculation options") }?;
-        let options = viewer_options(&raw_options)?;
         if [a, b, c]
             .iter()
             .any(|value| !value.is_finite() || *value < 0.0)
@@ -2797,7 +2879,13 @@ pub unsafe extern "C" fn tcqt_evaluate_field(
         let mut state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
+        if state.options_revision != expected_options_revision {
+            return Err("viewer interpolation settings changed; refresh the query snapshot".into());
+        }
         let dataset = state.dataset.clone();
+        let options_revision = state.options_revision;
+        let effective_options = state.viewer_options.to_abi();
+        let options = state.viewer_options.projection_options();
         let identity = InspectionFieldIdentity {
             grid_index: grid_index as usize,
             phase_id: StablePhaseId(phase_id),
@@ -2850,6 +2938,11 @@ pub unsafe extern "C" fn tcqt_evaluate_field(
             ),
             extrapolated_source_row_count: result.source_provenance.extrapolated_source_rows.len()
                 as u32,
+            options_revision,
+            effective_source_interpolation: effective_options.source_interpolation,
+            effective_cubic_method: effective_options.cubic_method,
+            effective_partial_domain_policy: effective_options.partial_domain_policy,
+            effective_continuation: effective_options.continuation,
             unit: bytes(&result.unit),
             message: bytes(match &result.state {
                 InterpolatedResultState::Error(error) => error,
@@ -3488,7 +3581,9 @@ mod tests {
             partial_domain_policy: 2,
             continuation: 2,
         };
-        let options = viewer_options(&raw).expect("configured Viewer options are valid");
+        let options = ViewerCalculationOptions::from_abi(&raw)
+            .expect("configured Viewer options are valid")
+            .projection_options();
         assert_eq!(options.sampling_subdivisions, Some(37));
         assert!(!options.regularize);
         assert_eq!(
@@ -3499,9 +3594,40 @@ mod tests {
             ]
         );
         assert!(matches!(
-            options.source_interpolation,
+            options.interpolation.source,
             ternary_contours_cli::SourceInterpolation::CubicAlpha { .. }
         ));
+    }
+
+    #[test]
+    fn field_queries_reject_stale_authoritative_option_revisions() {
+        let _guard = test_document_lock().lock().unwrap();
+        let (stale_revision, changed) = {
+            let mut state = document().lock().unwrap();
+            state.dataset = ternary_contours_cli::default_regular_dataset();
+            let stale_revision = state.options_revision;
+            let mut changed = state.viewer_options.clone();
+            changed.sampling_subdivisions = changed.sampling_subdivisions.saturating_add(1);
+            (stale_revision, changed.to_abi())
+        };
+        assert!(unsafe { tcqt_set_viewer_calculation_options(&changed) }.success);
+        let property = std::ffi::CString::new("T").unwrap();
+        let mut output = unsafe { std::mem::zeroed::<TcqtInspectionResult>() };
+        let status = unsafe {
+            tcqt_evaluate_field_current(
+                0,
+                1,
+                property.as_ptr(),
+                stale_revision,
+                0.2,
+                0.3,
+                0.5,
+                1,
+                &mut output,
+            )
+        };
+        assert!(!status.success);
+        assert!(String::from_utf8_lossy(&status.message).contains("settings changed"));
     }
 
     #[test]
@@ -3530,15 +3656,18 @@ mod tests {
         assert!((global.c - 0.5).abs() < 1.0e-12);
         assert!(global.source_row0 < 66 && global.source_row1 < 66 && global.source_row2 < 66);
         let property = std::ffi::CString::new("T").unwrap();
-        let options = default_viewer_options();
+        let mut option_state = unsafe { std::mem::zeroed::<TcqtViewerCalculationState>() };
+        unsafe {
+            assert!(tcqt_viewer_calculation_state(&mut option_state).success);
+        }
         let mut evaluated = unsafe { std::mem::zeroed::<TcqtInspectionResult>() };
         unsafe {
             assert!(
-                tcqt_evaluate_field(
+                tcqt_evaluate_field_current(
                     0,
                     1,
                     property.as_ptr(),
-                    &options,
+                    option_state.options_revision,
                     global.a,
                     global.b,
                     global.c,
@@ -3548,6 +3677,23 @@ mod tests {
                 .success
             );
         }
+        assert_eq!(evaluated.options_revision, option_state.options_revision);
+        assert_eq!(
+            evaluated.effective_source_interpolation,
+            option_state.options.source_interpolation
+        );
+        assert_eq!(
+            evaluated.effective_cubic_method,
+            option_state.options.cubic_method
+        );
+        assert_eq!(
+            evaluated.effective_partial_domain_policy,
+            option_state.options.partial_domain_policy
+        );
+        assert_eq!(
+            evaluated.effective_continuation,
+            option_state.options.continuation
+        );
         assert_eq!(evaluated.triangle_index, global.triangle_index);
         assert_eq!(
             (
@@ -3634,7 +3780,7 @@ mod tests {
     }
     #[test]
     fn default_viewer_options_prefer_regular_cubic_alpha_akima_muggianu() {
-        let options = default_viewer_options();
+        let options = ViewerCalculationOptions::default().to_abi();
         assert_eq!(options.source_interpolation, ABI_SOURCE_CUBIC_ALPHA);
         assert_eq!(options.cubic_method, ABI_CUBIC_AKIMA);
         assert_eq!(
@@ -3642,6 +3788,10 @@ mod tests {
             ABI_PARTIAL_ONE_SIDED_THEN_LINEAR
         );
         assert_eq!(options.continuation, ABI_CONTINUATION_MUGGIANU);
+        assert_eq!(
+            ViewerCalculationOptions::default().interpolation,
+            ProjectionOptions::default().interpolation
+        );
     }
     #[test]
     fn viewer_setting_revision_invalidates_only_numerical_caches() {
@@ -3661,14 +3811,14 @@ mod tests {
         });
         let document_revision = state.revision;
         let options_revision = state.options_revision;
-        let mut options = state.viewer_options;
+        let mut options = state.viewer_options.clone();
         options.sampling_subdivisions = 37;
-        assert!(state.set_viewer_options(options).unwrap());
+        assert!(state.set_viewer_options(options.to_abi()).unwrap());
         assert_eq!(state.revision, document_revision);
         assert_eq!(state.options_revision, options_revision + 1);
         assert!(state.projection_records.is_empty());
         assert!(!state.dirty);
-        assert!(!state.set_viewer_options(options).unwrap());
+        assert!(!state.set_viewer_options(options.to_abi()).unwrap());
         assert_eq!(state.options_revision, options_revision + 1);
     }
 
@@ -3699,7 +3849,9 @@ mod tests {
             assert!(tcqt_set_viewer_calculation_options(&configured).success);
             let direct = calculate_projection(
                 &ternary_contours_cli::parse_str(&fixture_text).unwrap(),
-                &viewer_options(&configured).unwrap(),
+                &ViewerCalculationOptions::from_abi(&configured)
+                    .unwrap()
+                    .projection_options(),
             )
             .unwrap();
             let direct_binary = direct
@@ -3753,7 +3905,7 @@ mod tests {
             assert_eq!(projection.effective_level_step, 5.0);
             assert_eq!(projection.effective_sampling_subdivisions, 17);
             assert_eq!(projection.effective_source_interpolation, ABI_SOURCE_LINEAR);
-            assert_eq!(projection.effective_continuation, ABI_CONTINUATION_KOHLER);
+            assert_eq!(projection.effective_continuation, ABI_CONTINUATION_MUGGIANU);
             assert_eq!(projection.options_revision, state.options_revision);
             assert_eq!(projection.request_id, 91);
             let mut record_count = 0;

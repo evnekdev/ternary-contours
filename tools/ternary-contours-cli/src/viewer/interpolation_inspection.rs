@@ -5,14 +5,15 @@
 //! the tabulated evaluator used by stable projection construction.
 
 use ternary_contours::{
-    CubicPartialDomainPolicy, FieldInterpolation, InterpolatedPartialTernaryField,
-    InterpolationInspectionState, IrregularTernaryMesh, LocalInterpolationMode,
-    RegularTernaryPartialScalarField, StablePhaseId, StablePhaseUndefinedReason,
+    FieldInterpolation, InterpolatedPartialTernaryField, InterpolationInspectionState,
+    IrregularTernaryMesh, LocalInterpolationMode, RegularTernaryPartialScalarField, StablePhaseId,
+    StablePhaseUndefinedReason,
 };
 
 use crate::{
-    ProjectionOptions, SourceInterpolation, TabulatedField, TabulatedGrid, TabulatedTernaryDataset,
-    TabulatedValue, TabulatedValueState, projection::interpolate_tabulated,
+    InterpolationOptions, ProjectionOptions, SourceInterpolation, TabulatedField, TabulatedGrid,
+    TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
+    projection::interpolate_tabulated,
 };
 
 /// Stable identity of the source field selected in Grid inspection.
@@ -85,8 +86,7 @@ pub struct InterpolatedResult {
     pub component_names: [String; 3],
     pub unit: String,
     pub composition: [f64; 3],
-    pub source_interpolation: SourceInterpolation,
-    pub partial_domain_policy: CubicPartialDomainPolicy,
+    pub interpolation: InterpolationOptions,
     pub state: InterpolatedResultState,
     pub value: Option<f64>,
     pub triangle_index: Option<usize>,
@@ -103,14 +103,14 @@ pub struct InterpolatedResult {
 
 impl InterpolatedResult {
     pub fn method_label(&self) -> String {
-        match self.source_interpolation {
+        match self.interpolation.source {
             SourceInterpolation::Linear => "Linear".into(),
             SourceInterpolation::CubicAlpha {
                 method,
                 continuation,
             } => format!(
                 "Cubic alpha ({method:?}, {continuation:?}; {:?})",
-                self.partial_domain_policy
+                self.interpolation.partial_domain_policy
             ),
         }
     }
@@ -121,8 +121,7 @@ struct CacheKey {
     field: InspectionFieldIdentity,
     grid: TabulatedGrid,
     values: Vec<TabulatedValue>,
-    source_interpolation: SourceInterpolation,
-    partial_domain_policy: CubicPartialDomainPolicy,
+    interpolation: InterpolationOptions,
 }
 
 enum PreparedInspectionField {
@@ -186,8 +185,7 @@ impl FieldInspectionCache {
             field: identity.clone(),
             grid: grid.clone(),
             values: field.values.clone(),
-            source_interpolation: options.source_interpolation,
-            partial_domain_policy: options.partial_domain_policy,
+            interpolation: options.interpolation,
         };
         if self.key.as_ref() != Some(&key) {
             self.prepared = Some(prepare(grid, field, options));
@@ -203,8 +201,7 @@ impl FieldInspectionCache {
             component_names,
             unit,
             composition,
-            source_interpolation: options.source_interpolation,
-            partial_domain_policy: options.partial_domain_policy,
+            interpolation: options.interpolation,
             state: InterpolatedResultState::TriangleUnavailable,
             value: None,
             triangle_index: None,
@@ -296,13 +293,13 @@ fn prepare(
                 Ok(source) => source,
                 Err(error) => return PreparedInspectionField::Unavailable(error.to_string()),
             };
-            let interpolation = match options.source_interpolation {
+            let interpolation = match options.interpolation.source {
                 SourceInterpolation::Linear => FieldInterpolation::Linear,
-                source @ SourceInterpolation::CubicAlpha { .. } => {
-                    let mut cubic = source
+                SourceInterpolation::CubicAlpha { .. } => {
+                    let cubic = options
+                        .interpolation
                         .cubic_options()
                         .expect("cubic interpolation has options");
-                    cubic.partial_domain_policy = options.partial_domain_policy;
                     FieldInterpolation::CubicAlpha(cubic)
                 }
             };
@@ -312,7 +309,7 @@ fn prepare(
             }
         }
         TabulatedGrid::Irregular(grid) => {
-            if !matches!(options.source_interpolation, SourceInterpolation::Linear) {
+            if !matches!(options.interpolation.source, SourceInterpolation::Linear) {
                 return PreparedInspectionField::Unavailable(
                     "cubic alpha is not available for irregular source fields in this viewer build"
                         .into(),
@@ -434,8 +431,7 @@ fn error_result(
         unit: String::new(),
         composition,
         stale_error: None,
-        source_interpolation: SourceInterpolation::Linear,
-        partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
+        interpolation: InterpolationOptions::default(),
         state: InterpolatedResultState::Error(message.into()),
         value: None,
         triangle_index: None,
@@ -452,6 +448,7 @@ fn error_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ternary_contours::CubicPartialDomainPolicy;
 
     fn populated_regular_dataset() -> TabulatedTernaryDataset {
         let mut dataset = crate::default_regular_dataset();
@@ -473,23 +470,16 @@ mod tests {
             property: "T".into(),
         };
         let point = [0.63, 0.17, 0.20];
+        let options = ProjectionOptions {
+            interpolation: InterpolationOptions {
+                source: SourceInterpolation::Linear,
+                ..InterpolationOptions::default()
+            },
+            ..ProjectionOptions::default()
+        };
         let mut cache = FieldInspectionCache::default();
-        let first = cache.evaluate(
-            &dataset,
-            &identity,
-            &ProjectionOptions::default(),
-            point,
-            1,
-            1,
-        );
-        let second = cache.evaluate(
-            &dataset,
-            &identity,
-            &ProjectionOptions::default(),
-            point,
-            1,
-            1,
-        );
+        let first = cache.evaluate(&dataset, &identity, &options, point, 1, 1);
+        let second = cache.evaluate(&dataset, &identity, &options, point, 1, 1);
         let grid = ternary_contours::RegularTernaryGrid::new(10).unwrap();
         let location = grid.locate(point).unwrap();
         let expected = location.triangle.vertices.map(|vertex| vertex.0);
@@ -542,19 +532,23 @@ mod tests {
             let options = [
                 ProjectionOptions::default(),
                 ProjectionOptions {
-                    source_interpolation: SourceInterpolation::CubicAlpha {
-                        method: ternary_contours::CubicAlphaMethod::Akima,
-                        continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                    interpolation: InterpolationOptions {
+                        source: SourceInterpolation::CubicAlpha {
+                            method: ternary_contours::CubicAlphaMethod::Akima,
+                            continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                        },
+                        partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
                     },
-                    partial_domain_policy: CubicPartialDomainPolicy::OneSidedThenLinear,
                     ..ProjectionOptions::default()
                 },
                 ProjectionOptions {
-                    source_interpolation: SourceInterpolation::CubicAlpha {
-                        method: ternary_contours::CubicAlphaMethod::Akima,
-                        continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                    interpolation: InterpolationOptions {
+                        source: SourceInterpolation::CubicAlpha {
+                            method: ternary_contours::CubicAlphaMethod::Akima,
+                            continuation: ternary_contours::BinaryExtrapolation::Muggianu,
+                        },
+                        partial_domain_policy: CubicPartialDomainPolicy::LinearNearDomain,
                     },
-                    partial_domain_policy: CubicPartialDomainPolicy::LinearNearDomain,
                     ..ProjectionOptions::default()
                 },
             ];
@@ -584,23 +578,16 @@ mod tests {
             property: "T".into(),
         };
         let point = [0.20, 0.30, 0.50];
+        let options = ProjectionOptions {
+            interpolation: InterpolationOptions {
+                source: SourceInterpolation::Linear,
+                ..InterpolationOptions::default()
+            },
+            ..ProjectionOptions::default()
+        };
         let mut cache = FieldInspectionCache::default();
-        let first = cache.evaluate(
-            &dataset,
-            &identity,
-            &ProjectionOptions::default(),
-            point,
-            1,
-            1,
-        );
-        let second = cache.evaluate(
-            &dataset,
-            &identity,
-            &ProjectionOptions::default(),
-            point,
-            1,
-            1,
-        );
+        let first = cache.evaluate(&dataset, &identity, &options, point, 1, 1);
+        let second = cache.evaluate(&dataset, &identity, &options, point, 1, 1);
         assert_eq!(first.state, InterpolatedResultState::Defined);
         assert_eq!(
             first.triangle_vertex_indices,
