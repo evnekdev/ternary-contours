@@ -3,7 +3,8 @@ use std::{error::Error, path::PathBuf, process::ExitCode};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use ternary_contours::{
     BinaryExtrapolation, CubicAlphaMethod, CubicPartialDomainPolicy,
-    RegularMeshExtrapolationOptions, StableInvariantNode,
+    RegularMeshExtrapolationOptions, StableInvariantNode, StableTopologyComparisonMode,
+    stable_topology_signature as core_stable_topology_signature,
 };
 #[cfg(feature = "trace")]
 use ternary_contours::{
@@ -248,6 +249,10 @@ struct AuditStableTopologyArgs {
     sampling_subdivisions: Vec<usize>,
     #[arg(long, default_value_t = 5)]
     repeat_count: usize,
+    /// Repeat the same audit in independent child processes and compare their
+    /// machine-readable canonical graph hashes.
+    #[arg(long, default_value_t = 0)]
+    process_repeats: usize,
     #[arg(long)]
     regularize: bool,
     #[arg(long)]
@@ -717,113 +722,27 @@ fn phase_signature(node: &StableInvariantNode) -> String {
         .join(",")
 }
 
-fn node_signature(
-    node: &StableInvariantNode,
-    degree: usize,
-    decimal_places: usize,
-    include_geometry: bool,
-) -> String {
-    let kind = if matches!(node, StableInvariantNode::Binary(_)) {
-        "binary"
-    } else {
-        "interior"
-    };
-    let phases = phase_signature(node);
-    if include_geometry {
-        let point = node.point().as_array();
-        format!(
-            "{kind}:{phases}:{degree}:{:.precision$}:{:.precision$}:{:.precision$}:{:.precision$}",
-            point[0],
-            point[1],
-            point[2],
-            node.temperature(),
-            precision = decimal_places,
-        )
-    } else {
-        format!("{kind}:{phases}:{degree}")
-    }
-}
-
-fn stable_topology_signature(
+fn audit_topology_signature(
     projection: &ternary_contours_cli::LiquidusProjection,
-) -> AuditTopologySignature {
+) -> Result<AuditTopologySignature, ternary_contours::StableBoundaryError> {
     let boundary = &projection.stable_boundaries;
-    let exact_nodes = boundary
-        .nodes
-        .iter()
-        .map(|node| {
-            node_signature(
-                node,
-                boundary
-                    .incident_univariants(node.id())
-                    .map_or(0, |edges| edges.len()),
-                12,
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    let tolerance_nodes = boundary
-        .nodes
-        .iter()
-        .map(|node| {
-            node_signature(
-                node,
-                boundary
-                    .incident_univariants(node.id())
-                    .map_or(0, |edges| edges.len()),
-                3,
-                true,
-            )
-        })
-        .collect::<Vec<_>>();
-    let topology_nodes = boundary
-        .nodes
-        .iter()
-        .map(|node| {
-            node_signature(
-                node,
-                boundary
-                    .incident_univariants(node.id())
-                    .map_or(0, |edges| edges.len()),
-                0,
-                false,
-            )
-        })
-        .collect::<Vec<_>>();
-
-    let edge_records = |nodes: &[String]| {
-        let mut records = boundary
-            .univariants
-            .iter()
-            .map(|path| {
-                let mut endpoints = [nodes[path.start.0].clone(), nodes[path.end.0].clone()];
-                endpoints.sort();
-                format!(
-                    "{}-{}:{}:{}",
-                    path.phases.first.0, path.phases.second.0, endpoints[0], endpoints[1]
-                )
-            })
-            .collect::<Vec<_>>();
-        records.sort();
-        records
-    };
-    AuditTopologySignature {
-        exact: format!(
-            "{}|{}",
-            exact_nodes.join(";"),
-            edge_records(&exact_nodes).join(";")
-        ),
-        tolerance_aware: format!(
-            "{}|{}",
-            tolerance_nodes.join(";"),
-            edge_records(&tolerance_nodes).join(";")
-        ),
-        topology: format!(
-            "{}|{}",
-            topology_nodes.join(";"),
-            edge_records(&topology_nodes).join(";")
-        ),
-    }
+    Ok(AuditTopologySignature {
+        exact: core_stable_topology_signature(
+            boundary,
+            StableTopologyComparisonMode::ExactDiagnostic,
+        )?
+        .canonical_text(),
+        tolerance_aware: core_stable_topology_signature(
+            boundary,
+            StableTopologyComparisonMode::ToleranceAwareGeometry,
+        )?
+        .canonical_text(),
+        topology: core_stable_topology_signature(
+            boundary,
+            StableTopologyComparisonMode::TopologyOnly,
+        )?
+        .canonical_text(),
+    })
 }
 
 fn audit_interpolation_options(
@@ -844,11 +763,156 @@ fn audit_interpolation_options(
     }
 }
 
+fn source_interpolation_arg(value: SourceInterpolationArg) -> &'static str {
+    match value {
+        SourceInterpolationArg::Linear => "linear",
+        SourceInterpolationArg::CubicAlpha => "cubic-alpha",
+    }
+}
+
+fn cubic_method_arg(value: CubicMethodArg) -> &'static str {
+    match value {
+        CubicMethodArg::Akima => "akima",
+        CubicMethodArg::Makima => "makima",
+        CubicMethodArg::Pchip => "pchip",
+        CubicMethodArg::Steffen => "steffen",
+    }
+}
+
+fn partial_domain_arg(value: PartialDomainArg) -> &'static str {
+    match value {
+        PartialDomainArg::StrictCubic => "strict-cubic",
+        PartialDomainArg::OneSidedCubic => "one-sided-cubic",
+        PartialDomainArg::OneSidedThenLinear => "one-sided-then-linear",
+        PartialDomainArg::LinearNearBoundaries => "linear-near-boundaries",
+    }
+}
+
+fn continuation_arg(value: ContinuationArg) -> &'static str {
+    match value {
+        ContinuationArg::RawBarycentric => "raw-barycentric",
+        ContinuationArg::Muggianu => "muggianu",
+        ContinuationArg::Kohler => "kohler",
+    }
+}
+
+fn process_repeat_signature(path: &std::path::Path) -> Result<String, Box<dyn Error>> {
+    let runs = std::fs::read_to_string(path.join("runs.tsv"))?;
+    let mut records = runs
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let fields = line.split('\t').collect::<Vec<_>>();
+            (fields.len() >= 6 && fields[2] == "ok")
+                .then(|| format!("{}:{}:{}:{}", fields[0], fields[5], fields[4], fields[3]))
+        })
+        .collect::<Vec<_>>();
+    records.sort();
+    if records.is_empty() {
+        return Err(format!(
+            "child audit {} did not produce a successful topology signature",
+            path.display()
+        )
+        .into());
+    }
+    Ok(records.join("|"))
+}
+
+fn run_process_repeats(args: &AuditStableTopologyArgs) -> Result<Option<String>, Box<dyn Error>> {
+    if args.process_repeats == 0 {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe()?;
+    let sampling = args
+        .sampling_subdivisions
+        .iter()
+        .map(usize::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut signatures = Vec::new();
+    let mut table =
+        String::from("process\tstatus\ttopology_hashes\ttolerance_hashes\texact_hashes\n");
+    for repeat in 0..args.process_repeats {
+        let output = args.output.join(format!("process-repeat-{repeat}"));
+        let mut command = std::process::Command::new(&executable);
+        command
+            .arg("audit-stable-topology")
+            .arg(&args.input)
+            .arg("--output")
+            .arg(&output)
+            .arg("--sampling-subdivisions")
+            .arg(&sampling)
+            .arg("--repeat-count")
+            .arg("1")
+            .arg("--process-repeats")
+            .arg("0")
+            .arg("--source-interpolation")
+            .arg(source_interpolation_arg(args.source_interpolation))
+            .arg("--cubic-method")
+            .arg(cubic_method_arg(args.cubic_method))
+            .arg("--partial-domain-policy")
+            .arg(partial_domain_arg(args.partial_domain_policy))
+            .arg("--continuation")
+            .arg(continuation_arg(args.continuation));
+        if args.regularize {
+            command.arg("--regularize");
+        }
+        if let Some(spacing) = args.regularization_spacing {
+            command
+                .arg("--regularization-spacing")
+                .arg(spacing.to_string());
+        }
+        let status = command.status()?;
+        if !status.success() {
+            return Err(
+                format!("process-isolated audit child {repeat} exited with {status}").into(),
+            );
+        }
+        let signature = process_repeat_signature(&output)?;
+        let records = signature
+            .split('|')
+            .map(|record| record.split(':').collect::<Vec<_>>())
+            .collect::<Vec<_>>();
+        table.push_str(&format!(
+            "{repeat}\tok\t{}\t{}\t{}\n",
+            records
+                .iter()
+                .map(|fields| fields[1])
+                .collect::<Vec<_>>()
+                .join(","),
+            records
+                .iter()
+                .map(|fields| fields[2])
+                .collect::<Vec<_>>()
+                .join(","),
+            records
+                .iter()
+                .map(|fields| fields[3])
+                .collect::<Vec<_>>()
+                .join(","),
+        ));
+        signatures.push(signature);
+    }
+    std::fs::write(args.output.join("process-repeat-hashes.tsv"), table)?;
+    let baseline = signatures.first().expect("positive process repeat count");
+    if signatures.iter().any(|signature| signature != baseline) {
+        return Err(
+            "process-isolated audit found a canonical topology, tolerance-aware, or exact geometry hash mismatch"
+                .into(),
+        );
+    }
+    Ok(Some(format!(
+        "{} independent process runs produced identical topology, tolerance-aware, and exact hashes",
+        args.process_repeats
+    )))
+}
+
 fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Error>> {
     if args.repeat_count == 0 || args.sampling_subdivisions.is_empty() {
         return Err("repeat count and sampling subdivisions must be positive".into());
     }
     std::fs::create_dir_all(&args.output)?;
+    let process_repeat_summary = run_process_repeats(&args)?;
     let input_bytes = std::fs::read(&args.input)?;
     let input_hash = fnv1a64(input_bytes.iter().copied());
     let dataset = parse_path(&args.input)?;
@@ -877,7 +941,7 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
             };
             match calculate_projection(&dataset, &options) {
                 Ok(projection) => {
-                    let signature = stable_topology_signature(&projection);
+                    let signature = audit_topology_signature(&projection)?;
                     let exact_hash = fnv1a64(signature.exact.bytes());
                     let tolerance_hash = fnv1a64(signature.tolerance_aware.bytes());
                     let topology_hash = fnv1a64(signature.topology.bytes());
@@ -1024,8 +1088,31 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
         .regularization_spacing
         .map(|value| value.to_string())
         .unwrap_or_else(|| "null".into());
+    let process_repeat_json = process_repeat_summary
+        .as_ref()
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_else(|| "null".into());
+    let sampling_classification = if failures_by_run != 0 {
+        "Calculation failed"
+    } else if first_by_sampling.len() > 1
+        && first_by_sampling
+            .values()
+            .all(|signature| signature.topology == baseline.expect("baseline exists").topology)
+    {
+        if first_by_sampling.values().all(|signature| {
+            signature.tolerance_aware == baseline.expect("baseline exists").tolerance_aware
+        }) {
+            "Geometry converged"
+        } else {
+            "Topology converged"
+        }
+    } else if first_by_sampling.len() == 1 && repeatable_at_20 {
+        "Repeatable"
+    } else {
+        "Resolution sensitive"
+    };
     let summary = format!(
-        "{{\n  \"input\": {:?},\n  \"fnv1a64\": \"{input_hash:016x}\",\n  \"repeatable_at_20\": {repeatable_at_20},\n  \"successful_runs\": {},\n  \"failed_runs\": {failures_by_run},\n  \"options\": {{\n    \"source_interpolation\": \"{:?}\",\n    \"cubic_method\": \"{:?}\",\n    \"partial_domain_policy\": \"{:?}\",\n    \"continuation\": \"{:?}\",\n    \"regularize\": {},\n    \"regularization_spacing\": {regularization_spacing}\n  }}\n}}\n",
+        "{{\n  \"input\": {:?},\n  \"fnv1a64\": \"{input_hash:016x}\",\n  \"repeatable_at_20\": {repeatable_at_20},\n  \"classification\": \"{sampling_classification}\",\n  \"process_repeatability\": {process_repeat_json},\n  \"successful_runs\": {},\n  \"failed_runs\": {failures_by_run},\n  \"options\": {{\n    \"source_interpolation\": \"{:?}\",\n    \"cubic_method\": \"{:?}\",\n    \"partial_domain_policy\": \"{:?}\",\n    \"continuation\": \"{:?}\",\n    \"regularize\": {},\n    \"regularization_spacing\": {regularization_spacing}\n  }}\n}}\n",
         args.input,
         signatures.len(),
         args.source_interpolation,
@@ -1035,8 +1122,9 @@ fn audit_stable_topology(args: AuditStableTopologyArgs) -> Result<(), Box<dyn Er
         args.regularize,
     );
     let report = format!(
-        "# Stable topology audit\n\nInput: `{}`\n\nFNV-1a-64 input hash: `{input_hash:016x}`.\n\nRepeatable at sampling 20: **{repeatable_at_20}**. The exact hash is deterministic for one fixed build and options; the tolerance-aware hash rounds node geometry to 0.001 only for cross-resolution comparison. The topology hash excludes geometry and records stable phase sets, incidence degrees, and phase-pair connectivity.\n\n{comparison}\n\nCanonical node and edge details are stored separately in `invariants.tsv` and `univariants.tsv`. A `raw_fallback` geometry state means raw topology was accepted but optional regularization failed for that path.\n",
+        "# Stable topology audit\n\nInput: {}\n\nFNV-1a-64 input hash: {input_hash:016x}.\n\nClassification: {sampling_classification}. Repeatable at sampling 20: {repeatable_at_20}. The exact hash is deterministic for one fixed build and options; the tolerance-aware hash rounds node geometry to 0.001 only for cross-resolution comparison. The topology hash excludes geometry and records stable phase sets, incidence degrees, and phase-pair connectivity.\n\n{comparison}\n\nCanonical node and edge details are stored separately in invariants.tsv and univariants.tsv. A raw_fallback geometry state means raw topology was accepted but optional regularization failed for that path.\n\nProcess isolation: {}.\n",
         args.input.display(),
+        process_repeat_summary.as_deref().unwrap_or("not requested"),
     );
     std::fs::write(args.output.join("summary.json"), summary)?;
     std::fs::write(args.output.join("runs.tsv"), runs)?;

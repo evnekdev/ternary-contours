@@ -22,7 +22,8 @@ struct TcqtProjectionSummary {
     std::uint32_t effective_source_interpolation; std::uint32_t effective_cubic_method;
     std::uint32_t effective_partial_domain_policy; std::uint32_t effective_continuation;
     std::uint64_t dataset_revision; std::uint64_t options_revision; std::uint64_t request_id;
-    bool raw_projection_available; bool regularized_projection_available; bool selected_projection_regularized; std::uint32_t domain_truncated_univariant_count; std::uint32_t regularization_failure_count; char message[512];
+    bool raw_projection_available; bool regularized_projection_available; bool selected_projection_regularized; std::uint32_t domain_truncated_univariant_count; std::uint32_t regularization_failure_count;
+    std::uint64_t stable_topology_build_count; std::uint64_t stable_topology_reuse_count; std::uint64_t isotherm_rebuild_count; bool stable_topology_reused; char message[512];
 };
 struct TcqtInvariantPoint {
     std::uint32_t id;

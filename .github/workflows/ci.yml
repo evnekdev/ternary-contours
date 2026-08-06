@@ -15,10 +15,15 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --all-features -- -D warnings
-      - run: cargo test
-      - run: cargo test --all-features
+      - run: cargo fmt --check --all
+      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo test --workspace --all-features
+      - run: >-
+          cargo run -p ternary-contours-cli --features inspection --
+          audit-stable-topology calculations/CaO-PbO-ZnO_detailed.tct
+          --output target/diagnostics/ci-stable-audit
+          --sampling-subdivisions 20,40 --repeat-count 2 --process-repeats 2
       - run: cargo run -p ternary-contours-gui-core --bin generate-gui-contract-docs -- --check
       - run: cargo run -p ternary-contours-gui-core --bin generate-qt-ui-docs -- --check
       - run: cargo test --no-default-features
@@ -38,7 +43,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --all-features
+      - run: cargo test --workspace --all-features
 
   msrv:
     name: MSRV 1.97.1
@@ -48,4 +53,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --all-targets --all-features
-      - run: cargo test --all-features
+      - run: cargo test --workspace --all-features

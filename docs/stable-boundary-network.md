@@ -250,3 +250,31 @@ cargo run --release --example stable_boundary_network
 - stable filled regions and cubic-alpha filled bands;
 - rendering adapters and renderer coordinates;
 - a neutral C ABI and language bindings.
+
+## Ternary invariant multiplicity
+
+The liquid phase is implicit. An interior stable invariant therefore represents
+Liquid plus exactly three condensed liquidus phases. The network never creates a
+four-solid interior node. Nearby continuous solves are merged only when their
+three sorted phase IDs, full-precision root, temperature, and residual evidence
+are compatible. Distinct three-phase roots may occupy one sampling triangle and
+may share a phase pair; any number of such nodes is supported. If authoritative
+continuous evaluations prove four or more phases tied and stable at one point,
+construction returns `StableBoundaryError::OverdeterminedTernaryInvariant` with
+all phase values and equality residuals instead of accepting invalid topology.
+
+## Topology reuse and convergence diagnostics
+
+Stable topology is keyed by source data, interpolation configuration, sampling,
+and topology-affecting regularization settings. Changing only isotherm range or
+levels reuses the accepted boundary graph and rebuilds contour paths only. The
+projection diagnostics expose topology-build, topology-reuse, and isotherm
+rebuild counters. A retained graph is not regularized again for a level-only
+update.
+
+`StableTopologySignature` compares graph topology without transient IDs.
+`TopologyOnly` compares phase sets and incidence, `ToleranceAwareGeometry` adds
+documented comparison quantization, and `ExactDiagnostic` retains exact stored
+floating-point geometry. Raw and regularized networks must agree under the
+topology-only comparison; per-path geometry remains `Raw`, `Regularized`, or
+`RawFallback`.

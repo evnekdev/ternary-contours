@@ -1364,6 +1364,15 @@ void MainWindow::runRustCalculation() {
     }
     const auto revision = summary.revision;
     const auto options_revision = state.options_revision;
+    const auto previous_options = viewer_.options;
+    const bool isotherm_only_request = viewer_.has_last_valid_projection
+        && previous_options.sampling_subdivisions == state.options.sampling_subdivisions
+        && previous_options.regularize == state.options.regularize
+        && previous_options.regularization_spacing == state.options.regularization_spacing
+        && previous_options.source_interpolation == state.options.source_interpolation
+        && previous_options.cubic_method == state.options.cubic_method
+        && previous_options.partial_domain_policy == state.options.partial_domain_policy
+        && previous_options.continuation == state.options.continuation;
     const auto generation = ++viewer_.calculation_generation;
     viewer_.options = state.options;
     viewer_.options_revision = options_revision;
@@ -1383,7 +1392,9 @@ void MainWindow::runRustCalculation() {
         .arg(viewer_.options.source_interpolation == abi_source_linear ? tr("Linear") : tr("Cubic alpha"))
         .arg(QLocale::c().toString(viewer_.options.level_step, 'g', 10)));
     updateViewerActionState();
-    ui_->statusMain->showMessage(tr("Calculating topology and iso-plots on the Rust worker..."));
+    ui_->statusMain->showMessage(isotherm_only_request
+        ? tr("Updating isotherms on the Rust worker...")
+        : tr("Recalculating topology and iso-plots on the Rust worker..."));
     auto* watcher = new QFutureWatcher<TcqtCalculationResult>(this);
     connect(watcher, &QFutureWatcher<TcqtCalculationResult>::finished, this,
             [this, watcher, revision, options_revision, generation] {
@@ -1448,10 +1459,13 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.regularization_failure_count)
                         .arg(projection.regularization_failure_count == 1 ? QString() : QStringLiteral("s"));
                 }
+                if (projection.stable_topology_reused) {
+                    projection_summary.prepend(tr("Updated isotherms using accepted stable topology; "));
+                }
                 ui_->labelViewerLevelPreview->setText(projection_summary);
                 setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(
-                    tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14")
+                    tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14\nTopology builds %15, reuses %16, isotherm rebuilds %17")
                         .arg(projection.effective_automatic_range ? tr("automatic") : tr("manual"))
                         .arg(source.toString(projection.effective_minimum, 'g', 10))
                         .arg(source.toString(projection.effective_maximum, 'g', 10))
@@ -1465,7 +1479,10 @@ void MainWindow::runRustCalculation() {
                         .arg(source.toString(projection.effective_regularization_spacing, 'g', 10))
                         .arg(projection.dataset_revision)
                         .arg(projection.options_revision)
-                        .arg(projection.request_id));
+                        .arg(projection.request_id)
+                        .arg(projection.stable_topology_build_count)
+                        .arg(projection.stable_topology_reuse_count)
+                        .arg(projection.isotherm_rebuild_count));
                 refreshInvariantPoints();
                 refreshViewerQueries();
                 reportBridgeStatus(text(result.message), true);

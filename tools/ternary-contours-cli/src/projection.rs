@@ -80,7 +80,7 @@ impl InterpolationOptions {
 }
 
 /// Controls for a stable liquidus calculation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct ProjectionOptions {
     pub levels: Vec<f64>,
     /// When present, derive levels from stable topology: the lowest finite
@@ -91,19 +91,6 @@ pub struct ProjectionOptions {
     pub regularize: bool,
     pub regularization_spacing: Option<f64>,
     pub interpolation: InterpolationOptions,
-}
-
-impl Default for ProjectionOptions {
-    fn default() -> Self {
-        Self {
-            levels: Vec::new(),
-            automatic_level_step: None,
-            sampling_subdivisions: None,
-            regularize: false,
-            regularization_spacing: None,
-            interpolation: InterpolationOptions::default(),
-        }
-    }
 }
 
 /// Authoritative range used by automatic Viewer isotherms.
@@ -126,6 +113,9 @@ pub struct InputSummary {
 pub struct ProjectionDiagnostics {
     pub sampling_subdivisions: usize,
     pub regularized: bool,
+    /// True when this request reused an accepted stable-boundary network and
+    /// rebuilt only levels and stable contour paths.
+    pub stable_topology_reused: bool,
     pub contour_path_count: usize,
     pub invariant_count: usize,
     pub stable_polygon_count: usize,
@@ -368,6 +358,21 @@ pub fn calculate_projection_with_trace_context(
     sink: &mut impl NumericalTraceSink,
     context: &NumericalTraceRunContext,
 ) -> Result<LiquidusProjection, ProjectionError> {
+    calculate_projection_with_trace_context_reusing_stable_topology(
+        dataset, options, sink, context, None,
+    )
+}
+
+/// Trace-aware form of isotherm-only recalculation. The trace observes the
+/// accepted request itself and records topology reuse rather than forcing an
+/// unrelated full stable-boundary rebuild merely to obtain trace output.
+pub fn calculate_projection_with_trace_context_reusing_stable_topology(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+    context: &NumericalTraceRunContext,
+    stable_topology: Option<&StableBoundaryNetwork>,
+) -> Result<LiquidusProjection, ProjectionError> {
     let mut trace = NumericalTraceSession::new(sink);
     if trace.is_enabled(NumericalTraceLevel::Summary) {
         trace.emit(
@@ -381,7 +386,12 @@ pub fn calculate_projection_with_trace_context(
             )),
         );
     }
-    let result = calculate_projection_with_trace_session(dataset, options, &mut trace);
+    let result = calculate_projection_with_trace_session_reusing_topology(
+        dataset,
+        options,
+        &mut trace,
+        stable_topology,
+    );
     match &result {
         Ok(projection) if trace.is_configured(NumericalTraceLevel::Summary) => {
             trace.emit_terminal(NumericalTracePayload::RunCompleted(TraceRunCompleted {
@@ -403,10 +413,29 @@ pub fn calculate_projection_with_trace_context(
     result
 }
 
-pub(crate) fn calculate_projection_with_trace_session(
+/// Recalculate only stable isotherms while retaining an already accepted
+/// stable-boundary network. The caller must use this only when the dataset and
+/// every topology-affecting option are unchanged.
+pub fn calculate_projection_reusing_stable_topology(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    stable_topology: &StableBoundaryNetwork,
+) -> Result<LiquidusProjection, ProjectionError> {
+    let mut sink = NoopTraceSink;
+    let mut trace = NumericalTraceSession::new(&mut sink);
+    calculate_projection_with_trace_session_reusing_topology(
+        dataset,
+        options,
+        &mut trace,
+        Some(stable_topology),
+    )
+}
+
+fn calculate_projection_with_trace_session_reusing_topology(
     dataset: &TabulatedTernaryDataset,
     options: &ProjectionOptions,
     trace: &mut NumericalTraceSession<'_>,
+    reused_topology: Option<&StableBoundaryNetwork>,
 ) -> Result<LiquidusProjection, ProjectionError> {
     let mut fields = BTreeMap::<StablePhaseId, PhaseSourceModel>::new();
     let mut regular_grid_count = 0;
@@ -701,19 +730,51 @@ pub(crate) fn calculate_projection_with_trace_session(
         error,
         details: source_coverage.join("; "),
     })?;
-    // Stable topology is independent of requested isotherm levels. Build it
-    // first so automatic Viewer ranges use authoritative invariant values.
-    let stable_boundaries = prepared.stable_boundaries_with_trace_session(
-        StableBoundaryOptions {
-            regularization: options.regularize.then_some(PathRegularizationOptions {
-                spacing: options.regularization_spacing.unwrap_or(0.02),
-                protected_endpoint_distance: 0.0,
-                ..PathRegularizationOptions::default()
-            }),
-            ..StableBoundaryOptions::default()
-        },
-        trace,
-    )?;
+    // Stable topology is independent of requested isotherm levels. The
+    // reuse path reconstructs source evaluators for contour extraction but
+    // never rescans binary boundaries, refines invariants, traces
+    // univariants, or regularizes paths.
+    let stable_boundaries = if let Some(network) = reused_topology {
+        if trace.is_enabled(NumericalTraceLevel::Summary) {
+            trace.emit(
+                NumericalTraceLevel::Summary,
+                NumericalTraceStage::StableSelection,
+                decision(
+                    NumericalTraceEventKind::StableTopologyReused,
+                    TraceDecision {
+                        reason: Some("stable topology reused for isotherm-only request".into()),
+                        ..TraceDecision::default()
+                    },
+                ),
+            );
+        }
+        network.clone()
+    } else {
+        if trace.is_enabled(NumericalTraceLevel::Summary) {
+            trace.emit(
+                NumericalTraceLevel::Summary,
+                NumericalTraceStage::StableSelection,
+                decision(
+                    NumericalTraceEventKind::StableTopologyBuilt,
+                    TraceDecision {
+                        reason: Some("stable topology rebuilt from current sources".into()),
+                        ..TraceDecision::default()
+                    },
+                ),
+            );
+        }
+        prepared.stable_boundaries_with_trace_session(
+            StableBoundaryOptions {
+                regularization: options.regularize.then_some(PathRegularizationOptions {
+                    spacing: options.regularization_spacing.unwrap_or(0.02),
+                    protected_endpoint_distance: 0.0,
+                    ..PathRegularizationOptions::default()
+                }),
+                ..StableBoundaryOptions::default()
+            },
+            trace,
+        )?
+    };
     let automatic_range = options
         .automatic_level_step
         .map(|step| automatic_iso_range(&stable_boundaries, minimum, maximum, step))
@@ -732,6 +793,19 @@ pub(crate) fn calculate_projection_with_trace_session(
             options.levels.clone()
         }
     };
+    if trace.is_enabled(NumericalTraceLevel::Summary) {
+        trace.emit(
+            NumericalTraceLevel::Summary,
+            NumericalTraceStage::Contour,
+            decision(
+                NumericalTraceEventKind::StableIsothermsRebuilt,
+                TraceDecision {
+                    reason: Some(format!("{} stable isotherm levels", levels.len())),
+                    ..TraceDecision::default()
+                },
+            ),
+        );
+    }
     let stable_contours = prepared
         .contours_with_trace_session(&levels, trace)
         .map_err(|error| ProjectionError::Preparation {
@@ -758,6 +832,7 @@ pub(crate) fn calculate_projection_with_trace_session(
     let diagnostics = ProjectionDiagnostics {
         sampling_subdivisions,
         regularized: options.regularize,
+        stable_topology_reused: reused_topology.is_some(),
         contour_path_count: stable_contours
             .levels
             .iter()
@@ -1234,6 +1309,32 @@ mod tests {
         assert_eq!(started.continuation, "Muggianu");
     }
 
+    #[test]
+    fn traced_isotherm_update_reuses_the_accepted_topology() {
+        let dataset = parse_str(include_str!("../fixtures/interior-invariant.tct")).unwrap();
+        let initial = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
+        let options = ProjectionOptions {
+            levels: vec![100.0, 110.0, 120.0],
+            ..ProjectionOptions::default()
+        };
+        let mut sink = ternary_contours::VecTraceSink::new(
+            ternary_contours::NumericalTraceConfig::decisions(),
+        );
+        let reused = calculate_projection_with_trace_context_reusing_stable_topology(
+            &dataset,
+            &options,
+            &mut sink,
+            &NumericalTraceRunContext::default(),
+            Some(&initial.stable_boundaries),
+        )
+        .unwrap();
+        assert!(reused.diagnostics.stable_topology_reused);
+        assert_eq!(reused.stable_boundaries, initial.stable_boundaries);
+        assert!(sink.events().iter().any(|event| {
+            event.payload.kind() == ternary_contours::NumericalTraceEventKind::StableTopologyReused
+        }));
+    }
+
     #[cfg(feature = "inspection")]
     #[test]
     fn detailed_ex_cao_pbo_zno_has_verified_stable_topology_at_20_and_40() {
@@ -1241,47 +1342,220 @@ mod tests {
             "../../../calculations/CaO-PbO-ZnO_detailed.tct"
         ))
         .expect("committed detailed EX fixture parses");
-        for sampling_subdivisions in [20, 40] {
-            let projection = calculate_projection(
+        let projections = [20, 40]
+            .into_iter()
+            .map(|sampling_subdivisions| {
+                let projection = calculate_projection(
+                    &dataset,
+                    &ProjectionOptions {
+                        automatic_level_step: Some(100.0),
+                        sampling_subdivisions: Some(sampling_subdivisions),
+                        interpolation: InterpolationOptions::default(),
+                        ..ProjectionOptions::default()
+                    },
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "detailed EX fixture at sampling {sampling_subdivisions} failed: {error}"
+                    )
+                });
+                let binary = projection
+                    .stable_boundaries
+                    .nodes
+                    .iter()
+                    .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Binary(_)))
+                    .count();
+                let interior = projection
+                    .stable_boundaries
+                    .nodes
+                    .iter()
+                    .filter(|node| {
+                        matches!(node, ternary_contours::StableInvariantNode::Interior(_))
+                    })
+                    .count();
+                assert_eq!((binary, interior), (3, 1));
+                assert_eq!(projection.stable_boundaries.univariants.len(), 3);
+                assert_eq!(projection.stable_boundaries.truncated_univariants.len(), 0);
+                assert_eq!(
+                    projection
+                        .stable_boundaries
+                        .interior_invariant_verifications
+                        .len(),
+                    1
+                );
+                let verification = &projection
+                    .stable_boundaries
+                    .interior_invariant_verifications[0];
+                assert!(
+                    verification.maximum_equality_residual <= 1.0e-9,
+                    "{verification:?}"
+                );
+                (sampling_subdivisions, projection)
+            })
+            .collect::<Vec<_>>();
+
+        let (_, at_20) = &projections[0];
+        let (_, at_40) = &projections[1];
+        let topology_20 = ternary_contours::stable_topology_signature(
+            &at_20.stable_boundaries,
+            ternary_contours::StableTopologyComparisonMode::TopologyOnly,
+        )
+        .unwrap();
+        let topology_40 = ternary_contours::stable_topology_signature(
+            &at_40.stable_boundaries,
+            ternary_contours::StableTopologyComparisonMode::TopologyOnly,
+        )
+        .unwrap();
+        let comparison = ternary_contours::compare_stable_topology(&topology_20, &topology_40);
+        assert!(
+            comparison.equal,
+            "sampling 20 versus 40 topology mismatch: {}",
+            comparison.differences.join("; ")
+        );
+
+        fn interior_node(
+            projection: &LiquidusProjection,
+        ) -> &ternary_contours::StableInvariantNode {
+            projection
+                .stable_boundaries
+                .nodes
+                .iter()
+                .find(|node| matches!(node, ternary_contours::StableInvariantNode::Interior(_)))
+                .expect("exactly one interior invariant")
+        }
+        let node_20 = interior_node(at_20);
+        let node_40 = interior_node(at_40);
+        let point_20 = node_20.point().as_array();
+        let point_40 = node_40.point().as_array();
+        let logical = |point: [f64; 3]| {
+            [
+                point[1] + 0.5 * point[2],
+                0.866_025_403_784_438_6 * point[2],
+            ]
+        };
+        let left = logical(point_20);
+        let right = logical(point_40);
+        assert!(
+            (left[0] - right[0]).hypot(left[1] - right[1]) <= 0.005,
+            "interior invariant moved too far: {point_20:?} versus {point_40:?}"
+        );
+        assert!(
+            (node_20.temperature() - node_40.temperature()).abs() <= 2.0,
+            "interior invariant temperature moved too far: {} versus {}",
+            node_20.temperature(),
+            node_40.temperature()
+        );
+        let pairs = |projection: &LiquidusProjection,
+                     node: &ternary_contours::StableInvariantNode| {
+            let mut pairs = projection
+                .stable_boundaries
+                .incident_univariants(node.id())
+                .unwrap()
+                .iter()
+                .map(|path_id| projection.stable_boundaries.univariants[path_id.0].phases)
+                .collect::<Vec<_>>();
+            pairs.sort_unstable();
+            pairs
+        };
+        assert_eq!(pairs(at_20, node_20), pairs(at_40, node_40));
+        fn interior_verification(
+            projection: &LiquidusProjection,
+        ) -> &ternary_contours::StableInvariantVerification {
+            projection
+                .stable_boundaries
+                .interior_invariant_verifications
+                .first()
+                .expect("interior verification")
+        }
+        assert_eq!(
+            interior_verification(at_20).stability_margin.is_infinite(),
+            interior_verification(at_40).stability_margin.is_infinite()
+        );
+    }
+
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn isotherm_only_projection_reuses_the_accepted_stable_topology() {
+        let dataset = parse_str(include_str!(
+            "../../../calculations/CaO-PbO-ZnO_detailed.tct"
+        ))
+        .expect("committed detailed EX fixture parses");
+        let topology_options = ProjectionOptions {
+            automatic_level_step: Some(100.0),
+            sampling_subdivisions: Some(20),
+            interpolation: InterpolationOptions::default(),
+            ..ProjectionOptions::default()
+        };
+        let initial = calculate_projection(&dataset, &topology_options).unwrap();
+        let isotherm_only = ProjectionOptions {
+            levels: vec![800.0, 810.0, 820.0],
+            automatic_level_step: None,
+            ..topology_options
+        };
+        let reused = calculate_projection_reusing_stable_topology(
+            &dataset,
+            &isotherm_only,
+            &initial.stable_boundaries,
+        )
+        .unwrap();
+        assert!(reused.diagnostics.stable_topology_reused);
+        ternary_contours::assert_same_stable_topology(
+            &initial.stable_boundaries,
+            &reused.stable_boundaries,
+        )
+        .unwrap();
+        assert_eq!(
+            initial.stable_boundaries.nodes,
+            reused.stable_boundaries.nodes
+        );
+        assert_eq!(reused.levels, vec![800.0, 810.0, 820.0]);
+        assert_ne!(initial.levels, reused.levels);
+    }
+
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn detailed_ex_raw_and_regularized_networks_have_identical_topology() {
+        let dataset = parse_str(include_str!(
+            "../../../calculations/CaO-PbO-ZnO_detailed.tct"
+        ))
+        .expect("committed detailed EX fixture parses");
+        let raw = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                automatic_level_step: Some(100.0),
+                sampling_subdivisions: Some(20),
+                interpolation: InterpolationOptions::default(),
+                ..ProjectionOptions::default()
+            },
+        )
+        .unwrap();
+        for spacing in [0.04, 0.02, 0.01, 0.005] {
+            let regularized = calculate_projection(
                 &dataset,
                 &ProjectionOptions {
                     automatic_level_step: Some(100.0),
-                    sampling_subdivisions: Some(sampling_subdivisions),
+                    sampling_subdivisions: Some(20),
+                    regularize: true,
+                    regularization_spacing: Some(spacing),
                     interpolation: InterpolationOptions::default(),
                     ..ProjectionOptions::default()
                 },
             )
-            .unwrap_or_else(|error| {
-                panic!("detailed EX fixture at sampling {sampling_subdivisions} failed: {error}")
+            .unwrap_or_else(|error| panic!("regularization spacing {spacing} failed: {error}"));
+            ternary_contours::assert_same_stable_topology(
+                &raw.stable_boundaries,
+                &regularized.stable_boundaries,
+            )
+            .unwrap_or_else(|difference| {
+                panic!("raw and regularized topology differ at spacing {spacing}: {difference}")
             });
-            let binary = projection
-                .stable_boundaries
-                .nodes
-                .iter()
-                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Binary(_)))
-                .count();
-            let interior = projection
-                .stable_boundaries
-                .nodes
-                .iter()
-                .filter(|node| matches!(node, ternary_contours::StableInvariantNode::Interior(_)))
-                .count();
-            assert_eq!((binary, interior), (3, 1));
-            assert_eq!(projection.stable_boundaries.univariants.len(), 3);
-            assert_eq!(projection.stable_boundaries.truncated_univariants.len(), 0);
             assert_eq!(
-                projection
-                    .stable_boundaries
-                    .interior_invariant_verifications
-                    .len(),
-                1
+                raw.stable_boundaries.nodes, regularized.stable_boundaries.nodes,
+                "regularization must never move invariant nodes"
             );
-            let verification = &projection
-                .stable_boundaries
-                .interior_invariant_verifications[0];
-            assert!(
-                verification.maximum_equality_residual <= 1.0e-9,
-                "{verification:?}"
+            assert_eq!(
+                raw.stable_boundaries.truncated_univariants.len(),
+                regularized.stable_boundaries.truncated_univariants.len()
             );
         }
     }

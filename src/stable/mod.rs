@@ -10,6 +10,7 @@ mod paths;
 mod prepare;
 mod sample;
 mod segments;
+mod signature;
 mod source;
 mod verify;
 
@@ -29,6 +30,12 @@ pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostic
 pub use error::{StableContourError, StableSourceEvaluationError};
 pub use options::{StableGridOptions, StableGridVerification};
 pub use prepare::PreparedStablePhaseEnsemble;
+pub use signature::{
+    StableEdgeSignature, StableNodeGeometrySignature, StableNodeKindSignature, StableNodeSignature,
+    StableTopologyComparison, StableTopologyComparisonMode, StableTopologySignature,
+    StableTruncatedBranchSignature, assert_same_stable_topology, compare_stable_topology,
+    stable_topology_signature,
+};
 pub use source::{
     StableContourQuantity, StablePhaseEvaluation, StablePhaseEvaluator, StablePhaseId,
     StablePhaseSource, StablePhaseUndefinedReason, StableScalarSource,

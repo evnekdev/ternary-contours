@@ -176,3 +176,19 @@ the convex hull of its samples, without holes or constrained edges.
 
 Irregular cubic-alpha filled bands, constrained meshing, and parallel or C ABI
 execution remain outside this validation milestone.
+
+## Stable-topology convergence terminology
+
+A calculation is **repeatable** when repeated requests with identical inputs
+produce identical canonical topology signatures. It is **topology converged**
+over a tested resolution range when invariant phase sets, univariant endpoint
+connectivity, and truncated-branch classifications agree. It is **geometry
+converged** only when matched roots also meet the documented composition and
+temperature movement limits. These are fixture-specific numerical observations,
+not universal physical validation.
+
+The audit reports `Raw`, `Regularized`, and `RawFallback` independently.
+Regularization may change interior samples but must not change invariant nodes,
+phase pairs, endpoints, or graph incidence. Interior invariant verification
+reports the maximum pairwise equality residual and the stability margin to the
+highest non-participating phase.

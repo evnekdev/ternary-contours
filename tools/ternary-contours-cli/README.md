@@ -274,3 +274,9 @@ cargo run -p ternary-contours-cli -- extrapolate-mesh input.tct \
 The command writes `EX[layer,method,support,spread]=value` cells only after a
 successful preview. EX cells are estimates with persistent provenance; a normal
 field edit clears its existing EX values to `NA` before changing the source.
+
+Use `--process-repeats 5` to make the audit run independent child processes and
+compare exact, tolerance-aware, and topology-only graph hashes. A topology-only
+mismatch is a determinism failure. The normal audit matrix is intentionally
+configurable; run the full interpolation sensitivity matrix in a manual or
+nightly investigation, not on every interactive Viewer edit.
