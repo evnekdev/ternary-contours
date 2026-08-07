@@ -14,6 +14,12 @@ FILES = list((ROOT / "apps" / "ternary-contours-qt" / "src").glob("*.cpp")) + li
 FILES += list((ROOT / "apps" / "ternary-contours-qt" / "rust-bridge" / "src").glob("*.rs"))
 FILES += list((ROOT / "tools" / "ternary-contours-gui-core" / "src").glob("*.rs"))
 FILES += [ROOT / "tools" / "ternary-contours-cli" / "src" / "render.rs"]
+# Projection CSV deliberately is not scanned: it is a data-serialization
+# context that must write shortest round-trip-safe f64 values, never GUI text.
+DATA_SERIALIZATION_CONTEXTS = {
+    ROOT / "tools" / "ternary-contours-cli" / "src" / "projection_csv.rs",
+}
+assert all(context not in FILES for context in DATA_SERIALIZATION_CONTEXTS)
 PATTERNS = [
     re.compile(r"(?:QString::number|toString)\s*\([^\n]*,\s*['\"](?:g|f)['\"]"),
     re.compile(r"format!\s*\([^\n]*\{[^\n}]*:\.?\d+(?:\.\d+)?f"),

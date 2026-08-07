@@ -44,9 +44,10 @@ first calculation succeeds.
 
 The Plot-side panel owns all current options:
 
-- Levels accept `800,900,1000` or `800:1400:50`; invalid text is reported
-  before calculation and never crashes the window. Levels commit on Enter or
-  when the control loses focus.
+- Levels accept `800,900,1000`, `800 1400 50`, or
+  `800 1400 50; 815.96,900`; invalid text is reported before calculation and
+  never crashes the window. Levels commit on Enter or when the control loses
+  focus.
 - Sampling subdivisions and regularization spacing likewise commit only on a
   valid Enter/focus change; the UI retains invalid text and explains the error.
   Committed numerical changes are debounced for a short interval and coalesced
@@ -142,15 +143,48 @@ is deliberately kept in Diagnostics instead of the export.
 
 ## Export and limits
 
-Export uses the same static Plotters configuration as the view. **Export SVG**,
-**Export PNG**, and **Export lines CSV** each open a native Save dialog with an
-appropriate file filter; cancelling changes nothing. Image filenames suggest
-`<input>-projection.svg` or `.png`, and line CSV suggests `<input>-lines.csv`.
-The last export directory is used first, followed by the document directory,
-the last Open/Save directory, then the working directory. The status area
-reports the final path or a full output error.
+**Export PNG** and **Export SVG** use the same accepted projection snapshot as
+the Viewer. **Export CSV...** opens a modal export workflow instead of writing
+immediately. It starts with the last successful CSV location for the current
+session, otherwise `<document-stem>.csv` beside the TCT document, then a
+sensible session default. The editable path can be changed through **Browse...**
+without exporting. Select one or more independent sections: **Invariants**,
+**Univariants**, and **Isotherms**; then confirm with **OK**. A missing extension
+gets `.csv`; an explicitly supplied non-CSV extension is left untouched.
+Existing files require a Replace/Cancel confirmation. Output is written through
+a temporary sibling and atomically renamed where supported, so a failed write
+leaves an existing destination intact.
 
-Line CSV is UTF-8, RFC-compatible, CRLF-delimited for Excel, and contains one
+The dialog pins the accepted projection revision visible when it opened. A
+pending or failed recalculation therefore cannot change the exported geometry:
+it exports the retained visible result. If a newer calculation is accepted
+before confirmation, the dialog asks to be reopened rather than mixing
+snapshots. Raw mode exports raw paths; regularized mode exports the selected
+regularized geometry, including per-path raw fallbacks; overlay exports that
+same regularized primary geometry once.
+
+Projection CSV is UTF-8, RFC-compatible, CRLF-delimited, and intentionally a
+data format rather than a display format. Its exact seven-column header is the
+three declared component names, `T, <unit>`, `phase1`, `phase2`, and `phase3`.
+Numbers use locale-independent shortest round-trip-safe `f64` text, not the
+Viewer's fixed decimal labels. Invariants appear first (one row each), then
+complete univariant paths, then phase-owned isotherm segments. Each selected
+section and every separate path are divided by a physically blank line; no
+internal IDs, rendering styles, point indices, or diagnostic columns are
+exported.
+
+The **Levels** edit is always editable concrete text. It accepts `minimum
+maximum step`, a comma-separated manual list, or both forms separated by `;`.
+When its origin is automatic, the accepted stable topology supplies actual
+text: the minimum is `ceil(min invariant temperature / 100) * 100`, the maximum
+is `floor(max invariant temperature / 100) * 100`, and the step is `100`.
+**Reset to automatic range** returns to this `AutoDerived` behaviour. A valid
+manual commit becomes `UserEdited` and is not overwritten by a later topology
+calculation. If invariants cannot produce a finite whole-hundred range, the
+last valid manual specification remains visible when one exists; otherwise the
+field is visibly invalid or empty with an explanation. It never says
+`automatic` and never falls back to sampled extrema. Level-only edits retain
+stable topology and rebuild only level-dependent contours.
 
 Zoom/pan is intentionally a viewer-only bitmap transform rather than an
 arbitrary Plotters viewport. It preserves the renderer and numerical pipeline,
@@ -218,7 +252,7 @@ Both result tables sort all columns through typed sort values rather than format
 
 ## Presentation contract
 
-Viewer presentation uses fixed-point display formatting only: temperatures use two decimal places, compositions use five, and other properties use three. This is an interface convention, not a numerical precision limit; stored values, calculations, serialization, exports, cache keys, and traces retain full precision.
+Viewer presentation uses fixed-point display formatting only: temperatures use two decimal places, compositions use five, and other properties use three. This is an interface convention, not a numerical precision limit; stored values, calculations, TCT serialization, cache keys, and traces retain full precision. Projection CSV is explicitly a data-serialization exception: it uses shortest round-trip-safe numbers rather than GUI display precision.
 
 The compact isotherm editor accepts `minimum maximum step`, a comma-separated explicit list, or both separated by `;` (for example, `700 1200 50; 815.96, 925`). Duplicate levels are canonicalized using the numerical level tolerance. Invalid text remains visible and does not replace the last accepted projection.
 

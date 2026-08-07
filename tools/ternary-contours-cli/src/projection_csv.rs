@@ -327,6 +327,287 @@ fn push_record(
     Ok(())
 }
 
+/// Semantic section selection for the compact thermodynamic geometry CSV.
+///
+/// Unlike [`ProjectionCsvRecord`], this format deliberately contains no render
+/// IDs, point indices, or styling data.  It is the export used by the Qt
+/// Projection CSV dialog.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectionGeometryCsvSelection {
+    pub invariants: bool,
+    pub univariants: bool,
+    pub isotherms: bool,
+}
+
+impl Default for ProjectionGeometryCsvSelection {
+    fn default() -> Self {
+        Self {
+            invariants: true,
+            univariants: true,
+            isotherms: true,
+        }
+    }
+}
+
+impl ProjectionGeometryCsvSelection {
+    pub const fn any(self) -> bool {
+        self.invariants || self.univariants || self.isotherms
+    }
+}
+
+/// Serialize an accepted projection as simple thermodynamic geometry.
+///
+/// Numeric cells use `f64::to_string`, Rust's shortest round-trip-safe decimal
+/// representation.  This is a data serialization boundary, intentionally
+/// distinct from the fixed-decimal GUI presentation contract.
+pub fn serialize_projection_geometry_csv(
+    dataset: &TabulatedTernaryDataset,
+    projection: &LiquidusProjection,
+    selection: ProjectionGeometryCsvSelection,
+) -> Result<String, ProjectionCsvError> {
+    if !selection.any() {
+        return Err(ProjectionCsvError::NoRows);
+    }
+
+    let temperature = dataset
+        .properties
+        .iter()
+        .find(|property| property.name.eq_ignore_ascii_case("T"))
+        .or_else(|| dataset.properties.iter().find(|property| property.required));
+    let temperature_name = temperature
+        .map(|property| property.name.as_str())
+        .unwrap_or("T");
+    let temperature_unit = temperature
+        .map(|property| property.unit.as_str())
+        .unwrap_or("");
+    let temperature_heading = if temperature_unit.is_empty() {
+        temperature_name.to_owned()
+    } else {
+        format!("{temperature_name}, {temperature_unit}")
+    };
+    let mut output = [
+        csv_text(&dataset.components[0].name),
+        csv_text(&dataset.components[1].name),
+        csv_text(&dataset.components[2].name),
+        csv_text(&temperature_heading),
+        "phase1".to_owned(),
+        "phase2".to_owned(),
+        "phase3".to_owned(),
+    ]
+    .join(",");
+    output.push_str("\r\n");
+
+    // The flag retains the required physical blank line after every complete
+    // univariant, including the final selected path.
+    let mut sections = Vec::<(String, bool)>::new();
+    if selection.invariants {
+        let mut nodes = projection
+            .stable_boundaries
+            .nodes
+            .iter()
+            .collect::<Vec<_>>();
+        nodes.sort_by(|left, right| {
+            compare_invariant_sort_keys(
+                invariant_sort_key(dataset, left),
+                invariant_sort_key(dataset, right),
+            )
+        });
+        let mut section = String::new();
+        for node in nodes {
+            let mut phases = node
+                .phases()
+                .iter()
+                .copied()
+                .map(|phase| phase_name(dataset, phase))
+                .collect::<Vec<_>>();
+            phases.sort();
+            phases.truncate(3);
+            write_geometry_row(
+                &mut section,
+                node.point().as_array(),
+                node.temperature(),
+                [
+                    phases.first().map(String::as_str),
+                    phases.get(1).map(String::as_str),
+                    phases.get(2).map(String::as_str),
+                ],
+            )?;
+        }
+        if !section.is_empty() {
+            sections.push((section.trim_end_matches("\r\n").to_owned(), false));
+        }
+    }
+
+    if selection.univariants {
+        let mut paths = projection
+            .stable_boundaries
+            .univariants
+            .iter()
+            .collect::<Vec<_>>();
+        paths.sort_by(|left, right| {
+            univariant_sort_key(dataset, left).cmp(&univariant_sort_key(dataset, right))
+        });
+        let mut section = String::new();
+        for path in paths {
+            if path.points.len() != path.temperatures.len() {
+                return Err(ProjectionCsvError::UnivariantTemperatureCount {
+                    line_id: format!("univariant-{}", path.id.0),
+                    point_count: path.points.len(),
+                    temperature_count: path.temperatures.len(),
+                });
+            }
+            let first = phase_name(dataset, path.phases.first);
+            let second = phase_name(dataset, path.phases.second);
+            for (point, temperature) in path.points.iter().zip(&path.temperatures) {
+                write_geometry_row(
+                    &mut section,
+                    point.as_array(),
+                    *temperature,
+                    [Some(first.as_str()), Some(second.as_str()), None],
+                )?;
+            }
+            // A physically empty line, not seven empty CSV fields, separates
+            // every complete phase-pair path.
+            section.push_str("\r\n");
+        }
+        if !section.is_empty() {
+            sections.push((section.trim_end_matches("\r\n").to_owned(), true));
+        }
+    }
+
+    if selection.isotherms {
+        let mut paths = projection
+            .stable_contours
+            .levels
+            .iter()
+            .flat_map(|level| level.paths.iter().map(move |path| (level.value, path)))
+            .collect::<Vec<_>>();
+        paths.sort_by(|(left_level, left_path), (right_level, right_path)| {
+            left_level
+                .total_cmp(right_level)
+                .then_with(|| {
+                    phase_name(dataset, left_path.phase).cmp(&phase_name(dataset, right_path.phase))
+                })
+                .then_with(|| {
+                    first_point_key(left_path.points.first())
+                        .cmp(&first_point_key(right_path.points.first()))
+                })
+        });
+        let mut section = String::new();
+        for (level, path) in paths {
+            let phase = phase_name(dataset, path.phase);
+            for point in &path.points {
+                write_geometry_row(
+                    &mut section,
+                    point.as_array(),
+                    level,
+                    [Some(phase.as_str()), None, None],
+                )?;
+            }
+            // A path can be empty only for an invalid calculation, but keeping
+            // separators path-based preserves component boundaries faithfully.
+            section.push_str("\r\n");
+        }
+        if !section.is_empty() {
+            sections.push((section.trim_end_matches("\r\n").to_owned(), false));
+        }
+    }
+
+    if sections.is_empty() {
+        return Err(ProjectionCsvError::NoRows);
+    }
+    for (index, (section, ends_with_blank_line)) in sections.iter().enumerate() {
+        output.push_str(section);
+        if *ends_with_blank_line || index + 1 < sections.len() {
+            // A physical blank line is two record terminators, not a row of
+            // seven empty CSV cells.  A univariant's own terminal separator
+            // also separates it from a following isotherm section.
+            output.push_str("\r\n\r\n");
+        } else {
+            output.push_str("\r\n");
+        }
+    }
+    Ok(output)
+}
+
+fn invariant_sort_key(
+    dataset: &TabulatedTernaryDataset,
+    node: &StableInvariantNode,
+) -> (f64, f64, f64, String) {
+    let point = node.point().as_array();
+    let mut phases = node
+        .phases()
+        .iter()
+        .copied()
+        .map(|phase| phase_name(dataset, phase))
+        .collect::<Vec<_>>();
+    phases.sort();
+    (point[0], point[1], point[2], phases.join("\u{1f}"))
+}
+
+fn compare_invariant_sort_keys(
+    left: (f64, f64, f64, String),
+    right: (f64, f64, f64, String),
+) -> std::cmp::Ordering {
+    left.0
+        .total_cmp(&right.0)
+        .then_with(|| left.1.total_cmp(&right.1))
+        .then_with(|| left.2.total_cmp(&right.2))
+        .then_with(|| left.3.cmp(&right.3))
+}
+
+fn univariant_sort_key(
+    dataset: &TabulatedTernaryDataset,
+    path: &ternary_contours::StableUnivariantPath,
+) -> (String, String, [u64; 3], [u64; 3]) {
+    let first = phase_name(dataset, path.phases.first);
+    let second = phase_name(dataset, path.phases.second);
+    let (first, second) = if first <= second {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let start = first_point_key(path.points.first());
+    let end = first_point_key(path.points.last());
+    let (start, end) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    (first, second, start, end)
+}
+
+fn first_point_key(point: Option<&ternary_contours::TernaryCoordinate>) -> [u64; 3] {
+    point.map_or([0; 3], |point| point.as_array().map(f64::to_bits))
+}
+
+fn write_geometry_row(
+    output: &mut String,
+    composition: [f64; 3],
+    temperature: f64,
+    phases: [Option<&str>; 3],
+) -> Result<(), ProjectionCsvError> {
+    if composition.iter().any(|value| !value.is_finite()) || !temperature.is_finite() {
+        return Err(ProjectionCsvError::NonFinite {
+            line_id: "projection geometry".into(),
+            point_index: 0,
+            what: "geometry CSV value",
+        });
+    }
+    let row = [
+        number(composition[0]),
+        number(composition[1]),
+        number(composition[2]),
+        number(temperature),
+        optional_text(phases[0]),
+        optional_text(phases[1]),
+        optional_text(phases[2]),
+    ];
+    output.push_str(&row.join(","));
+    output.push_str("\r\n");
+    Ok(())
+}
+
 pub fn serialize_projection_csv(
     records: &[ProjectionCsvRecord],
 ) -> Result<String, ProjectionCsvError> {
@@ -481,6 +762,95 @@ mod tests {
                 .all(|record| record.line_type == ProjectionLineType::StableUnivariant)
         );
     }
+    #[test]
+    fn geometry_csv_has_the_compact_schema_sections_and_round_trip_numbers() {
+        let (mut dataset, projection) = fixture();
+        dataset.components[0].name = "CaO".into();
+        dataset.components[1].name = "PbO".into();
+        dataset.components[2].name = "ZnO".into();
+        let temperature = dataset
+            .properties
+            .iter_mut()
+            .find(|property| property.name == "T")
+            .expect("temperature property");
+        temperature.unit = "C".into();
+        let csv = serialize_projection_geometry_csv(
+            &dataset,
+            &projection,
+            ProjectionGeometryCsvSelection::default(),
+        )
+        .unwrap();
+        assert!(csv.starts_with("CaO,PbO,ZnO,\"T, C\",phase1,phase2,phase3\r\n"));
+        assert!(
+            csv.contains("\r\n\r\n"),
+            "sections and paths use physical blank lines"
+        );
+        for row in csv.lines().skip(1).filter(|row| !row.is_empty()) {
+            assert_eq!(
+                row.split(',').count(),
+                7,
+                "row must have exactly seven fields: {row}"
+            );
+        }
+        let precise = 0.094_813_237_512_345_f64;
+        let serialized = number(precise);
+        assert_eq!(
+            serialized.parse::<f64>().unwrap().to_bits(),
+            precise.to_bits()
+        );
+        assert_ne!(serialized, "0.09481", "CSV is not GUI display precision");
+    }
+
+    #[test]
+    fn geometry_csv_honours_section_selection_without_placeholder_rows() {
+        let (dataset, projection) = fixture();
+        let csv = serialize_projection_geometry_csv(
+            &dataset,
+            &projection,
+            ProjectionGeometryCsvSelection {
+                invariants: true,
+                univariants: false,
+                isotherms: false,
+            },
+        )
+        .unwrap();
+        assert!(!csv.contains(",,,,,,"));
+        assert!(
+            csv.lines()
+                .skip(1)
+                .all(|row| row.is_empty() || row.split(',').count() == 7)
+        );
+        assert!(matches!(
+            serialize_projection_geometry_csv(
+                &dataset,
+                &projection,
+                ProjectionGeometryCsvSelection {
+                    invariants: false,
+                    univariants: false,
+                    isotherms: false
+                },
+            ),
+            Err(ProjectionCsvError::NoRows)
+        ));
+    }
+
+    #[test]
+    fn univariant_only_geometry_csv_keeps_a_terminal_physical_blank_line() {
+        let (dataset, projection) = fixture();
+        let csv = serialize_projection_geometry_csv(
+            &dataset,
+            &projection,
+            ProjectionGeometryCsvSelection {
+                invariants: false,
+                univariants: true,
+                isotherms: false,
+            },
+        )
+        .unwrap();
+        assert!(csv.ends_with("\r\n\r\n"));
+        assert!(!csv.contains(",,,,,,"));
+    }
+
     #[test]
     fn csv_quotes_text_and_rejects_empty_records() {
         assert_eq!(csv_text("phase, \"quoted\""), "\"phase, \"\"quoted\"\"\"");

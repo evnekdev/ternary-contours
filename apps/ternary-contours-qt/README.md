@@ -67,3 +67,18 @@ The source test `visible_qt_viewer_controls_use_the_thin_adapter_and_rust_bridge
 checks the generated UI inventory, action bindings, distinct calculated-layer
 commands, Rust option APIs, and the absence of the obsolete no-argument
 calculation entry point.
+
+## Isotherm levels and CSV export
+
+The Viewer has one editable **Levels** field. It uses the typed grammar
+`minimum maximum step`, a comma-separated manual list, or a range followed by
+`;` and extra levels. `AutoDerived` display is never a magic word: after a
+stable topology is accepted it writes the invariant-derived `minimum maximum
+100` specification. A user commit is `UserEdited`, remains authoritative
+across topology changes, and uses the Rust level-only recalculation path.
+
+**Export CSV...** is a modal, revision-pinned workflow. Qt supplies only the
+path and three content selections; the Rust bridge serializes the accepted
+projection snapshot into seven thermodynamic geometry columns at full
+round-trip precision, with atomic file replacement. CSV formatting is data
+serialization and must not use the GUI fixed-decimal formatter.

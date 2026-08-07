@@ -13,6 +13,14 @@ struct TcqtViewerCalculationOptions {
     std::uint32_t explicit_level_count; double explicit_levels[256];
 };
 struct TcqtViewerCalculationState { TcqtViewerCalculationOptions options; std::uint64_t options_revision; };
+struct TcqtProjectionCsvExportOptions {
+    bool invariants; bool univariants; bool isotherms;
+    // 0 = raw, 1 = regularized, 2 = overlay (regularized primary).
+    std::uint32_t path_display_mode;
+    std::uint64_t expected_dataset_revision;
+    std::uint64_t expected_options_revision;
+    std::uint64_t expected_request_id;
+};
 struct TcqtProjectionSummary {
     bool available; double source_minimum; double source_maximum; double automatic_minimum;
     bool automatic_used_invariant; std::uint32_t level_count; std::uint32_t invariant_count;
@@ -180,5 +188,6 @@ TcqtStatus tcqt_projection_record_count(std::uint32_t* output);
 TcqtStatus tcqt_projection_record_at(std::uint32_t index, TcqtProjectionRecord* output);
 TcqtStatus tcqt_export_plot(const char* path, std::uint32_t format);
 TcqtStatus tcqt_export_lines_csv(const char* path);
+TcqtStatus tcqt_export_projection_csv(const char* path, const TcqtProjectionCsvExportOptions* options);
 TcqtCalculationResult tcqt_run_feasibility_calculation(std::uint32_t subdivisions, std::uint64_t dataset_revision);
 }

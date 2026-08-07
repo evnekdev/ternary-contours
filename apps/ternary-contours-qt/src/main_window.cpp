@@ -41,6 +41,8 @@
 #include <QTextEdit>
 #include <QTableWidget>
 #include <QHeaderView>
+#include <QHBoxLayout>
+#include <QDir>
 #include <QVBoxLayout>
 #include <QMessageBox>
 #include <QSettings>
@@ -83,6 +85,7 @@ constexpr int default_regular_subdivisions = 10;
 constexpr std::uint32_t invalid_viewer_abi = std::numeric_limits<std::uint32_t>::max();
 constexpr qulonglong no_table_id = std::numeric_limits<qulonglong>::max();
 constexpr std::uint32_t mesh_scope_field = 0;
+enum class ProjectionCsvExportDialogState { Editing, NativeChooser, ConfirmOverwrite, Writing };
 constexpr std::uint32_t mesh_scope_phase = 1;
 constexpr std::uint32_t mesh_scope_targets = 2;
 constexpr std::uint32_t abi_source_linear = 0;
@@ -416,16 +419,9 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->comboViewerLabelMode, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelMode); });
     connect(ui_->spinViewerLabelDecimals, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelDecimals); });
     connect(ui_->checkViewerLabelsSelectedOnly, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelsSelectedOnly); });
-    connect(ui_->checkViewerAutomaticRange, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetAutomaticRange); });
-    // The compact specification is authoritative; legacy individual editors remain
-    // in the .ui only for settings-file compatibility and are hidden.
-    for (QWidget* legacy : {static_cast<QWidget*>(ui_->labelViewerTmin), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->labelViewerTmax), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->labelViewerStep), static_cast<QWidget*>(ui_->editViewerStep)}) legacy->setVisible(false);
     ui_->checkViewerInvariantIds->setVisible(false);
     ui_->checkViewerUnivariantIds->setVisible(false);
     connect(ui_->editViewerIsoLevelSpec, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoLevelSpec); });
-    connect(ui_->editViewerTmin, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoMinimum); });
-    connect(ui_->editViewerTmax, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoMaximum); });
-    connect(ui_->editViewerStep, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoStep); });
     connect(ui_->spinViewerSamplingSubdivisions, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetSamplingSubdivisions); });
     connect(ui_->comboViewerSourceInterpolation, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetSourceInterpolation); });
     connect(ui_->comboViewerCubicMethod, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetCubicMethod); });
@@ -726,6 +722,8 @@ void MainWindow::newDocument() {
     if (result.success) {
         viewer_.has_last_valid_projection = false;
         viewer_.projection_is_stale = false;
+        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
+        viewer_.last_user_iso_level_spec.clear();
         viewer_.selected_rows.clear();
         viewer_.queries.clear();
         ui_->canvasTernary->setProjectionPaths({});
@@ -756,6 +754,8 @@ void MainWindow::openDocument() {
     }
     viewer_.has_last_valid_projection = false;
     viewer_.projection_is_stale = false;
+    viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
+    viewer_.last_user_iso_level_spec.clear();
     viewer_.selected_rows.clear();
     viewer_.queries.clear();
     ui_->canvasTernary->setProjectionPaths({});
@@ -834,8 +834,123 @@ void MainWindow::exportSvg() {
     if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_plot(encoded.constData(), 1); reportBridgeStatus(statusText(result), result.success);
 }
 void MainWindow::exportLinesCsv() {
-    const auto path = QFileDialog::getSaveFileName(this, tr("Export contour lines CSV"), {}, tr("CSV files (*.csv)"));
-    if (path.isEmpty()) return; const auto encoded = path.toUtf8(); const auto result = tcqt_export_lines_csv(encoded.constData()); reportBridgeStatus(statusText(result), result.success);
+    TcqtProjectionSummary snapshot{};
+    const auto snapshot_status = tcqt_projection_summary(&snapshot);
+    if (!snapshot_status.success || !snapshot.available) {
+        reportBridgeStatus(snapshot_status.success ? tr("Calculate a projection before exporting it.") : statusText(snapshot_status), false);
+        return;
+    }
+
+    TcqtProjectSummary project{};
+    const auto project_status = tcqt_project_summary(&project);
+    QString initial_path = last_projection_csv_path_;
+    if (initial_path.isEmpty() && project_status.success) {
+        const auto document_path = text(project.path);
+        if (!document_path.isEmpty()) {
+            const QFileInfo document_info(document_path);
+            initial_path = document_info.dir().filePath(document_info.completeBaseName() + QStringLiteral(".csv"));
+        }
+    }
+    if (initial_path.isEmpty()) initial_path = QDir::current().filePath(QStringLiteral("projection.csv"));
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("Export projection CSV"));
+    dialog.setModal(true);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* form = new QFormLayout;
+    auto* path_edit = new QLineEdit(initial_path, &dialog);
+    path_edit->setAccessibleName(tr("Projection CSV file"));
+    auto* browse = new QPushButton(tr("Browse..."), &dialog);
+    auto* path_row = new QWidget(&dialog);
+    auto* path_layout = new QHBoxLayout(path_row);
+    path_layout->setContentsMargins(0, 0, 0, 0);
+    path_layout->addWidget(path_edit, 1);
+    path_layout->addWidget(browse);
+    form->addRow(tr("File:"), path_row);
+    layout->addLayout(form);
+    auto* contents = new QGroupBox(tr("Contents"), &dialog);
+    auto* contents_layout = new QVBoxLayout(contents);
+    auto* invariants = new QCheckBox(tr("Invariants"), contents);
+    auto* univariants = new QCheckBox(tr("Univariants"), contents);
+    auto* isotherms = new QCheckBox(tr("Isotherms"), contents);
+    invariants->setChecked(true);
+    univariants->setChecked(true);
+    isotherms->setChecked(true);
+    contents_layout->addWidget(invariants);
+    contents_layout->addWidget(univariants);
+    contents_layout->addWidget(isotherms);
+    layout->addWidget(contents);
+    auto* validation = new QLabel(&dialog);
+    validation->setWordWrap(true);
+    validation->setAccessibleName(tr("Projection CSV export validation"));
+    layout->addWidget(validation);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    auto* ok = buttons->button(QDialogButtonBox::Ok);
+    layout->addWidget(buttons);
+    ProjectionCsvExportDialogState state = ProjectionCsvExportDialogState::Editing;
+    const auto update_validity = [&] {
+        const bool selected = invariants->isChecked() || univariants->isChecked() || isotherms->isChecked();
+        const bool path_present = !path_edit->text().trimmed().isEmpty();
+        ok->setEnabled(selected && path_present && state == ProjectionCsvExportDialogState::Editing);
+        if (!selected) validation->setText(tr("Select at least one geometry category."));
+        else if (!path_present) validation->setText(tr("Enter an export file path."));
+        else if (state == ProjectionCsvExportDialogState::Editing) validation->clear();
+    };
+    const auto browse_for_path = [&] {
+        state = ProjectionCsvExportDialogState::NativeChooser;
+        const auto chosen = QFileDialog::getSaveFileName(&dialog, tr("Export projection CSV"), path_edit->text(), tr("CSV files (*.csv);;All files (*)"));
+        if (!chosen.isEmpty()) path_edit->setText(chosen);
+        state = ProjectionCsvExportDialogState::Editing;
+        update_validity();
+    };
+    connect(browse, &QPushButton::clicked, &dialog, browse_for_path);
+    connect(path_edit, &QLineEdit::textChanged, &dialog, update_validity);
+    for (auto* check : {invariants, univariants, isotherms}) {
+        connect(check, &QCheckBox::toggled, &dialog, update_validity);
+    }
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
+        update_validity();
+        if (!ok->isEnabled()) return;
+        QString path = path_edit->text().trimmed();
+        if (QFileInfo(path).suffix().isEmpty()) path += QStringLiteral(".csv");
+        if (QFileInfo::exists(path)) {
+            state = ProjectionCsvExportDialogState::ConfirmOverwrite;
+            QMessageBox confirmation(QMessageBox::Question, tr("Replace existing file?"),
+                                      tr("Replace existing file?"), QMessageBox::NoButton, &dialog);
+            auto* replace = confirmation.addButton(tr("Replace"), QMessageBox::AcceptRole);
+            confirmation.addButton(QMessageBox::Cancel);
+            confirmation.exec();
+            if (confirmation.clickedButton() != replace) {
+                state = ProjectionCsvExportDialogState::Editing;
+                update_validity();
+                return;
+            }
+        }
+        state = ProjectionCsvExportDialogState::Writing;
+        ok->setEnabled(false);
+        TcqtProjectionCsvExportOptions export_options{};
+        export_options.invariants = invariants->isChecked();
+        export_options.univariants = univariants->isChecked();
+        export_options.isotherms = isotherms->isChecked();
+        export_options.path_display_mode = static_cast<std::uint32_t>(viewer_.path_display_mode);
+        export_options.expected_dataset_revision = snapshot.dataset_revision;
+        export_options.expected_options_revision = snapshot.options_revision;
+        export_options.expected_request_id = snapshot.request_id;
+        const auto encoded = path.toUtf8();
+        const auto result = tcqt_export_projection_csv(encoded.constData(), &export_options);
+        if (!result.success) {
+            state = ProjectionCsvExportDialogState::Editing;
+            validation->setText(statusText(result));
+            update_validity();
+            return;
+        }
+        last_projection_csv_path_ = path;
+        dialog.setProperty("successfulExportPath", path);
+        dialog.accept();
+    });
+    update_validity();
+    if (dialog.exec() == QDialog::Accepted) reportBridgeStatus(tr("Projection CSV exported to %1").arg(last_projection_csv_path_), true);
 }
 
 void MainWindow::addGrid(bool regular) {
@@ -1439,12 +1554,6 @@ void MainWindow::runRustCalculation() {
             } else {
                 viewer_.has_last_valid_projection = true;
                 viewer_.projection_is_stale = false;
-                if (projection.effective_automatic_range) {
-                    const QSignalBlocker min_blocker(ui_->editViewerTmin);
-                    const QSignalBlocker max_blocker(ui_->editViewerTmax);
-                    ui_->editViewerTmin->setText(displayTemperature(projection.effective_minimum));
-                    ui_->editViewerTmax->setText(displayTemperature(projection.effective_maximum));
-                }
                 auto projection_summary = tr("%1 levels, %2 binary invariants, %3 ternary invariant%4, %5 complete univariants, %6 isotherm paths")
                     .arg(projection.level_count)
                     .arg(projection.binary_invariant_count)
@@ -1960,13 +2069,6 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::SetLabelMode: viewer_.label_mode = ui_->comboViewerLabelMode->currentIndex(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetLabelDecimals: viewer_.label_decimals = ui_->spinViewerLabelDecimals->value(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetLabelsSelectedOnly: viewer_.labels_selected_only = ui_->checkViewerLabelsSelectedOnly->isChecked(); refreshViewerVertices(); break;
-    case ViewerWidgetCommand::SetAutomaticRange:
-        viewer_.options.automatic_range = ui_->checkViewerAutomaticRange->isChecked();
-        if (viewer_.options.automatic_range) { viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); }
-        schedule_calculation = commitViewerCalculationOptions(action); break;
-    case ViewerWidgetCommand::CommitIsoMinimum:
-    case ViewerWidgetCommand::CommitIsoMaximum:
-    case ViewerWidgetCommand::CommitIsoStep:
     case ViewerWidgetCommand::CommitIsoLevelSpec:
     case ViewerWidgetCommand::SetSamplingSubdivisions:
     case ViewerWidgetCommand::SetSourceInterpolation:
@@ -2021,7 +2123,15 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
         clearAllInterpolationQueries();
         break;
     case ViewerWidgetCommand::ResetAutomaticRange:
-        viewer_.options.automatic_range = true; viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); schedule_calculation = commitViewerCalculationOptions(action); break;
+        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
+        // Retain a valid manual specification as the visible fallback when
+        // invariant temperatures cannot form a whole-step automatic range.
+        viewer_.options.automatic_range = true;
+        viewer_.options.level_step = 100.0;
+        viewer_.options.explicit_level_count = 0;
+        std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0);
+        schedule_calculation = commitViewerCalculationOptions(action);
+        break;
     default: break;
     }
     if (schedule_calculation) scheduleViewerCalculation();
@@ -2048,6 +2158,8 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
             return false;
         }
         ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::UserEdited;
+        viewer_.last_user_iso_level_spec = ui_->editViewerIsoLevelSpec->text().trimmed();
         viewer_.options.automatic_range = false;
         viewer_.options.explicit_level_count = static_cast<std::uint32_t>(parsed.levels.size());
         std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0);
@@ -2055,11 +2167,7 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
         if (parsed.has_range) { viewer_.options.minimum = parsed.minimum; viewer_.options.maximum = parsed.maximum; viewer_.options.level_step = parsed.step; }
         else { viewer_.options.minimum = parsed.levels.front(); viewer_.options.maximum = parsed.levels.back(); viewer_.options.level_step = parsed.levels.size() > 1 ? parsed.levels.at(1) - parsed.levels.at(0) : 1.0; }
     }
-    if (source == ViewerWidgetCommand::CommitIsoMinimum && !commitViewerNumber(ui_->editViewerTmin, &viewer_.options.minimum, tr("Tmin"))) return false;
-    if (source == ViewerWidgetCommand::CommitIsoMaximum && !commitViewerNumber(ui_->editViewerTmax, &viewer_.options.maximum, tr("Tmax"))) return false;
-    if (source == ViewerWidgetCommand::CommitIsoStep && !finite_positive(ui_->editViewerStep, &viewer_.options.level_step, tr("Step"))) return false;
     if (source == ViewerWidgetCommand::SetRegularizationSpacing && !finite_positive(ui_->editViewerRegularizationSpacing, &viewer_.options.regularization_spacing, tr("Regularization spacing"))) return false;
-    if (source == ViewerWidgetCommand::CommitIsoMinimum || source == ViewerWidgetCommand::CommitIsoMaximum || source == ViewerWidgetCommand::CommitIsoStep) { viewer_.options.automatic_range = false; viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); }
     auto source_interpolation = sourceInterpolationAbi(ui_->comboViewerSourceInterpolation->currentIndex());
     const auto cubic_method = cubicMethodAbi(ui_->comboViewerCubicMethod->currentIndex());
     const auto partial_domain = partialDomainAbi(ui_->comboViewerPartialDomain->currentIndex());
@@ -2144,7 +2252,6 @@ void MainWindow::syncViewerPanelControls() {
     set_panel(ui_->checkViewerInteriorInvariants, viewer_.show_interior_invariants); set_panel(ui_->checkViewerAxisLabels, viewer_.show_axis_labels);
     set_panel(ui_->checkViewerIsoLineLabels, viewer_.show_iso_line_labels);
     set_panel(ui_->checkViewerCornerNames, viewer_.show_corner_names); set_panel(ui_->checkViewerLegend, viewer_.show_legend);
-    set_panel(ui_->checkViewerAutomaticRange, viewer_.options.automatic_range);
     { const QSignalBlocker blocker(ui_->comboViewerMode); ui_->comboViewerMode->setCurrentIndex(viewer_.interaction_mode); }
     { const QSignalBlocker blocker(ui_->spinViewerSamplingSubdivisions); ui_->spinViewerSamplingSubdivisions->setValue(static_cast<int>(viewer_.options.sampling_subdivisions)); }
     { const QSignalBlocker blocker(ui_->comboViewerSourceInterpolation); ui_->comboViewerSourceInterpolation->setCurrentIndex(sourceInterpolationIndex(viewer_.options.source_interpolation)); }
@@ -2154,14 +2261,36 @@ void MainWindow::syncViewerPanelControls() {
     { const QSignalBlocker blocker(ui_->checkViewerRegularizePaths); ui_->checkViewerRegularizePaths->setChecked(viewer_.options.regularize); }
     {
         const QSignalBlocker blocker(ui_->editViewerIsoLevelSpec);
-        if (viewer_.options.explicit_level_count != 0) {
+        if (viewer_.iso_level_spec_origin == IsoLevelSpecOrigin::AutoDerived) {
+            TcqtProjectionSummary projection{};
+            if (tcqt_projection_summary(&projection).success && projection.available
+                && projection.effective_automatic_range) {
+                ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3")
+                    .arg(displayNumber(projection.effective_minimum, DisplayNumberKind::Temperature))
+                    .arg(displayNumber(projection.effective_maximum, DisplayNumberKind::Temperature))
+                    .arg(displayNumber(projection.effective_level_step, DisplayNumberKind::Temperature)));
+                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatically derived from accepted invariant temperatures."));
+                ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+            } else if (!viewer_.last_user_iso_level_spec.isEmpty()) {
+                ui_->editViewerIsoLevelSpec->setText(viewer_.last_user_iso_level_spec);
+                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatic range is unavailable; retaining the last valid user level specification."));
+                ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+            } else {
+                ui_->editViewerIsoLevelSpec->clear();
+                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatic range is unavailable until a projection with finite invariant temperatures is accepted."));
+                ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
+            }
+        } else if (!viewer_.last_user_iso_level_spec.isEmpty()) {
+            ui_->editViewerIsoLevelSpec->setText(viewer_.last_user_iso_level_spec);
+            ui_->editViewerIsoLevelSpec->setToolTip(QString());
+        } else if (viewer_.options.explicit_level_count != 0) {
             QStringList values;
             for (std::uint32_t index = 0; index < viewer_.options.explicit_level_count; ++index) values << displayNumber(viewer_.options.explicit_levels[index], DisplayNumberKind::Temperature);
             ui_->editViewerIsoLevelSpec->setText(values.join(QStringLiteral(", ")));
-        } else if (viewer_.options.automatic_range) ui_->editViewerIsoLevelSpec->setText(tr("automatic"));
-        else ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3").arg(displayNumber(viewer_.options.minimum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.maximum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)));
+        } else {
+            ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3").arg(displayNumber(viewer_.options.minimum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.maximum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)));
+        }
     }
-    { const QSignalBlocker blocker(ui_->editViewerStep); ui_->editViewerStep->setText(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)); }
     { const QSignalBlocker blocker(ui_->editViewerRegularizationSpacing); ui_->editViewerRegularizationSpacing->setText(displayNumber(viewer_.options.regularization_spacing, DisplayNumberKind::Property)); }
 }
 
@@ -2205,7 +2334,7 @@ void MainWindow::updateViewerActionState() {
     ui_->buttonInvariantCopy->setEnabled(has_selected_invariant);
     for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants}) { action->setEnabled(viewer_.has_last_valid_projection); action->setToolTip(viewer_.has_last_valid_projection ? QString() : unavailable); }
     ui_->buttonViewerResetAutomaticRange->setEnabled(summary.calculation_available);
-    for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerAutomaticRange), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->editViewerStep), static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing), static_cast<QWidget*>(ui_->editViewerIsoLevelSpec), static_cast<QWidget*>(ui_->checkViewerIsoLineLabels)}) control->setEnabled(summary.calculation_available);
+    for (QWidget* control : {static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing), static_cast<QWidget*>(ui_->editViewerIsoLevelSpec), static_cast<QWidget*>(ui_->checkViewerIsoLineLabels)}) control->setEnabled(summary.calculation_available);
     const bool cubic_selected = ui_->comboViewerSourceInterpolation->currentIndex() == 1;
     const bool cubic_available = summary.calculation_available && cubic_selected && regular_inspection_grid;
     const auto cubic_reason = !regular_inspection_grid

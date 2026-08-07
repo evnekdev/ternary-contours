@@ -9,6 +9,8 @@
 
 use std::{
     ffi::CStr,
+    fs,
+    io::Write,
     os::raw::c_char,
     path::PathBuf,
     sync::{Mutex, OnceLock},
@@ -25,18 +27,19 @@ use ternary_contours_cli::{
     CompositionColumns, GridType, HeaderMode, InterpolationOptions, IrregularTabulatedGrid,
     JsonLinesTraceSink, LiquidusProjection, MeshExtrapolationField, MeshExtrapolationPreview,
     MeshExtrapolationRequest, NumericalTraceRunContext, OutputFormat, ParsedTable, PhaseDefinition,
-    ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord, ProjectionOptions,
-    ProjectionPathSource, PropertyDefinition, RegularTabulatedGrid, RenderOptions, RenderPathMode,
-    RowOrder, SourceRange, TabulatedField, TabulatedGrid, TabulatedTernaryDataset, TabulatedValue,
-    TabulatedValueState, TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels,
-    calculate_projection, calculate_projection_reusing_stable_topology,
+    ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,
+    ProjectionGeometryCsvSelection, ProjectionOptions, ProjectionPathSource, PropertyDefinition,
+    RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange, TabulatedField,
+    TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
+    TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, calculate_projection,
+    calculate_projection_reusing_stable_topology,
     calculate_projection_with_trace_context_reusing_stable_topology, empty_project_dataset,
     extrapolate_regular_grid_fields,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
     parse_path, parse_tabulated_value_token, projection_csv_records, render_to_path,
-    save_tct_atomic, serialize_projection_csv, serialize_tct,
+    save_tct_atomic, serialize_projection_geometry_csv, serialize_tct,
     validate_new_regular_grid_subdivisions,
 };
 use ternary_contours_gui_core::{GuiContractState, Revision, UiAction, UiEffect, update};
@@ -319,6 +322,18 @@ pub struct TcqtViewerCalculationState {
 }
 
 #[repr(C)]
+pub struct TcqtProjectionCsvExportOptions {
+    pub invariants: bool,
+    pub univariants: bool,
+    pub isotherms: bool,
+    /// 0 = raw, 1 = regularized, 2 = overlay (regularized primary).
+    pub path_display_mode: u32,
+    pub expected_dataset_revision: u64,
+    pub expected_options_revision: u64,
+    pub expected_request_id: u64,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
 pub struct TcqtProjectionSummary {
     pub available: bool,
     pub source_minimum: f64,
@@ -639,6 +654,12 @@ struct ProjectDocument {
     raw_projection: Option<LiquidusProjection>,
     regularized_projection: Option<LiquidusProjection>,
     projection_records: Vec<ProjectionCsvRecord>,
+    /// Metadata and phase names belonging to the accepted visible projection.
+    /// This snapshot keeps export/render ownership coherent while a newer
+    /// request is pending or fails.
+    accepted_projection_dataset: Option<TabulatedTernaryDataset>,
+    accepted_projection_dataset_revision: u64,
+    accepted_viewer_options: Option<ViewerCalculationOptions>,
     inspection_cache: FieldInspectionCache,
     calculation_generation: u64,
     options_revision: u64,
@@ -671,6 +692,9 @@ impl ProjectDocument {
             raw_projection: None,
             regularized_projection: None,
             projection_records: Vec::new(),
+            accepted_projection_dataset: None,
+            accepted_projection_dataset_revision: 0,
+            accepted_viewer_options: None,
             inspection_cache: FieldInspectionCache::default(),
             calculation_generation: 0,
             options_revision: 1,
@@ -686,15 +710,26 @@ impl ProjectDocument {
             mesh_extrapolation_preview: None,
         }
     }
+    /// Invalidate a future calculation without discarding the last accepted
+    /// scene.  The Viewer deliberately keeps that immutable snapshot visible
+    /// while the newest calculation is pending or has failed.
     fn invalidate_calculation(&mut self) {
-        self.projection = None;
-        self.raw_projection = None;
-        self.regularized_projection = None;
-        self.projection_records.clear();
         self.accepted_topology_key = None;
         self.last_stable_topology_reused = false;
         self.inspection_cache.invalidate();
         self.calculation_generation = self.calculation_generation.saturating_add(1);
+    }
+
+    fn clear_accepted_projection(&mut self) {
+        self.projection = None;
+        self.raw_projection = None;
+        self.regularized_projection = None;
+        self.projection_records.clear();
+        self.accepted_projection_dataset = None;
+        self.accepted_projection_dataset_revision = 0;
+        self.accepted_viewer_options = None;
+        self.projection_options_revision = 0;
+        self.projection_request_id = 0;
     }
     /// Store a validated numerical Viewer configuration.  Options are not TCT
     /// document data, so they advance their own revision and invalidate only
@@ -768,6 +803,7 @@ impl ProjectDocument {
         self.redo.clear();
         self.mesh_extrapolation_preview = None;
         self.contract = GuiContractState::default();
+        self.clear_accepted_projection();
         self.invalidate_calculation();
         // Calculation counters describe the loaded document's accepted
         // projection lifecycle. They must never leak from a replaced project.
@@ -2853,6 +2889,9 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
             state.raw_projection = raw_projection;
             state.regularized_projection = regularized_projection;
             state.projection_records = records;
+            state.accepted_projection_dataset = Some(dataset.clone());
+            state.accepted_projection_dataset_revision = expected_revision;
+            state.accepted_viewer_options = Some(requested_options.clone());
             state.projection_options_revision = expected_options_revision;
             state.projection_request_id = request_id;
             state.accepted_topology_key = Some(requested_options.topology_key());
@@ -2937,6 +2976,11 @@ pub unsafe extern "C" fn tcqt_projection_summary(
             };
             return Ok(());
         };
+        let effective = state
+            .accepted_viewer_options
+            .as_ref()
+            .unwrap_or(&state.viewer_options)
+            .to_abi();
         let automatic = projection.automatic_iso_range;
         let binary_invariant_count = projection
             .stable_boundaries
@@ -2991,7 +3035,7 @@ pub unsafe extern "C" fn tcqt_projection_summary(
             effective_cubic_method: effective.cubic_method,
             effective_partial_domain_policy: effective.partial_domain_policy,
             effective_continuation: effective.continuation,
-            dataset_revision: state.revision,
+            dataset_revision: state.accepted_projection_dataset_revision,
             options_revision: state.projection_options_revision,
             request_id: state.projection_request_id,
             raw_projection_available: state.raw_projection.is_some(),
@@ -3129,10 +3173,13 @@ pub unsafe extern "C" fn tcqt_invariant_point_at(
             .get(index as usize)
             .ok_or_else(|| "invariant point index is outside the accepted projection".to_owned())?;
         *output_value = invariant_point(
-            &state.dataset,
+            state
+                .accepted_projection_dataset
+                .as_ref()
+                .unwrap_or(&state.dataset),
             projection,
             node,
-            state.revision,
+            state.accepted_projection_dataset_revision,
             state.projection_options_revision,
             state.projection_request_id,
         );
@@ -3525,9 +3572,13 @@ pub unsafe extern "C" fn tcqt_export_plot(path: *const c_char, format: u32) -> T
             1 => OutputFormat::Svg,
             _ => return Err("unsupported plot export format".into()),
         };
+        let dataset = state
+            .accepted_projection_dataset
+            .as_ref()
+            .ok_or("calculate a projection before exporting it")?;
         render_to_path(
             &path,
-            &state.dataset,
+            dataset,
             projection,
             &RenderOptions::default(),
             Some(format),
@@ -3536,6 +3587,93 @@ pub unsafe extern "C" fn tcqt_export_plot(path: *const c_char, format: u32) -> T
     })())
 }
 
+fn write_projection_csv_atomically(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .filter(|directory| !directory.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or("export path must name a file")?;
+    let temporary = directory.join(format!(
+        ".{name}.ternary-contours-export-{}.tmp",
+        std::process::id()
+    ));
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::File::create(&temporary)
+            .map_err(|error| format!("could not create temporary CSV: {error}"))?;
+        file.write_all(contents.as_bytes())
+            .map_err(|error| format!("could not write temporary CSV: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("could not finalize temporary CSV: {error}"))?;
+        fs::rename(&temporary, path)
+            .map_err(|error| format!("could not replace CSV atomically: {error}"))?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
+fn selected_export_projection(
+    state: &ProjectDocument,
+    path_display_mode: u32,
+) -> Result<&LiquidusProjection, String> {
+    match path_display_mode {
+        // The currently selected primary geometry is regularized when it is
+        // available; paths which could not be regularized are already present
+        // as RawFallback in that selected projection.
+        0 => state.raw_projection.as_ref().or(state.projection.as_ref()),
+        1 | 2 => state.projection.as_ref(),
+        _ => return Err("unsupported projection display mode for CSV export".into()),
+    }
+    .ok_or_else(|| "calculate a projection before exporting it".into())
+}
+
+/// Export one immutable, accepted Viewer projection snapshot as seven-column
+/// thermodynamic geometry.  Qt supplies only dialog choices; this bridge owns
+/// component metadata, stable topology, ordering, and data precision.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn tcqt_export_projection_csv(
+    path: *const c_char,
+    options: *const TcqtProjectionCsvExportOptions,
+) -> TcqtStatus {
+    status((|| {
+        let path = PathBuf::from(unsafe { input(path, "export path") }?);
+        let options = unsafe { options.as_ref().ok_or("CSV export options are required")? };
+        let selection = ProjectionGeometryCsvSelection {
+            invariants: options.invariants,
+            univariants: options.univariants,
+            isotherms: options.isotherms,
+        };
+        if !selection.any() {
+            return Err("select at least one projection geometry category".into());
+        }
+        let state = document()
+            .lock()
+            .map_err(|_| "project lock is unavailable".to_owned())?;
+        if state.accepted_projection_dataset_revision != options.expected_dataset_revision
+            || state.projection_options_revision != options.expected_options_revision
+            || state.projection_request_id != options.expected_request_id
+        {
+            return Err("the accepted projection changed; reopen the export dialog".into());
+        }
+        let dataset = state
+            .accepted_projection_dataset
+            .as_ref()
+            .ok_or("calculate a projection before exporting it")?;
+        let projection = selected_export_projection(&state, options.path_display_mode)?;
+        let contents = serialize_projection_geometry_csv(dataset, projection, selection)
+            .map_err(|error| error.to_string())?;
+        write_projection_csv_atomically(&path, &contents)
+    })())
+}
+
+/// Legacy ABI retained for older clients.  New Qt code always captures a
+/// revision-pinned selection through [`tcqt_export_projection_csv`].
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn tcqt_export_lines_csv(path: *const c_char) -> TcqtStatus {
     status((|| {
@@ -3543,16 +3681,21 @@ pub unsafe extern "C" fn tcqt_export_lines_csv(path: *const c_char) -> TcqtStatu
         let state = document()
             .lock()
             .map_err(|_| "project lock is unavailable".to_owned())?;
-        let records = projection_csv_records(
-            &state.dataset,
-            state.projection.as_ref(),
-            None,
-            &RenderOptions::default(),
-            ProjectionCsvOptions::default(),
+        let dataset = state
+            .accepted_projection_dataset
+            .as_ref()
+            .ok_or("calculate a projection before exporting it")?;
+        let projection = state
+            .projection
+            .as_ref()
+            .ok_or("calculate a projection before exporting it")?;
+        let contents = serialize_projection_geometry_csv(
+            dataset,
+            projection,
+            ProjectionGeometryCsvSelection::default(),
         )
         .map_err(|error| error.to_string())?;
-        let contents = serialize_projection_csv(&records).map_err(|error| error.to_string())?;
-        std::fs::write(path, contents).map_err(|error| error.to_string())
+        write_projection_csv_atomically(&path, &contents)
     })())
 }
 /// Original feasibility entrypoint retained for existing callers. The application
@@ -4168,7 +4311,10 @@ mod tests {
         assert!(state.set_viewer_options(options.to_abi()).unwrap());
         assert_eq!(state.revision, document_revision);
         assert_eq!(state.options_revision, options_revision + 1);
-        assert!(state.projection_records.is_empty());
+        assert!(
+            !state.projection_records.is_empty(),
+            "last accepted scene remains visible while recalculating"
+        );
         assert!(!state.dirty);
         assert!(!state.set_viewer_options(options.to_abi()).unwrap());
         assert_eq!(state.options_revision, options_revision + 1);
@@ -4338,10 +4484,10 @@ mod tests {
         unsafe {
             assert!(tcqt_open_document(path.as_ptr()).success);
             let initial = TcqtViewerCalculationOptions {
-                automatic_range: true,
-                minimum: 0.0,
-                maximum: 0.0,
-                level_step: 25.0,
+                automatic_range: false,
+                minimum: 100.0,
+                maximum: 120.0,
+                level_step: 10.0,
                 sampling_subdivisions: 17,
                 regularize: false,
                 regularization_spacing: 0.01,
@@ -4373,7 +4519,7 @@ mod tests {
             let node_count = first.invariant_count;
 
             let mut levels_only = initial;
-            levels_only.level_step = 50.0;
+            levels_only.level_step = 5.0;
             assert!(tcqt_set_viewer_calculation_options(&levels_only).success);
             let mut retained = std::mem::zeroed::<TcqtProjectionSummary>();
             assert!(tcqt_projection_summary(&mut retained).success);
@@ -4434,10 +4580,10 @@ mod tests {
         unsafe {
             assert!(tcqt_open_document(path.as_ptr()).success);
             let options = TcqtViewerCalculationOptions {
-                automatic_range: true,
-                minimum: 0.0,
-                maximum: 0.0,
-                level_step: 25.0,
+                automatic_range: false,
+                minimum: 100.0,
+                maximum: 120.0,
+                level_step: 10.0,
                 sampling_subdivisions: 17,
                 regularize: false,
                 regularization_spacing: 0.01,
@@ -4470,6 +4616,83 @@ mod tests {
         assert!(trace.contains("\"sampling_subdivisions\":17"));
         assert!(trace.contains("\"regularization\":false"));
         std::fs::remove_file(trace_path).unwrap();
+    }
+
+    #[test]
+    fn projection_csv_export_uses_the_revision_pinned_accepted_snapshot() {
+        let _guard = test_document_lock().lock().unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tools/ternary-contours-cli/fixtures/interior-invariant.tct");
+        let fixture_c = std::ffi::CString::new(fixture.to_string_lossy().as_bytes()).unwrap();
+        let output = std::env::temp_dir().join(format!(
+            "ternary-contours-projection-export-{}.csv",
+            std::process::id()
+        ));
+        let output_c = std::ffi::CString::new(output.to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            assert!(tcqt_open_document(fixture_c.as_ptr()).success);
+            let options = TcqtViewerCalculationOptions {
+                automatic_range: false,
+                minimum: 100.0,
+                maximum: 120.0,
+                level_step: 10.0,
+                sampling_subdivisions: 17,
+                regularize: false,
+                regularization_spacing: 0.01,
+                source_interpolation: ABI_SOURCE_LINEAR,
+                cubic_method: ABI_CUBIC_AKIMA,
+                partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
+                continuation: ABI_CONTINUATION_MUGGIANU,
+                explicit_level_count: 0,
+                explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
+            };
+            assert!(tcqt_set_viewer_calculation_options(&options).success);
+            let mut project = std::mem::zeroed::<TcqtProjectSummary>();
+            let mut state = std::mem::zeroed::<TcqtViewerCalculationState>();
+            assert!(tcqt_project_summary(&mut project).success);
+            assert!(tcqt_viewer_calculation_state(&mut state).success);
+            assert!(
+                tcqt_calculate_viewer(
+                    &state.options,
+                    project.revision,
+                    state.options_revision,
+                    701
+                )
+                .success
+            );
+            let mut accepted = std::mem::zeroed::<TcqtProjectionSummary>();
+            assert!(tcqt_projection_summary(&mut accepted).success && accepted.available);
+            let selection = TcqtProjectionCsvExportOptions {
+                invariants: true,
+                univariants: true,
+                isotherms: true,
+                path_display_mode: 1,
+                expected_dataset_revision: accepted.dataset_revision,
+                expected_options_revision: accepted.options_revision,
+                expected_request_id: accepted.request_id,
+            };
+            assert!(tcqt_export_projection_csv(output_c.as_ptr(), &selection).success);
+            let first = std::fs::read_to_string(&output).unwrap();
+            assert!(first.starts_with("A,B,C,\"T, K\",phase1,phase2,phase3\r\n"));
+            assert!(!first.contains("line_id"));
+            assert!(!first.contains(",,,,,,"));
+
+            // A newer data revision leaves the old accepted scene exportable;
+            // the bridge uses its retained immutable dataset/projection pair.
+            let token = std::ffi::CString::new("101").unwrap();
+            assert!(tcqt_set_grid_cell(0, 0, 0, token.as_ptr()).success);
+            assert!(tcqt_export_projection_csv(output_c.as_ptr(), &selection).success);
+            assert_eq!(std::fs::read_to_string(&output).unwrap(), first);
+
+            let none = TcqtProjectionCsvExportOptions {
+                invariants: false,
+                univariants: false,
+                isotherms: false,
+                ..selection
+            };
+            assert!(!tcqt_export_projection_csv(output_c.as_ptr(), &none).success);
+        }
+        std::fs::remove_file(output).unwrap();
     }
 
     #[test]
@@ -4516,7 +4739,10 @@ mod tests {
         assert_eq!(state.revision, revision + 1);
         assert_eq!(state.undo.len(), 1);
         assert!(state.dirty);
-        assert!(state.projection_records.is_empty());
+        assert!(
+            !state.projection_records.is_empty(),
+            "editing retains the last visible projection snapshot"
+        );
         assert_eq!(
             state.dataset.grids[0].fields()[0].values[0].value,
             Some(1_250.0)

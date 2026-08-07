@@ -33,12 +33,13 @@ pub use projection::{
     ProjectionOptions, SourceInterpolation, ViewerIsoLevelSpec, automatic_iso_levels,
     automatic_iso_range, calculate_projection, calculate_projection_reusing_stable_topology,
     calculate_projection_with_trace, calculate_projection_with_trace_context,
-    calculate_projection_with_trace_context_reusing_stable_topology, parse_level_spec,
-    parse_viewer_level_spec,
+    calculate_projection_with_trace_context_reusing_stable_topology,
+    invariant_iso_range_from_temperatures, parse_level_spec, parse_viewer_level_spec,
 };
 pub use projection_csv::{
     ProjectionCsvError, ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,
-    ProjectionLineType, ProjectionPathSource, projection_csv_records, serialize_projection_csv,
+    ProjectionGeometryCsvSelection, ProjectionLineType, ProjectionPathSource,
+    projection_csv_records, serialize_projection_csv, serialize_projection_geometry_csv,
 };
 pub use render::{
     OutputFormat, PLOT_BACKGROUND_RGB, RenderOptions, RenderPathMode, RenderedBitmap,

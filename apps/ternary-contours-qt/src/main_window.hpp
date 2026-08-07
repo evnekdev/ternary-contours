@@ -23,11 +23,16 @@ class QAbstractItemView;
 
 namespace Ui { class MainWindow; }
 
+enum class IsoLevelSpecOrigin {
+    AutoDerived,
+    UserEdited,
+};
+
 enum class ViewerWidgetCommand {
     SelectGrid, SelectPhase, SelectProperty, SetInteractionMode,
     SetVertexVisibility, SetRegularGridEdges, SetMarkerSize, SetLabelMode,
     SetLabelDecimals, SetLabelsSelectedOnly,
-    SetAutomaticRange, CommitIsoMinimum, CommitIsoMaximum, CommitIsoStep, CommitIsoLevelSpec,
+    CommitIsoLevelSpec,
     SetSamplingSubdivisions, SetSourceInterpolation, SetCubicMethod,
     SetPartialDomainPolicy, SetContinuation, SetRegularizationEnabled,
     SetRegularizationSpacing, SetPathDisplayMode,
@@ -107,6 +112,8 @@ struct ViewerState {
     bool has_last_valid_projection = false;
     bool projection_is_stale = false;
     TcqtViewerCalculationOptions options{};
+    IsoLevelSpecOrigin iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
+    QString last_user_iso_level_spec;
 };
 
 class MainWindow final : public QMainWindow {
@@ -196,5 +203,6 @@ private:
     ViewerState viewer_;
     bool synchronizing_ = false;
     bool editor_commit_failed_ = false;
+    QString last_projection_csv_path_;
     std::vector<std::unique_ptr<CollapsibleSection>> viewer_sections_;
 };

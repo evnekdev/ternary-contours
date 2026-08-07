@@ -83,9 +83,8 @@ impl InterpolationOptions {
 #[derive(Clone, Debug, Default)]
 pub struct ProjectionOptions {
     pub levels: Vec<f64>,
-    /// When present, derive levels from stable topology: the lowest finite
-    /// invariant temperature (or the calculated-source minimum) through the
-    /// calculated-source maximum at this positive finite step.
+    /// When present, derive whole-step levels from the finite temperatures of
+    /// all accepted stable invariant nodes at this positive finite step.
     pub automatic_level_step: Option<f64>,
     pub sampling_subdivisions: Option<usize>,
     pub regularize: bool,
@@ -981,36 +980,72 @@ fn tabulated_state_counts(values: &[TabulatedValue]) -> [usize; 4] {
     })
 }
 
-/// Derive the Viewer automatic range from stable invariant topology and finite
-/// calculated source extrema. The source minimum is used only when topology
-/// did not produce a finite invariant temperature.
+/// Derive the Viewer automatic range from all accepted invariant temperatures.
+///
+/// The source extrema arguments are retained for API compatibility. Automatic
+/// Viewer levels deliberately do *not* fall back to them: without a finite
+/// stable invariant there is no thermodynamically meaningful automatic range.
 pub fn automatic_iso_range(
     boundaries: &StableBoundaryNetwork,
-    source_minimum: f64,
-    source_maximum: f64,
+    _source_minimum: f64,
+    _source_maximum: f64,
     step: f64,
 ) -> Result<AutomaticIsoRange, ProjectionError> {
-    if !source_minimum.is_finite() || !source_maximum.is_finite() || source_maximum < source_minimum
-    {
-        return Err(ProjectionError::Levels(
-            "automatic isotherm range requires finite calculated source extrema".into(),
-        ));
-    }
+    invariant_iso_range_from_temperatures(
+        boundaries.nodes.iter().map(|node| node.temperature()),
+        step,
+    )
+}
+
+/// Derive a whole-step automatic range from invariant temperatures.
+///
+/// This helper is deliberately independent of display formatting. It is used
+/// by the projection and by the Viewer bridge so that `AutoDerived` always
+/// means the same numerical operation.
+pub fn invariant_iso_range_from_temperatures(
+    temperatures: impl IntoIterator<Item = f64>,
+    step: f64,
+) -> Result<AutomaticIsoRange, ProjectionError> {
     if !step.is_finite() || step <= 0.0 {
         return Err(ProjectionError::Levels(
             "automatic isotherm step must be finite and positive".into(),
         ));
     }
-    let invariant_minimum = boundaries
-        .nodes
+    let temperatures = temperatures.into_iter().collect::<Vec<_>>();
+    if temperatures.is_empty() {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm range requires at least one stable invariant".into(),
+        ));
+    }
+    if temperatures
         .iter()
-        .map(|node| node.temperature())
-        .filter(|temperature| temperature.is_finite())
-        .reduce(f64::min);
+        .any(|temperature| !temperature.is_finite())
+    {
+        return Err(ProjectionError::Levels(
+            "automatic isotherm range requires finite invariant temperatures".into(),
+        ));
+    }
+    let invariant_minimum = temperatures
+        .iter()
+        .copied()
+        .reduce(f64::min)
+        .expect("checked");
+    let invariant_maximum = temperatures
+        .iter()
+        .copied()
+        .reduce(f64::max)
+        .expect("checked");
+    let minimum = (invariant_minimum / step).ceil() * step;
+    let maximum = (invariant_maximum / step).floor() * step;
+    if !minimum.is_finite() || !maximum.is_finite() || minimum > maximum {
+        return Err(ProjectionError::Levels(
+            "automatic invariant range contains no complete level step".into(),
+        ));
+    }
     Ok(AutomaticIsoRange {
-        minimum: invariant_minimum.unwrap_or(source_minimum),
-        maximum: source_maximum,
-        used_invariant_minimum: invariant_minimum.is_some(),
+        minimum,
+        maximum,
+        used_invariant_minimum: true,
     })
 }
 
@@ -1519,7 +1554,7 @@ mod tests {
                 let projection = calculate_projection(
                     &dataset,
                     &ProjectionOptions {
-                        automatic_level_step: Some(100.0),
+                        levels: vec![900.0, 1_000.0, 1_100.0],
                         sampling_subdivisions: Some(sampling_subdivisions),
                         interpolation: InterpolationOptions::default(),
                         ..ProjectionOptions::default()
@@ -1652,7 +1687,7 @@ mod tests {
         ))
         .expect("committed detailed EX fixture parses");
         let topology_options = ProjectionOptions {
-            automatic_level_step: Some(100.0),
+            levels: vec![900.0, 1_000.0, 1_100.0],
             sampling_subdivisions: Some(20),
             interpolation: InterpolationOptions::default(),
             ..ProjectionOptions::default()
@@ -1693,7 +1728,7 @@ mod tests {
         let raw = calculate_projection(
             &dataset,
             &ProjectionOptions {
-                automatic_level_step: Some(100.0),
+                levels: vec![900.0, 1_000.0, 1_100.0],
                 sampling_subdivisions: Some(20),
                 interpolation: InterpolationOptions::default(),
                 ..ProjectionOptions::default()
@@ -1704,7 +1739,7 @@ mod tests {
             let regularized = calculate_projection(
                 &dataset,
                 &ProjectionOptions {
-                    automatic_level_step: Some(100.0),
+                    levels: vec![900.0, 1_000.0, 1_100.0],
                     sampling_subdivisions: Some(20),
                     regularize: true,
                     regularization_spacing: Some(spacing),
@@ -1735,7 +1770,7 @@ mod tests {
     fn cao_pbo_zno_fixture_reports_unsupported_binary_transitions_without_losing_contours() {
         let dataset = parse_str(include_str!("../../../calculations/CaO-PbO-ZnO.tct")).unwrap();
         let options = ProjectionOptions {
-            automatic_level_step: Some(100.0),
+            levels: vec![800.0],
             sampling_subdivisions: Some(20),
             regularize: true,
             interpolation: InterpolationOptions {
@@ -1759,6 +1794,25 @@ mod tests {
             transition.reason,
             ternary_contours::BinaryTransitionUnavailableReason::NoRootInOverlappingDomain
         )));
+    }
+
+    #[test]
+    fn automatic_invariant_range_uses_all_invariant_temperatures() {
+        let range = invariant_iso_range_from_temperatures([815.96, 1_475.20], 100.0).unwrap();
+        assert_eq!(range.minimum, 900.0);
+        assert_eq!(range.maximum, 1_400.0);
+        assert!(range.used_invariant_minimum);
+        let exact = invariant_iso_range_from_temperatures([900.0, 1_500.0], 100.0).unwrap();
+        assert_eq!((exact.minimum, exact.maximum), (900.0, 1_500.0));
+        let rounded = invariant_iso_range_from_temperatures([899.99, 1_500.01], 100.0).unwrap();
+        assert_eq!((rounded.minimum, rounded.maximum), (900.0, 1_500.0));
+    }
+
+    #[test]
+    fn automatic_invariant_range_rejects_missing_nonfinite_or_empty_step_windows() {
+        assert!(invariant_iso_range_from_temperatures([], 100.0).is_err());
+        assert!(invariant_iso_range_from_temperatures([f64::NAN], 100.0).is_err());
+        assert!(invariant_iso_range_from_temperatures([815.96], 100.0).is_err());
     }
 
     #[test]

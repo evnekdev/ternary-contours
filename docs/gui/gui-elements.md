@@ -146,7 +146,6 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | buttonViewerResetAutomaticRange | main_window.ui | QPushButton | PlotLevels |
 | canvasTernary | main_window.ui | TernaryCanvas | PlotCanvas |
 | checkPropertyRequired | property_editor_dialog.ui | QCheckBox | DataProperties |
-| checkViewerAutomaticRange | main_window.ui | QCheckBox | PlotLevels |
 | checkViewerAxisLabels | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerBinaryInvariants | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerCalculated | main_window.ui | QCheckBox | GridStateFilter |
@@ -188,9 +187,6 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | editPropertyUnit | property_editor_dialog.ui | QLineEdit | DataProperties |
 | editViewerIsoLevelSpec | main_window.ui | QLineEdit | PlotLevels |
 | editViewerRegularizationSpacing | main_window.ui | QLineEdit | PlotRegularization |
-| editViewerStep | main_window.ui | QLineEdit | PlotLevels |
-| editViewerTmax | main_window.ui | QLineEdit | PlotLevels |
-| editViewerTmin | main_window.ui | QLineEdit | PlotLevels |
 | interpolationPointDialog | interpolation_point_dialog.ui | QDialog | GridInterpolation |
 | mainWindow | main_window.ui | QMainWindow | MainWindow |
 | menuAbout | main_window.ui | QMenu | GlobalToolbar |

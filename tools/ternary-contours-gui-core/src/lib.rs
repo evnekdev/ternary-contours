@@ -203,9 +203,7 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         | "comboViewerPartialDomain"
         | "comboViewerContinuation" => UiElementId::PlotInterpolation,
         "comboViewerPathDisplay" => UiElementId::PlotPathMode,
-        "editViewerTmin" | "editViewerTmax" | "editViewerStep" | "editViewerIsoLevelSpec" => {
-            UiElementId::PlotLevels
-        }
+        "editViewerIsoLevelSpec" => UiElementId::PlotLevels,
         "editViewerRegularizationSpacing" => UiElementId::PlotRegularization,
         "spinViewerMarkerSize" | "spinViewerLabelDecimals" => UiElementId::GridPointEditor,
         "spinViewerSamplingSubdivisions" => UiElementId::PlotSampling,
@@ -216,7 +214,6 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         | "checkViewerMissing"
         | "checkViewerRegularGridEdges" => UiElementId::GridStateFilter,
         "checkViewerLabelsSelectedOnly" => UiElementId::GridLabelMode,
-        "checkViewerAutomaticRange" => UiElementId::PlotLevels,
         "checkViewerRegularizePaths" => UiElementId::PlotRegularization,
         "checkViewerStableIsotherms"
         | "checkViewerStableUnivariants"
@@ -2284,7 +2281,6 @@ mod tests {
             "checkViewerExtrapolated",
             "checkViewerCutOff",
             "checkViewerMissing",
-            "checkViewerAutomaticRange",
             "spinViewerSamplingSubdivisions",
             "comboViewerSourceInterpolation",
             "comboViewerCubicMethod",
@@ -2407,6 +2403,26 @@ mod tests {
         assert!(header.contains("bool eventFilter(QObject* watched, QEvent* event) override"));
         assert!(bridge.contains("tcqt_evaluate_field_current"));
         assert!(window.contains("tcqt_evaluate_field_current"));
+    }
+
+    #[test]
+    fn viewer_level_field_uses_concrete_auto_text_and_retains_manual_fallback() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../apps/ternary-contours-qt");
+        let ui = std::fs::read_to_string(root.join("ui/main_window.ui")).unwrap();
+        let window = std::fs::read_to_string(root.join("src/main_window.cpp")).unwrap();
+        let header = std::fs::read_to_string(root.join("src/main_window.hpp")).unwrap();
+
+        assert!(ui.contains("editViewerIsoLevelSpec"));
+        assert!(ui.contains("buttonViewerResetAutomaticRange"));
+        assert!(!ui.contains("checkViewerAutomaticRange"));
+        assert!(header.contains("IsoLevelSpecOrigin"));
+        assert!(header.contains("AutoDerived"));
+        assert!(header.contains("UserEdited"));
+        assert!(window.contains("last_user_iso_level_spec"));
+        assert!(window.contains("retaining the last valid user level specification"));
+        assert!(window.contains("Automatically derived from accepted invariant temperatures."));
+        assert!(!window.contains("QStringLiteral(\"automatic\")"));
     }
 
     #[test]
