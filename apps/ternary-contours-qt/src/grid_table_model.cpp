@@ -1,3 +1,4 @@
+#include "numeric_display.hpp"
 #include "grid_table_model.hpp"
 #include "scalar_state_appearance.hpp"
 #include "rust_bridge.hpp"
@@ -55,7 +56,7 @@ QVariant GridTableModel::data(const QModelIndex& index, int role) const {
     const auto& row = rows_.at(index.row());
     const auto composition = index.column() < 3;
     if (role == Qt::DisplayRole || role == Qt::EditRole) {
-        if (composition) return QLocale::c().toString(index.column() == 0 ? row.a : index.column() == 1 ? row.b : row.c, 'f', 6);
+        if (composition) return displayNumber(index.column() == 0 ? row.a : index.column() == 1 ? row.b : row.c, DisplayNumberKind::Composition);
         return row.fields.value(index.column() - 3).token;
     }
     if (role == Qt::BackgroundRole && composition && regular_) return QBrush(Qt::lightGray);
@@ -70,7 +71,7 @@ QVariant GridTableModel::data(const QModelIndex& index, int role) const {
     if (role == Qt::ToolTipRole && !composition) {
         const auto& cell = row.fields.at(index.column() - 3);
         if (cell.state == 4) {
-            return tr("Extrapolated value\nLayer: %1\nMethod: %2\nDirectional support: %3\nSpread: %4").arg(cell.extrapolationLayer).arg(cell.extrapolationMethod == 0 ? tr("Akima") : cell.extrapolationMethod == 1 ? tr("Makima") : cell.extrapolationMethod == 2 ? tr("PCHIP") : tr("Steffen")).arg(cell.extrapolationSupportCount).arg(cell.extrapolationSpread, 0, 'g', 12);
+            return tr("Extrapolated value\nLayer: %1\nMethod: %2\nDirectional support: %3\nSpread: %4").arg(cell.extrapolationLayer).arg(cell.extrapolationMethod == 0 ? tr("Akima") : cell.extrapolationMethod == 1 ? tr("Makima") : cell.extrapolationMethod == 2 ? tr("PCHIP") : tr("Steffen")).arg(cell.extrapolationSupportCount).arg(displayNumber(cell.extrapolationSpread, DisplayNumberKind::Property));
         }
         if (cell.state == 2) {
             return cell.note.isEmpty() ? tr("CO\nCut-off - the value is beyond an explicit cutoff or limit.") : tr("CO:%1\nCut-off - %1").arg(cell.note);
@@ -119,8 +120,8 @@ bool GridTableModel::setData(const QModelIndex& index, const QVariant& value, in
 }
 
 QString GridTableModel::tokenForCell(std::uint32_t state, bool has_value, double value, std::uint32_t extrapolation_layer, const char* note) const {
-    if (state == 4 && has_value) return QStringLiteral("EX%1 %2").arg(extrapolation_layer).arg(QLocale::c().toString(value, 'g', 15));
-    if (has_value) return QLocale::c().toString(value, 'g', 15);
+    if (state == 4 && has_value) return QStringLiteral("EX%1 %2").arg(extrapolation_layer).arg(displayNumber(value, DisplayNumberKind::Property));
+    if (has_value) return displayNumber(value, DisplayNumberKind::Property);
     const auto suffix = cText(note).trimmed();
     const auto base = state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
     return suffix.isEmpty() ? base : base + QStringLiteral(":") + suffix;

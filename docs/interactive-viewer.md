@@ -214,3 +214,12 @@ The lower Viewer pane contains two independently resizable, read-only tables. **
 **Invariant points** is calculated state, not a second numerical calculation. Its rows come directly from the accepted Rust stable-boundary graph, in stable invariant-node ID order, and include binary/interior type, composition, temperature, phase IDs and names, binary boundary metadata, and incident complete-univariant degree. During recalculation or failure the table keeps its last accepted rows and displays a stale status; a newly opened or created document clears it until a projection is accepted. Trace-only configuration is observational and does not alter invariant rows.
 
 Both result tables sort all columns through typed sort values rather than formatted display text. Numeric values sort numerically, text is case-insensitive and locale-aware, and unavailable values remain last in either direction. Table sorting, selection, canvas query highlighting, deletion, and TSV export are keyed by stable query/invariant identity, so sorting cannot change an operation's target. The active sort column and direction persist with Viewer layout settings; Restore Layout resets each table to ascending ID order.
+
+
+## Presentation contract
+
+Viewer presentation uses fixed-point display formatting only: temperatures use two decimal places, compositions use five, and other properties use three. This is an interface convention, not a numerical precision limit; stored values, calculations, serialization, exports, cache keys, and traces retain full precision.
+
+The compact isotherm editor accepts `minimum maximum step`, a comma-separated explicit list, or both separated by `;` (for example, `700 1200 50; 815.96, 925`). Duplicate levels are canonicalized using the numerical level tolerance. Invalid text remains visible and does not replace the last accepted projection.
+
+Iso-line labels are optional and use the selected property metadata. Invariants share one red-diamond/black-outline style and show bold two-decimal temperature labels. Univariants are black, slightly thicker than iso-lines, and are labelled only by their stable phase pair. The legend is generated from visible, renderable semantic categories and omits hidden or empty categories.

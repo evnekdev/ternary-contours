@@ -10,6 +10,7 @@ struct TcqtViewerCalculationOptions {
     std::uint32_t sampling_subdivisions; bool regularize; double regularization_spacing;
     std::uint32_t source_interpolation; std::uint32_t cubic_method;
     std::uint32_t partial_domain_policy; std::uint32_t continuation;
+    std::uint32_t explicit_level_count; double explicit_levels[256];
 };
 struct TcqtViewerCalculationState { TcqtViewerCalculationOptions options; std::uint64_t options_revision; };
 struct TcqtProjectionSummary {
@@ -125,7 +126,7 @@ struct TcqtMeshExtrapolationPreviewRow {
     char directional_estimates[512];
 };
 struct TcqtCell { std::uint32_t state; bool has_value; double value; std::uint32_t extrapolation_layer; std::uint32_t extrapolation_method; std::uint32_t extrapolation_support_count; double extrapolation_spread; char note[128]; };
-struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; std::uint32_t path_source; char phase_1[128]; char phase_2[128]; char line_id[128]; };
+struct TcqtProjectionRecord { double a; double b; double c; std::uint32_t point_index; std::uint32_t line_type; std::uint32_t rgba; double stroke_width; std::uint32_t marker_kind; std::uint32_t path_source; bool has_level; double level; char unit[32]; char phase_1[128]; char phase_2[128]; char line_id[128]; };
 
 TcqtStatus tcqt_new_document();
 TcqtStatus tcqt_open_document(const char* path);

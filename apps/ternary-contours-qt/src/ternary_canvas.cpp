@@ -1,5 +1,6 @@
 #include "ternary_canvas.hpp"
 #include "scalar_state_appearance.hpp"
+#include "numeric_display.hpp"
 
 #include <QMouseEvent>
 #include <QPainter>
@@ -45,6 +46,7 @@ void TernaryCanvas::setProjectionVisibility(bool master, bool isotherms, bool un
     update();
 }
 void TernaryCanvas::setProjectionPathDisplayMode(int mode) { path_display_mode_ = std::clamp(mode, 0, 2); update(); }
+void TernaryCanvas::setIsoLineLabelsVisible(bool visible) { show_iso_line_labels_ = visible; update(); }
 void TernaryCanvas::setProjectionAppearance(int line_width, int invariant_marker_size) {
     line_width_ = std::clamp(line_width, 1, 8);
     invariant_marker_size_ = std::clamp(invariant_marker_size, 2, 20);
@@ -162,29 +164,52 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
             if (path.compositions.size() == 1) {
                 const auto source = path.compositions.front();
                 const auto point = pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y());
-                painter.setPen(QPen(color, 1.5)); painter.setBrush(color);
-                if (path.marker_kind == 1) painter.drawRect(QRectF(point.x() - invariant_marker_size_ / 2.0, point.y() - invariant_marker_size_ / 2.0, invariant_marker_size_, invariant_marker_size_));
-                else painter.drawEllipse(point, invariant_marker_size_ / 2.0, invariant_marker_size_ / 2.0);
-                if ((path.type == 2 || path.type == 3) && show_invariant_ids_) {
-                    painter.drawText(point + QPointF(invariant_marker_size_ + 2, -2), path.line_id);
+                if (path.type == 2 || path.type == 3) {
+                    const auto radius = invariant_marker_size_ * 0.65;
+                    QPolygonF diamond;
+                    diamond << point + QPointF(0, -radius) << point + QPointF(radius, 0)
+                            << point + QPointF(0, radius) << point + QPointF(-radius, 0);
+                    painter.setPen(QPen(Qt::black, 1.4)); painter.setBrush(QColor(208, 32, 32)); painter.drawPolygon(diamond);
+                    if (path.has_level) {
+                        QFont font = painter.font(); font.setBold(true); font.setPointSizeF(std::max(7.0, font.pointSizeF() - 1.0)); painter.setFont(font);
+                        painter.setPen(palette().text().color());
+                        painter.drawText(point + QPointF(radius + 4.0, -radius - 2.0), displayTemperature(path.level, path.unit));
+                    }
+                } else {
+                    painter.setPen(QPen(color, 1.5)); painter.setBrush(color); painter.drawEllipse(point, invariant_marker_size_ / 2.0, invariant_marker_size_ / 2.0);
                 }
                 continue;
             }
             QPainterPath curve; const auto first = path.compositions.front(); curve.moveTo(pointForComposition(first.x(), first.y(), 1.0 - first.x() - first.y()));
             for (qsizetype index = 1; index < path.compositions.size(); ++index) { const auto point = path.compositions.at(index); curve.lineTo(pointForComposition(point.x(), point.y(), 1.0 - point.x() - point.y())); }
-            painter.setPen(QPen(color, path.stroke_width * line_width_ / 2.0)); painter.setBrush(Qt::NoBrush); painter.drawPath(curve);
+            const auto line_color = path.type == 1 ? QColor(Qt::black) : color;
+            const auto width_scale = path.type == 1 ? 1.5 : 1.0;
+            painter.setPen(QPen(line_color, path.stroke_width * line_width_ / 2.0 * width_scale)); painter.setBrush(Qt::NoBrush); painter.drawPath(curve);
             if (show_path_vertices_) { painter.setBrush(color); for (const auto& source : path.compositions) painter.drawEllipse(pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y()), 1.8, 1.8); }
             if ((path.type == 0 && show_contour_endpoints_) || (path.type == 1 && show_univariant_endpoints_)) {
                 painter.setBrush(color); for (const auto& source : {path.compositions.front(), path.compositions.back()}) painter.drawEllipse(pointForComposition(source.x(), source.y(), 1.0 - source.x() - source.y()), 3.0, 3.0);
             }
-            if (path.type == 1 && (show_univariant_ids_ || show_phase_pair_labels_)) {
-                const auto middle = path.compositions.at(path.compositions.size() / 2);
-                const auto label_point = pointForComposition(middle.x(), middle.y(), 1.0 - middle.x() - middle.y());
-                painter.setPen(color);
-                const auto label = show_phase_pair_labels_ && !path.phase_pair.isEmpty()
-                    ? path.phase_pair
-                    : path.line_id;
-                painter.drawText(label_point + QPointF(5.0, -5.0), label);
+            if ((path.type == 0 && show_iso_line_labels_) || (path.type == 1 && show_phase_pair_labels_)) {
+                double total = 0.0;
+                for (qsizetype i = 1; i < path.compositions.size(); ++i) {
+                    const auto p0 = pointForComposition(path.compositions.at(i - 1).x(), path.compositions.at(i - 1).y(), 1.0 - path.compositions.at(i - 1).x() - path.compositions.at(i - 1).y());
+                    const auto p1 = pointForComposition(path.compositions.at(i).x(), path.compositions.at(i).y(), 1.0 - path.compositions.at(i).x() - path.compositions.at(i).y());
+                    total += QLineF(p0, p1).length();
+                }
+                if (total > 24.0) {
+                    const auto target = total * 0.5; double accumulated = 0.0; QPointF label_point;
+                    for (qsizetype i = 1; i < path.compositions.size(); ++i) {
+                        const auto p0 = pointForComposition(path.compositions.at(i - 1).x(), path.compositions.at(i - 1).y(), 1.0 - path.compositions.at(i - 1).x() - path.compositions.at(i - 1).y());
+                        const auto p1 = pointForComposition(path.compositions.at(i).x(), path.compositions.at(i).y(), 1.0 - path.compositions.at(i).x() - path.compositions.at(i).y());
+                        const auto segment = QLineF(p0, p1).length();
+                        if (accumulated + segment >= target) { label_point = p0 + (p1 - p0) * ((target - accumulated) / std::max(segment, 1.0e-12)); break; }
+                        accumulated += segment;
+                    }
+                    const auto label = path.type == 0 ? path.display_label : path.phase_pair;
+                    QFont font = painter.font(); font.setBold(false); painter.setFont(font);
+                    painter.setPen(QPen(palette().base(), 4.0)); painter.drawText(label_point + QPointF(5.0, -5.0), label);
+                    painter.setPen(QPen(line_color, 1.0)); painter.drawText(label_point + QPointF(5.0, -5.0), label);
+                }
             }
         }
         if (projection_paths_.isEmpty() && source_vertices_.isEmpty()) { painter.setPen(palette().mid().color()); painter.drawText(rect(), Qt::AlignCenter, tr("No calculated projection to display")); }
@@ -257,10 +282,33 @@ void TernaryCanvas::paintEvent(QPaintEvent*) {
         painter.drawText(QRectF(8.0, height() - 24.0, width() - 16.0, 18.0), Qt::AlignCenter, tr("A / B / C composition fractions"));
     }
     if (legend_visible_) {
-        const QRectF legend(10.0, 10.0, 148.0, 76.0);
-        painter.setPen(QPen(palette().mid().color())); painter.setBrush(palette().base()); painter.drawRect(legend);
-        painter.setPen(palette().text().color());
-        painter.drawText(legend.adjusted(7.0, 5.0, -7.0, -5.0), tr("Calculated (circle)\nExtrapolated (square)\nCut-off (triangle)\nMissing (hollow circle)"));
+        bool calculated = false, extrapolated = false, cut_off = false, missing = false;
+        for (const auto& vertex : inspection_vertices_) {
+            if (!source_vertices_visible_ || !visibleState(vertex.state)) continue;
+            calculated |= vertex.state == 0; extrapolated |= vertex.state == 4; cut_off |= vertex.state == 2; missing |= vertex.state == 3;
+        }
+        bool isotherms = false, univariants = false, invariants = false;
+        if (plot_visible_) for (const auto& path : projection_paths_) {
+            const bool layer = path.type == 0 ? show_isotherms_ : path.type == 1 ? show_univariants_ : (path.type == 2 ? show_binary_invariants_ : path.type == 3 ? show_interior_invariants_ : false);
+            const bool source = path_display_mode_ == 2 || path.path_source == static_cast<std::uint32_t>(path_display_mode_);
+            if (!layer || !source || path.compositions.isEmpty()) continue;
+            isotherms |= path.type == 0; univariants |= path.type == 1; invariants |= path.type == 2 || path.type == 3;
+        }
+        const int rows = int(calculated) + int(extrapolated) + int(cut_off) + int(missing) + int(isotherms) + int(univariants) + int(invariants);
+        if (rows > 0) {
+            const QRectF legend(10.0, 10.0, 190.0, 8.0 + rows * 20.0);
+            painter.setPen(QPen(palette().mid().color())); painter.setBrush(palette().base()); painter.drawRect(legend);
+            qreal y = legend.top() + 17.0;
+            const auto text_entry = [this, &painter, &y](const QString& text) { painter.setPen(palette().text().color()); painter.drawText(QPointF(40.0, y + 4.0), text); y += 20.0; };
+            const auto circle = [&painter, &y](const QColor& fill, bool filled) { painter.setPen(QPen(Qt::black, 1.0)); painter.setBrush(filled ? fill : Qt::NoBrush); painter.drawEllipse(QPointF(22.0, y), 5.0, 5.0); };
+            if (calculated) { circle(QColor(54, 155, 90), true); text_entry(tr("Calculated")); }
+            if (extrapolated) { painter.setPen(QPen(Qt::black, 1.0)); painter.setBrush(QColor(74, 91, 180)); painter.drawRect(QRectF(17.0, y - 5.0, 10.0, 10.0)); text_entry(tr("Extrapolated")); }
+            if (cut_off) { painter.setPen(QPen(Qt::black, 1.0)); painter.setBrush(QColor(230, 145, 30)); QPolygonF marker{QPointF(22.0, y - 6.0), QPointF(28.0, y + 5.0), QPointF(16.0, y + 5.0)}; painter.drawPolygon(marker); text_entry(tr("Cut-off")); }
+            if (missing) { circle(QColor(), false); text_entry(tr("Missing")); }
+            if (isotherms) { painter.setPen(QPen(QColor(45, 110, 180), 1.5)); painter.drawLine(QPointF(16.0, y), QPointF(28.0, y)); text_entry(tr("Iso-lines")); }
+            if (univariants) { painter.setPen(QPen(Qt::black, 2.3)); painter.drawLine(QPointF(16.0, y), QPointF(28.0, y)); text_entry(tr("Univariants")); }
+            if (invariants) { QPolygonF diamond{QPointF(22.0, y - 6.0), QPointF(28.0, y), QPointF(22.0, y + 6.0), QPointF(16.0, y)}; painter.setPen(QPen(Qt::black, 1.0)); painter.setBrush(QColor(208, 32, 32)); painter.drawPolygon(diamond); text_entry(tr("Invariants")); }
+        }
     }
     if (selected_composition_.x() >= 0.0) { painter.setPen(QPen(QColor(200, 60, 40), 2)); painter.setBrush(Qt::NoBrush); painter.drawEllipse(pointForComposition(selected_composition_.x(), selected_composition_.y(), 1.0 - selected_composition_.x() - selected_composition_.y()), 6, 6); }
 }

@@ -203,7 +203,9 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         | "comboViewerPartialDomain"
         | "comboViewerContinuation" => UiElementId::PlotInterpolation,
         "comboViewerPathDisplay" => UiElementId::PlotPathMode,
-        "editViewerTmin" | "editViewerTmax" | "editViewerStep" => UiElementId::PlotLevels,
+        "editViewerTmin" | "editViewerTmax" | "editViewerStep" | "editViewerIsoLevelSpec" => {
+            UiElementId::PlotLevels
+        }
         "editViewerRegularizationSpacing" => UiElementId::PlotRegularization,
         "spinViewerMarkerSize" | "spinViewerLabelDecimals" => UiElementId::GridPointEditor,
         "spinViewerSamplingSubdivisions" => UiElementId::PlotSampling,
@@ -232,6 +234,7 @@ pub fn qt_ui_contract_id(object_name: &str) -> Option<UiElementId> {
         | "checkViewerInvariantIds"
         | "checkViewerUnivariantIds"
         | "checkViewerPhasePairLabels"
+        | "checkViewerIsoLineLabels"
         | "checkViewerContainingTriangle" => UiElementId::PlotSettings,
 
         "actionFileOpen" => UiElementId::Open,
@@ -2396,7 +2399,7 @@ mod tests {
         let bridge = std::fs::read_to_string(root.join("rust-bridge/src/lib.rs")).unwrap();
         let window = std::fs::read_to_string(root.join("src/main_window.cpp")).unwrap();
 
-        assert!(dialog.contains("toString(value, 'f', display_decimals)"));
+        assert!(dialog.contains("displayNumber(value, DisplayNumberKind::Composition)"));
         assert!(dialog.contains("displayedNormalizedTriplet"));
         assert!(dialog.contains("Qt::Key_Return || key_event->key() == Qt::Key_Enter"));
         assert!(dialog.contains("editor->installEventFilter(this)"));

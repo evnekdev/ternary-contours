@@ -157,6 +157,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | checkViewerExtrapolated | main_window.ui | QCheckBox | GridStateFilter |
 | checkViewerInteriorInvariants | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerInvariantIds | main_window.ui | QCheckBox | PlotSettings |
+| checkViewerIsoLineLabels | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerLabelsSelectedOnly | main_window.ui | QCheckBox | GridLabelMode |
 | checkViewerLegend | main_window.ui | QCheckBox | PlotSettings |
 | checkViewerMissing | main_window.ui | QCheckBox | GridStateFilter |
@@ -185,6 +186,7 @@ The Qt object identity and source file are generated from `.ui` XML; the semanti
 | editProjectTitle | main_window.ui | QLineEdit | DataDeclarations |
 | editPropertyName | property_editor_dialog.ui | QLineEdit | DataProperties |
 | editPropertyUnit | property_editor_dialog.ui | QLineEdit | DataProperties |
+| editViewerIsoLevelSpec | main_window.ui | QLineEdit | PlotLevels |
 | editViewerRegularizationSpacing | main_window.ui | QLineEdit | PlotRegularization |
 | editViewerStep | main_window.ui | QLineEdit | PlotLevels |
 | editViewerTmax | main_window.ui | QLineEdit | PlotLevels |

@@ -1,4 +1,5 @@
 #include "interpolation_point_dialog.hpp"
+#include "numeric_display.hpp"
 
 #include "ui_interpolation_point_dialog.h"
 
@@ -24,11 +25,10 @@ QString bridgeMessage(const TcqtStatus& status) {
     return QString::fromUtf8(status.message);
 }
 
-constexpr int display_decimals = 4;
-constexpr double display_scale = 10000.0;
+constexpr double display_scale = 100000.0;
 
 QString number(double value) {
-    return QLocale::c().toString(value, 'f', display_decimals);
+    return displayNumber(value, DisplayNumberKind::Composition);
 }
 
 std::array<double, 3> displayedNormalizedTriplet(const std::array<double, 3>& values) {
@@ -50,7 +50,7 @@ std::array<double, 3> displayedNormalizedTriplet(const std::array<double, 3>& va
 }
 
 QString sumText(double sum, bool normalized) {
-    return normalized ? QString::fromUtf8("\xCE\xA3 = 1.0000")
+    return normalized ? QString::fromUtf8("\xCE\xA3 = 1.00000")
                       : QString::fromUtf8("\xCE\xA3 = %1 \xE2\x80\x94 Not normalized").arg(number(sum));
 }
 }

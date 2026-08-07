@@ -1,6 +1,8 @@
 #pragma once
 
 #include "rust_bridge.hpp"
+#include "numeric_display.hpp"
+#include "iso_level_spec.hpp"
 
 #include <QMainWindow>
 #include <QPoint>
@@ -25,7 +27,7 @@ enum class ViewerWidgetCommand {
     SelectGrid, SelectPhase, SelectProperty, SetInteractionMode,
     SetVertexVisibility, SetRegularGridEdges, SetMarkerSize, SetLabelMode,
     SetLabelDecimals, SetLabelsSelectedOnly,
-    SetAutomaticRange, CommitIsoMinimum, CommitIsoMaximum, CommitIsoStep,
+    SetAutomaticRange, CommitIsoMinimum, CommitIsoMaximum, CommitIsoStep, CommitIsoLevelSpec,
     SetSamplingSubdivisions, SetSourceInterpolation, SetCubicMethod,
     SetPartialDomainPolicy, SetContinuation, SetRegularizationEnabled,
     SetRegularizationSpacing, SetPathDisplayMode,
@@ -35,7 +37,7 @@ enum class ViewerWidgetCommand {
     SetInteriorInvariantsVisible, SetAxisLabelsVisible, SetCornerNamesVisible,
     SetLegendVisible, SetPathVerticesVisible, SetContourEndpointsVisible,
     SetUnivariantEndpointsVisible, SetInvariantIdsVisible, SetUnivariantIdsVisible,
-    SetPhasePairLabelsVisible, SetContainingTriangleVisible, SetLineWidth,
+    SetPhasePairLabelsVisible, SetIsoLineLabelsVisible, SetContainingTriangleVisible, SetLineWidth,
     SetPlotMarkerSize, Fit, Reset, RestoreLayout, AddQuery,
     RemoveSelectedQuery, RemoveAllQueries, ResetAutomaticRange,
     SelectVertex, CommitVertexEdit, CommitBulkState,
@@ -71,6 +73,7 @@ struct ViewerState {
     bool show_master_plot = true;
     bool show_sampling_grid = true;
     bool show_stable_isotherms = true;
+    bool show_iso_line_labels = false;
     bool show_stable_univariants = true;
     bool show_binary_invariants = true;
     bool show_interior_invariants = true;
@@ -82,7 +85,7 @@ struct ViewerState {
     bool show_univariant_endpoints = false;
     bool show_invariant_ids = false;
     bool show_univariant_ids = false;
-    bool show_phase_pair_labels = false;
+    bool show_phase_pair_labels = true;
     bool show_containing_triangle = false;
     bool labels_selected_only = false;
     int marker_size = 6;

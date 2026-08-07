@@ -79,6 +79,8 @@ pub struct TcqtCalculationResult {
 /// Numerical configuration shared by the Qt Viewer and the Rust projection.
 /// Enum values are deliberately explicit across the C ABI; invalid values are
 /// rejected by the bridge instead of falling back silently.
+pub const TCQT_MAX_EXPLICIT_LEVELS: usize = 256;
+
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
 pub struct TcqtViewerCalculationOptions {
@@ -98,6 +100,9 @@ pub struct TcqtViewerCalculationOptions {
     pub partial_domain_policy: u32,
     /// 0 = raw barycentric, 1 = Muggianu, 2 = Kohler.
     pub continuation: u32,
+    /// Explicit level list supplied by the Qt presentation parser.
+    pub explicit_level_count: u32,
+    pub explicit_levels: [f64; TCQT_MAX_EXPLICIT_LEVELS],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,6 +119,7 @@ struct ViewerCalculationOptions {
     minimum: f64,
     maximum: f64,
     level_step: f64,
+    explicit_levels: Vec<f64>,
     sampling_subdivisions: u32,
     regularize: bool,
     regularization_spacing: f64,
@@ -127,6 +133,7 @@ impl Default for ViewerCalculationOptions {
             minimum: 0.0,
             maximum: 0.0,
             level_step: 100.0,
+            explicit_levels: Vec::new(),
             sampling_subdivisions: 20,
             regularize: true,
             regularization_spacing: 0.0,
@@ -178,15 +185,35 @@ impl ViewerCalculationOptions {
         if raw.regularization_spacing.is_finite() && raw.regularization_spacing < 0.0 {
             return Err("regularization spacing must be positive when supplied".into());
         }
-        if !raw.automatic_range {
+        if raw.explicit_level_count as usize > TCQT_MAX_EXPLICIT_LEVELS {
+            return Err(format!(
+                "too many explicit isotherm levels (maximum {})",
+                TCQT_MAX_EXPLICIT_LEVELS
+            ));
+        }
+        let mut explicit_levels = raw.explicit_levels[..raw.explicit_level_count as usize].to_vec();
+        if explicit_levels.iter().any(|level| !level.is_finite()) {
+            return Err("explicit isotherm levels must be finite".into());
+        }
+        explicit_levels.sort_by(|a, b| a.total_cmp(b));
+        explicit_levels.dedup_by(|left, right| {
+            (*left - *right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
+        });
+        if raw.automatic_range && !explicit_levels.is_empty() {
+            return Err("automatic range cannot be combined with explicit levels".into());
+        }
+        if !raw.automatic_range && explicit_levels.is_empty() {
             automatic_iso_levels(raw.minimum, raw.maximum, raw.level_step)
                 .map_err(|error| format!("invalid manual isotherm range: {error}"))?;
+        } else if !explicit_levels.is_empty() {
+            validate_explicit_levels(&explicit_levels)?;
         }
         Ok(Self {
             automatic_range: raw.automatic_range,
             minimum: raw.minimum,
             maximum: raw.maximum,
             level_step: raw.level_step,
+            explicit_levels,
             sampling_subdivisions: raw.sampling_subdivisions,
             regularize: raw.regularize,
             regularization_spacing: raw.regularization_spacing,
@@ -243,12 +270,22 @@ impl ViewerCalculationOptions {
             cubic_method,
             partial_domain_policy,
             continuation,
+            explicit_level_count: self.explicit_levels.len() as u32,
+            explicit_levels: {
+                let mut levels = [0.0; TCQT_MAX_EXPLICIT_LEVELS];
+                for (index, level) in self.explicit_levels.iter().enumerate() {
+                    levels[index] = *level;
+                }
+                levels
+            },
         }
     }
 
     fn projection_options(&self) -> ProjectionOptions {
         ProjectionOptions {
-            levels: if self.automatic_range {
+            levels: if !self.explicit_levels.is_empty() {
+                self.explicit_levels.clone()
+            } else if self.automatic_range {
                 Vec::new()
             } else {
                 automatic_iso_levels(self.minimum, self.maximum, self.level_step)
@@ -264,6 +301,16 @@ impl ViewerCalculationOptions {
         }
     }
 }
+
+fn validate_explicit_levels(levels: &[f64]) -> Result<(), String> {
+    if levels.is_empty() || levels.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(
+            "explicit isotherm levels must be strictly ascending without duplicates".into(),
+        );
+    }
+    Ok(())
+}
+
 /// Rust-authoritative Viewer numerical configuration and its monotonic revision.
 #[repr(C)]
 pub struct TcqtViewerCalculationState {
@@ -555,6 +602,9 @@ pub struct TcqtProjectionRecord {
     pub marker_kind: u32,
     /// 0 = raw, 1 = regularized. Preserves geometry provenance through Qt.
     pub path_source: u32,
+    pub has_level: bool,
+    pub level: f64,
+    pub unit: [u8; 32],
     pub phase_1: [u8; NAME],
     pub phase_2: [u8; NAME],
     pub line_id: [u8; NAME],
@@ -3402,10 +3452,9 @@ fn projection_paint_style(line_type: u32, path_source: u32) -> (u32, f64, u32) {
         0xff_00_00_00
     };
     let (rgb, width, marker_kind) = match line_type {
-        0 => (0x002D_6EB4, 1.5, 0),
-        1 => (0x00A0_3782, 2.2, 0),
-        2 => (0x00B6_3232, 1.5, 1),
-        3 => (0x00E1_7819, 1.5, 0),
+        0 => (0x002D_6EB4, 1.0, 0),
+        1 => (0x0000_0000, 1.5, 0),
+        2 | 3 => (0x00D0_2020, 1.4, 2),
         _ => (0x006A_6A6A, 1.2, 0),
     };
     (
@@ -3450,6 +3499,9 @@ pub unsafe extern "C" fn tcqt_projection_record_at(
             stroke_width,
             marker_kind,
             path_source,
+            has_level: record.temperature.is_some(),
+            level: record.temperature.unwrap_or_default(),
+            unit: bytes(if line_type == 0 { "\u{00B0}C" } else { "" }),
             phase_1: bytes(record.phase_1.as_deref().unwrap_or_default()),
             phase_2: bytes(record.phase_2.as_deref().unwrap_or_default()),
             line_id: bytes(&record.line_id),
@@ -3878,6 +3930,8 @@ mod tests {
             cubic_method: 1,
             partial_domain_policy: 2,
             continuation: 2,
+            explicit_level_count: 0,
+            explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
         };
         let options = ViewerCalculationOptions::from_abi(&raw)
             .expect("configured Viewer options are valid")
@@ -4167,6 +4221,8 @@ mod tests {
                 cubic_method: ABI_CUBIC_STEFFEN,
                 partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
                 continuation: ABI_CONTINUATION_KOHLER,
+                explicit_level_count: 0,
+                explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
             };
             assert!(tcqt_set_viewer_calculation_options(&configured).success);
             let direct = calculate_projection(
@@ -4293,6 +4349,8 @@ mod tests {
                 cubic_method: ABI_CUBIC_AKIMA,
                 partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
                 continuation: ABI_CONTINUATION_MUGGIANU,
+                explicit_level_count: 0,
+                explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
             };
             assert!(tcqt_set_viewer_calculation_options(&initial).success);
             let mut project = std::mem::zeroed::<TcqtProjectSummary>();
@@ -4387,6 +4445,8 @@ mod tests {
                 cubic_method: ABI_CUBIC_STEFFEN,
                 partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
                 continuation: ABI_CONTINUATION_KOHLER,
+                explicit_level_count: 0,
+                explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
             };
             assert!(tcqt_set_viewer_calculation_options(&options).success);
             assert!(tcqt_set_numerical_trace(2, trace_path_c.as_ptr()).success);
@@ -4413,15 +4473,16 @@ mod tests {
     }
 
     #[test]
-    fn rust_projection_scene_style_distinguishes_each_calculated_layer() {
+    fn rust_projection_scene_style_uses_shared_invariant_style() {
         assert_ne!(
             projection_paint_style(0, 1).0,
             projection_paint_style(1, 1).0
         );
-        assert_ne!(
+        assert_eq!(
             projection_paint_style(2, 1).2,
             projection_paint_style(3, 1).2
         );
+        assert_eq!(projection_paint_style(2, 1).2, 2);
         assert!(projection_paint_style(0, 1).1.is_finite());
     }
     #[test]

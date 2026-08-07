@@ -1070,6 +1070,82 @@ fn validate_levels(levels: &[f64]) -> Result<(), ProjectionError> {
     Ok(())
 }
 
+/// Parsed Viewer-friendly temperature specification.  This is a presentation
+/// adapter; the numerical projection still receives typed levels/range values.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewerIsoLevelSpec {
+    pub range: Option<(f64, f64, f64)>,
+    pub levels: Vec<f64>,
+}
+
+/// Parse `[minimum maximum step] [; extra1, extra2, ...]`.
+///
+/// With no semicolon, exactly three whitespace-separated values are a range;
+/// every other non-empty form is a comma-separated explicit level list.
+pub fn parse_viewer_level_spec(value: &str) -> Result<ViewerIsoLevelSpec, ProjectionError> {
+    let input = value.trim();
+    if input.is_empty() {
+        return Err(ProjectionError::Levels(
+            "enter a range or at least one explicit level".into(),
+        ));
+    }
+    let (range_text, extra_text) = input
+        .split_once(';')
+        .map_or((input, ""), |(left, right)| (left.trim(), right.trim()));
+    let has_semicolon = input.contains(';');
+    let mut range = None;
+    let mut levels = Vec::new();
+    if !range_text.is_empty() {
+        let fields = range_text.split_whitespace().collect::<Vec<_>>();
+        if fields.len() == 3 {
+            let minimum = parse_level(fields[0])?;
+            let maximum = parse_level(fields[1])?;
+            let step = parse_level(fields[2])?;
+            if maximum < minimum || step <= 0.0 {
+                return Err(ProjectionError::Levels(
+                    "range requires finite maximum >= minimum and step > 0".into(),
+                ));
+            }
+            levels.extend(automatic_iso_levels(minimum, maximum, step)?);
+            range = Some((minimum, maximum, step));
+        } else if has_semicolon {
+            return Err(ProjectionError::Levels(
+                "the range side requires exactly minimum maximum step".into(),
+            ));
+        } else {
+            levels.extend(
+                range_text
+                    .split(',')
+                    .map(parse_level)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+        }
+    }
+    if !extra_text.is_empty() {
+        levels.extend(
+            extra_text
+                .split(',')
+                .map(parse_level)
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+    } else if has_semicolon && range.is_none() {
+        return Err(ProjectionError::Levels(
+            "a semicolon must be followed by explicit levels".into(),
+        ));
+    }
+    if levels.is_empty() {
+        return Err(ProjectionError::Levels(
+            "enter a range or at least one explicit level".into(),
+        ));
+    }
+    levels.sort_by(|a, b| a.total_cmp(b));
+    levels.dedup_by(|left, right| {
+        (*left - *right).abs() <= 1.0e-12 * left.abs().max(right.abs()).max(1.0)
+    });
+    validate_levels(&levels)?;
+    Ok(ViewerIsoLevelSpec { range, levels })
+}
+
 /// Parse `800,900,1000` or `800:1400:50` into strictly ascending values.
 pub fn parse_level_spec(value: &str) -> Result<Vec<f64>, ProjectionError> {
     if let Some((start, rest)) = value.split_once(':') {
@@ -1137,6 +1213,40 @@ mod tests {
 
     use super::*;
     use crate::parse_str;
+
+    #[test]
+    fn viewer_level_spec_accepts_range_lists_and_extras() {
+        assert_eq!(
+            parse_viewer_level_spec("700 1200 50").unwrap().levels.len(),
+            11
+        );
+        assert_eq!(
+            parse_viewer_level_spec("815.96").unwrap().levels,
+            vec![815.96]
+        );
+        assert_eq!(
+            parse_viewer_level_spec("815.96, 900").unwrap().levels,
+            vec![815.96, 900.0]
+        );
+        let spec = parse_viewer_level_spec("700 900 100; 800").unwrap();
+        assert_eq!(spec.range, Some((700.0, 900.0, 100.0)));
+        assert_eq!(spec.levels, vec![700.0, 800.0, 900.0]);
+    }
+
+    #[test]
+    fn viewer_level_spec_rejects_ambiguous_or_invalid_input() {
+        for input in [
+            "",
+            "700 1200",
+            "700 1200 50 60",
+            "700 1200 0",
+            "1200 700 50",
+            "700 foo 50",
+            ";",
+        ] {
+            assert!(parse_viewer_level_spec(input).is_err(), "{input:?}");
+        }
+    }
 
     #[test]
     fn partial_phase_domains_are_supported_without_global_rejection() {

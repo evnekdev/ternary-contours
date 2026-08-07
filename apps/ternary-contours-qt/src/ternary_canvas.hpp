@@ -28,6 +28,10 @@ struct CanvasPath {
     std::uint32_t marker_kind = 0;
     // 0 raw, 1 regularized; supplied by Rust with the typed record.
     std::uint32_t path_source = 1;
+    bool has_level = false;
+    double level = 0.0;
+    QString unit;
+    QString display_label;
     QString line_id;
     QString phase_pair;
 };
@@ -63,6 +67,7 @@ public:
     void setProjectionVisibility(bool master, bool isotherms, bool univariants,
                                  bool binary_invariants, bool interior_invariants);
     void setProjectionPathDisplayMode(int mode);
+    void setIsoLineLabelsVisible(bool visible);
     void setProjectionAppearance(int line_width, int invariant_marker_size);
     void setDiagnosticVisibility(bool path_vertices, bool contour_endpoints,
                                  bool univariant_endpoints, bool invariant_ids,
@@ -114,6 +119,7 @@ private:
     bool show_invariant_ids_ = false;
     bool show_univariant_ids_ = false;
     bool show_phase_pair_labels_ = false;
+    bool show_iso_line_labels_ = false;
     bool show_containing_triangle_ = false;
     // 0 raw, 1 regularized, 2 overlay.
     int path_display_mode_ = 1;

@@ -31,6 +31,8 @@ add_executable(ternary-contours-qt
     src/interpolation_point_dialog.hpp
     src/grid_table_model.cpp
     src/grid_table_model.hpp
+    src/numeric_display.hpp
+    src/iso_level_spec.hpp
     include/rust_bridge.hpp
     ${TCQT_UI_FILES}
 )

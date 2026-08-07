@@ -417,6 +417,12 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->spinViewerLabelDecimals, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelDecimals); });
     connect(ui_->checkViewerLabelsSelectedOnly, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelsSelectedOnly); });
     connect(ui_->checkViewerAutomaticRange, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetAutomaticRange); });
+    // The compact specification is authoritative; legacy individual editors remain
+    // in the .ui only for settings-file compatibility and are hidden.
+    for (QWidget* legacy : {static_cast<QWidget*>(ui_->labelViewerTmin), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->labelViewerTmax), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->labelViewerStep), static_cast<QWidget*>(ui_->editViewerStep)}) legacy->setVisible(false);
+    ui_->checkViewerInvariantIds->setVisible(false);
+    ui_->checkViewerUnivariantIds->setVisible(false);
+    connect(ui_->editViewerIsoLevelSpec, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoLevelSpec); });
     connect(ui_->editViewerTmin, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoMinimum); });
     connect(ui_->editViewerTmax, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoMaximum); });
     connect(ui_->editViewerStep, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoStep); });
@@ -436,6 +442,7 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->checkViewerInvariantIds, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetInvariantIdsVisible); });
     connect(ui_->checkViewerUnivariantIds, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetUnivariantIdsVisible); });
     connect(ui_->checkViewerPhasePairLabels, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetPhasePairLabelsVisible); });
+    connect(ui_->checkViewerIsoLineLabels, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetIsoLineLabelsVisible); });
     connect(ui_->checkViewerContainingTriangle, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetContainingTriangleVisible); });
     connect(ui_->canvasTernary, &TernaryCanvas::compositionSelected, this, &MainWindow::updateComposition);
     connect(ui_->canvasTernary, &TernaryCanvas::vertexSelected, this, &MainWindow::selectViewerVertex);
@@ -867,8 +874,8 @@ void MainWindow::addGrid(bool regular) {
             }
         }
         if (valid) {
-            const auto step_text = QString::number(step, 'g', 8);
-            const auto percent_text = QString::number(step * 100.0, 'g', 8);
+            const auto step_text = displayTemperature(step);
+            const auto percent_text = displayNumber(step * 100.0, DisplayNumberKind::Property);
             form.labelAddGridStepValue->setText(tr("Step size: %1 (%2%)").arg(step_text, percent_text));
             const auto point_text = QLocale(QLocale::English, QLocale::UnitedStates).toString(point_count);
             form.labelAddGridPointsValue->setText(
@@ -1314,10 +1321,10 @@ void MainWindow::showViewerMeshExtrapolationDialog(
             if (!row_status.success) { result->setText(statusText(row_status)); materialize->setEnabled(false); return; }
             const auto set = [preview_table, index](int column, const QString& value) { preview_table->setItem(static_cast<int>(index), column, new QTableWidgetItem(value)); };
             set(0, text(row.property)); set(1, QString::number(row.row_index + 1));
-            set(2, QLocale::c().toString(row.a, 'g', 8)); set(3, QLocale::c().toString(row.b, 'g', 8)); set(4, QLocale::c().toString(row.c, 'g', 8));
-            set(5, state_name(row.old_state)); set(6, row.has_value ? QLocale::c().toString(row.value, 'g', 12) : QStringLiteral("-"));
+            set(2, displayNumber(row.a, DisplayNumberKind::Composition)); set(3, displayNumber(row.b, DisplayNumberKind::Composition)); set(4, displayNumber(row.c, DisplayNumberKind::Composition));
+            set(5, state_name(row.old_state)); set(6, row.has_value ? displayNumber(row.value, DisplayNumberKind::Property) : QStringLiteral("-"));
             set(7, row.has_value ? QStringLiteral("EX%1").arg(row.layer) : QStringLiteral("-")); set(8, row.has_value ? method_name(row.method) : QStringLiteral("-"));
-            set(9, row.has_value ? QString::number(row.support_count) : QStringLiteral("-")); set(10, row.has_value ? QLocale::c().toString(row.spread, 'g', 8) : QStringLiteral("-"));
+            set(9, row.has_value ? QString::number(row.support_count) : QStringLiteral("-")); set(10, row.has_value ? displayNumber(row.spread, DisplayNumberKind::Property) : QStringLiteral("-"));
             set(11, row.status == 0 ? tr("Requested") : row.status == 1 ? tr("Dependency") : row.status == 2 ? tr("Proposed") : tr("Rejected: %1").arg(text(row.reason)));
             set(12, row.has_value ? text(row.directional_estimates) : QString());
         }
@@ -1390,7 +1397,7 @@ void MainWindow::runRustCalculation() {
     setViewerCalculationStatus(tr("Calculating with sampling %1, %2, step %3...")
         .arg(viewer_.options.sampling_subdivisions)
         .arg(viewer_.options.source_interpolation == abi_source_linear ? tr("Linear") : tr("Cubic alpha"))
-        .arg(QLocale::c().toString(viewer_.options.level_step, 'g', 10)));
+        .arg(displayTemperature(viewer_.options.level_step)));
     updateViewerActionState();
     ui_->statusMain->showMessage(isotherm_only_request
         ? tr("Updating isotherms on the Rust worker...")
@@ -1432,12 +1439,11 @@ void MainWindow::runRustCalculation() {
             } else {
                 viewer_.has_last_valid_projection = true;
                 viewer_.projection_is_stale = false;
-                const auto source = QLocale::c();
                 if (projection.effective_automatic_range) {
                     const QSignalBlocker min_blocker(ui_->editViewerTmin);
                     const QSignalBlocker max_blocker(ui_->editViewerTmax);
-                    ui_->editViewerTmin->setText(source.toString(projection.effective_minimum, 'g', 10));
-                    ui_->editViewerTmax->setText(source.toString(projection.effective_maximum, 'g', 10));
+                    ui_->editViewerTmin->setText(displayTemperature(projection.effective_minimum));
+                    ui_->editViewerTmax->setText(displayTemperature(projection.effective_maximum));
                 }
                 auto projection_summary = tr("%1 levels, %2 binary invariants, %3 ternary invariant%4, %5 complete univariants, %6 isotherm paths")
                     .arg(projection.level_count)
@@ -1481,16 +1487,16 @@ void MainWindow::runRustCalculation() {
                 ui_->labelViewerCalculationStatus->setToolTip(
                     tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14\nTopology builds %15, reuses %16, isotherm rebuilds %17\nContour transfers %18, one-sided contacts %19, invariant coincidences %20, max residual %21, degenerate events %22")
                         .arg(projection.effective_automatic_range ? tr("automatic") : tr("manual"))
-                        .arg(source.toString(projection.effective_minimum, 'g', 10))
-                        .arg(source.toString(projection.effective_maximum, 'g', 10))
-                        .arg(source.toString(projection.effective_level_step, 'g', 10))
+                        .arg(displayTemperature(projection.effective_minimum))
+                        .arg(displayTemperature(projection.effective_maximum))
+                        .arg(displayTemperature(projection.effective_level_step))
                         .arg(projection.effective_sampling_subdivisions)
                         .arg(projection.effective_source_interpolation)
                         .arg(projection.effective_cubic_method)
                         .arg(projection.effective_partial_domain_policy)
                         .arg(projection.effective_continuation)
                         .arg(projection.effective_regularize ? tr("enabled") : tr("disabled"))
-                        .arg(source.toString(projection.effective_regularization_spacing, 'g', 10))
+                        .arg(displayNumber(projection.effective_regularization_spacing, DisplayNumberKind::Property))
                         .arg(projection.dataset_revision)
                         .arg(projection.options_revision)
                         .arg(projection.request_id)
@@ -1500,7 +1506,7 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.contour_transfer_junction_count)
                         .arg(projection.contour_one_sided_contact_count)
                         .arg(projection.contour_invariant_level_coincidence_count)
-                        .arg(source.toString(projection.maximum_contour_level_residual, 'g', 10))
+                        .arg(displayNumber(projection.maximum_contour_level_residual, DisplayNumberKind::Property))
                         .arg(projection.contour_degenerate_event_count));
                 refreshInvariantPoints();
                 refreshViewerQueries();
@@ -1535,7 +1541,12 @@ void MainWindow::runRustCalculation() {
     }));
 }
 
-void MainWindow::updateComposition(double a, double b, double c) { ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3").arg(a, 0, 'f', 4).arg(b, 0, 'f', 4).arg(c, 0, 'f', 4)); }
+void MainWindow::updateComposition(double a, double b, double c) {
+    ui_->statusMain->showMessage(tr("A=%1  B=%2  C=%3")
+        .arg(displayNumber(a, DisplayNumberKind::Composition))
+        .arg(displayNumber(b, DisplayNumberKind::Composition))
+        .arg(displayNumber(c, DisplayNumberKind::Composition)));
+}
 
 void MainWindow::refreshViewerFieldSelectors() {
     TcqtProjectSummary summary{};
@@ -1611,7 +1622,7 @@ void MainWindow::refreshViewerVertices() {
         if (cell.state < state_counts.size()) ++state_counts[cell.state];
         CanvasVertex vertex; vertex.composition = QPointF(composition.a, composition.b); vertex.row = row; vertex.state = cell.state;
         const auto note = text(cell.note);
-        const auto token = cell.has_value ? QLocale::c().toString(cell.value, 'f', viewer_.label_decimals)
+        const auto token = cell.has_value ? displayNumber(cell.value, DisplayNumberKind::Property)
             : cell.state == 4 ? QStringLiteral("EX") : cell.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
         vertex.label = note.isEmpty() ? token : token + QStringLiteral(":") + note;
         vertices.append(vertex);
@@ -1652,12 +1663,18 @@ bool MainWindow::refreshProjectionCanvas(bool accept_empty) {
         path.stroke_width = record.stroke_width;
         path.marker_kind = record.marker_kind;
         path.path_source = record.path_source;
+        path.has_level = record.has_level;
+        path.level = record.level;
+        path.unit = text(record.unit);
+        path.display_label = record.line_type == 0 && record.has_level
+            ? tr("T = %1").arg(displayTemperature(record.level, path.unit))
+            : QString();
         path.line_id = text(record.line_id);
         const auto phase_1 = text(record.phase_1);
         const auto phase_2 = text(record.phase_2);
         path.phase_pair = phase_1.isEmpty() || phase_2.isEmpty()
             ? QString()
-            : phase_1 + QStringLiteral(" / ") + phase_2;
+            : phase_1 + QString::fromUtf8(" \xE2\x80\x93 ") + phase_2;
         path.compositions.append(QPointF(record.a, record.b));
     }
     QVector<CanvasPath> output;
@@ -1671,6 +1688,7 @@ bool MainWindow::refreshProjectionCanvas(bool accept_empty) {
     ui_->canvasTernary->setDiagnosticVisibility(viewer_.show_path_vertices, viewer_.show_contour_endpoints,
         viewer_.show_univariant_endpoints, viewer_.show_invariant_ids, viewer_.show_univariant_ids,
         viewer_.show_phase_pair_labels);
+    ui_->canvasTernary->setIsoLineLabelsVisible(viewer_.show_iso_line_labels);
     return true;
 }
 void MainWindow::refreshViewerQueries() {
@@ -1696,7 +1714,7 @@ void MainWindow::refreshViewerQueries() {
             }
             const auto& displayed = query.result;
             const auto value_text = displayed.has_value
-                ? QLocale::c().toString(displayed.value, 'g', 12)
+                ? displayNumber(displayed.value, DisplayNumberKind::Property)
                 : (displayed.state == 2 ? QStringLiteral("CO") : QStringLiteral("NA"));
             const auto provenance = displayed.uses_extrapolated_sources
                 ? tr("EX%1, %2; %3 source row%4")
@@ -1709,9 +1727,9 @@ void MainWindow::refreshViewerQueries() {
             auto* id = resultItem(QString::number(query.id), QVariant::fromValue<qulonglong>(query.id));
             id->setData(QVariant::fromValue<qulonglong>(query.id), query_id_role);
             row << id
-                << resultItem(QLocale::c().toString(query.a, 'g', 10), query.a)
-                << resultItem(QLocale::c().toString(query.b, 'g', 10), query.b)
-                << resultItem(QLocale::c().toString(query.c, 'g', 10), query.c)
+                << resultItem(displayNumber(query.a, DisplayNumberKind::Composition), query.a)
+                << resultItem(displayNumber(query.b, DisplayNumberKind::Composition), query.b)
+                << resultItem(displayNumber(query.c, DisplayNumberKind::Composition), query.c)
                 << resultItem(value_text, displayed.has_value ? QVariant(displayed.value) : QVariant(0.0), displayed.has_value ? 0 : 1)
                 << resultItem(text(displayed.message))
                 << resultItem(QString::number(viewer_.grid_index), viewer_.grid_index)
@@ -1810,13 +1828,13 @@ void MainWindow::refreshInvariantPoints() {
             id->setData(QVariant::fromValue<qulonglong>(point.request_id), projection_request_id_role);
             row << id
                 << resultItem(binary ? tr("Binary") : tr("Interior"))
-                << resultItem(QLocale::c().toString(point.a, 'g', 12), point.a)
-                << resultItem(QLocale::c().toString(point.b, 'g', 12), point.b)
-                << resultItem(QLocale::c().toString(point.c, 'g', 12), point.c)
-                << resultItem(QLocale::c().toString(point.temperature, 'g', 12), point.temperature)
+                << resultItem(displayNumber(point.a, DisplayNumberKind::Composition), point.a)
+                << resultItem(displayNumber(point.b, DisplayNumberKind::Composition), point.b)
+                << resultItem(displayNumber(point.c, DisplayNumberKind::Composition), point.c)
+                << resultItem(displayTemperature(point.temperature), point.temperature)
                 << resultItem(text(point.phases))
                 << resultItem(binary ? text(point.boundary_name) : dash)
-                << resultItem(binary ? QLocale::c().toString(point.boundary_parameter, 'g', 12) : dash,
+                << resultItem(binary ? displayNumber(point.boundary_parameter, DisplayNumberKind::Property) : dash,
                               binary ? QVariant(point.boundary_parameter) : QVariant(0.0), binary ? 0 : 1)
                 << resultItem(QString::number(point.incident_univariant_count), point.incident_univariant_count);
             model->appendRow(row);
@@ -1943,10 +1961,13 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::SetLabelDecimals: viewer_.label_decimals = ui_->spinViewerLabelDecimals->value(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetLabelsSelectedOnly: viewer_.labels_selected_only = ui_->checkViewerLabelsSelectedOnly->isChecked(); refreshViewerVertices(); break;
     case ViewerWidgetCommand::SetAutomaticRange:
-        viewer_.options.automatic_range = ui_->checkViewerAutomaticRange->isChecked(); schedule_calculation = commitViewerCalculationOptions(action); break;
+        viewer_.options.automatic_range = ui_->checkViewerAutomaticRange->isChecked();
+        if (viewer_.options.automatic_range) { viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); }
+        schedule_calculation = commitViewerCalculationOptions(action); break;
     case ViewerWidgetCommand::CommitIsoMinimum:
     case ViewerWidgetCommand::CommitIsoMaximum:
     case ViewerWidgetCommand::CommitIsoStep:
+    case ViewerWidgetCommand::CommitIsoLevelSpec:
     case ViewerWidgetCommand::SetSamplingSubdivisions:
     case ViewerWidgetCommand::SetSourceInterpolation:
     case ViewerWidgetCommand::SetCubicMethod:
@@ -1978,6 +1999,7 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
     case ViewerWidgetCommand::SetInvariantIdsVisible: viewer_.show_invariant_ids = ui_->checkViewerInvariantIds->isChecked(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetUnivariantIdsVisible: viewer_.show_univariant_ids = ui_->checkViewerUnivariantIds->isChecked(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetPhasePairLabelsVisible: viewer_.show_phase_pair_labels = ui_->checkViewerPhasePairLabels->isChecked(); refreshProjectionCanvas(); break;
+    case ViewerWidgetCommand::SetIsoLineLabelsVisible: viewer_.show_iso_line_labels = ui_->checkViewerIsoLineLabels->isChecked(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetContainingTriangleVisible: viewer_.show_containing_triangle = ui_->checkViewerContainingTriangle->isChecked(); ui_->canvasTernary->setContainingTriangleVisible(viewer_.show_containing_triangle); break;
     case ViewerWidgetCommand::SetLineWidth: viewer_.line_width = ui_->spinViewerLineWidth->value(); refreshProjectionCanvas(); break;
     case ViewerWidgetCommand::SetPlotMarkerSize: viewer_.plot_marker_size = ui_->spinViewerPlotMarkerSize->value(); refreshProjectionCanvas(); break;
@@ -1999,7 +2021,7 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
         clearAllInterpolationQueries();
         break;
     case ViewerWidgetCommand::ResetAutomaticRange:
-        viewer_.options.automatic_range = true; schedule_calculation = commitViewerCalculationOptions(action); break;
+        viewer_.options.automatic_range = true; viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); schedule_calculation = commitViewerCalculationOptions(action); break;
     default: break;
     }
     if (schedule_calculation) scheduleViewerCalculation();
@@ -2012,11 +2034,32 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
         if (!commitViewerNumber(editor, target, label) || *target <= 0.0) { editor->setToolTip(tr("%1 must be finite and positive.").arg(label)); return false; }
         return true;
     };
+    if (source == ViewerWidgetCommand::CommitIsoLevelSpec) {
+        const auto parsed = parseIsoLevelSpec(ui_->editViewerIsoLevelSpec->text());
+        if (!parsed.valid()) {
+            ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
+            ui_->editViewerIsoLevelSpec->setToolTip(parsed.error);
+            reportBridgeStatus(parsed.error, false);
+            return false;
+        }
+        if (parsed.levels.size() > 256) {
+            ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
+            ui_->editViewerIsoLevelSpec->setToolTip(tr("At most 256 explicit levels are supported."));
+            return false;
+        }
+        ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+        viewer_.options.automatic_range = false;
+        viewer_.options.explicit_level_count = static_cast<std::uint32_t>(parsed.levels.size());
+        std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0);
+        for (int index = 0; index < parsed.levels.size(); ++index) viewer_.options.explicit_levels[index] = parsed.levels.at(index);
+        if (parsed.has_range) { viewer_.options.minimum = parsed.minimum; viewer_.options.maximum = parsed.maximum; viewer_.options.level_step = parsed.step; }
+        else { viewer_.options.minimum = parsed.levels.front(); viewer_.options.maximum = parsed.levels.back(); viewer_.options.level_step = parsed.levels.size() > 1 ? parsed.levels.at(1) - parsed.levels.at(0) : 1.0; }
+    }
     if (source == ViewerWidgetCommand::CommitIsoMinimum && !commitViewerNumber(ui_->editViewerTmin, &viewer_.options.minimum, tr("Tmin"))) return false;
     if (source == ViewerWidgetCommand::CommitIsoMaximum && !commitViewerNumber(ui_->editViewerTmax, &viewer_.options.maximum, tr("Tmax"))) return false;
     if (source == ViewerWidgetCommand::CommitIsoStep && !finite_positive(ui_->editViewerStep, &viewer_.options.level_step, tr("Step"))) return false;
     if (source == ViewerWidgetCommand::SetRegularizationSpacing && !finite_positive(ui_->editViewerRegularizationSpacing, &viewer_.options.regularization_spacing, tr("Regularization spacing"))) return false;
-    if (source == ViewerWidgetCommand::CommitIsoMinimum || source == ViewerWidgetCommand::CommitIsoMaximum || source == ViewerWidgetCommand::CommitIsoStep) viewer_.options.automatic_range = false;
+    if (source == ViewerWidgetCommand::CommitIsoMinimum || source == ViewerWidgetCommand::CommitIsoMaximum || source == ViewerWidgetCommand::CommitIsoStep) { viewer_.options.automatic_range = false; viewer_.options.explicit_level_count = 0; std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0); }
     auto source_interpolation = sourceInterpolationAbi(ui_->comboViewerSourceInterpolation->currentIndex());
     const auto cubic_method = cubicMethodAbi(ui_->comboViewerCubicMethod->currentIndex());
     const auto partial_domain = partialDomainAbi(ui_->comboViewerPartialDomain->currentIndex());
@@ -2099,6 +2142,7 @@ void MainWindow::syncViewerPanelControls() {
     set_panel(ui_->checkViewerQueryPoints, viewer_.show_query_points); set_panel(ui_->checkViewerStableIsotherms, viewer_.show_stable_isotherms);
     set_panel(ui_->checkViewerStableUnivariants, viewer_.show_stable_univariants); set_panel(ui_->checkViewerBinaryInvariants, viewer_.show_binary_invariants);
     set_panel(ui_->checkViewerInteriorInvariants, viewer_.show_interior_invariants); set_panel(ui_->checkViewerAxisLabels, viewer_.show_axis_labels);
+    set_panel(ui_->checkViewerIsoLineLabels, viewer_.show_iso_line_labels);
     set_panel(ui_->checkViewerCornerNames, viewer_.show_corner_names); set_panel(ui_->checkViewerLegend, viewer_.show_legend);
     set_panel(ui_->checkViewerAutomaticRange, viewer_.options.automatic_range);
     { const QSignalBlocker blocker(ui_->comboViewerMode); ui_->comboViewerMode->setCurrentIndex(viewer_.interaction_mode); }
@@ -2108,8 +2152,17 @@ void MainWindow::syncViewerPanelControls() {
     { const QSignalBlocker blocker(ui_->comboViewerPartialDomain); ui_->comboViewerPartialDomain->setCurrentIndex(partialDomainIndex(viewer_.options.partial_domain_policy)); }
     { const QSignalBlocker blocker(ui_->comboViewerContinuation); ui_->comboViewerContinuation->setCurrentIndex(continuationIndex(viewer_.options.continuation)); }
     { const QSignalBlocker blocker(ui_->checkViewerRegularizePaths); ui_->checkViewerRegularizePaths->setChecked(viewer_.options.regularize); }
-    { const QSignalBlocker blocker(ui_->editViewerStep); ui_->editViewerStep->setText(QLocale::c().toString(viewer_.options.level_step, 'g', 10)); }
-    { const QSignalBlocker blocker(ui_->editViewerRegularizationSpacing); ui_->editViewerRegularizationSpacing->setText(QLocale::c().toString(viewer_.options.regularization_spacing, 'g', 10)); }
+    {
+        const QSignalBlocker blocker(ui_->editViewerIsoLevelSpec);
+        if (viewer_.options.explicit_level_count != 0) {
+            QStringList values;
+            for (std::uint32_t index = 0; index < viewer_.options.explicit_level_count; ++index) values << displayNumber(viewer_.options.explicit_levels[index], DisplayNumberKind::Temperature);
+            ui_->editViewerIsoLevelSpec->setText(values.join(QStringLiteral(", ")));
+        } else if (viewer_.options.automatic_range) ui_->editViewerIsoLevelSpec->setText(tr("automatic"));
+        else ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3").arg(displayNumber(viewer_.options.minimum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.maximum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)));
+    }
+    { const QSignalBlocker blocker(ui_->editViewerStep); ui_->editViewerStep->setText(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)); }
+    { const QSignalBlocker blocker(ui_->editViewerRegularizationSpacing); ui_->editViewerRegularizationSpacing->setText(displayNumber(viewer_.options.regularization_spacing, DisplayNumberKind::Property)); }
 }
 
 void MainWindow::updateViewerActionState() {
@@ -2152,7 +2205,7 @@ void MainWindow::updateViewerActionState() {
     ui_->buttonInvariantCopy->setEnabled(has_selected_invariant);
     for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants}) { action->setEnabled(viewer_.has_last_valid_projection); action->setToolTip(viewer_.has_last_valid_projection ? QString() : unavailable); }
     ui_->buttonViewerResetAutomaticRange->setEnabled(summary.calculation_available);
-    for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerAutomaticRange), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->editViewerStep), static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing)}) control->setEnabled(summary.calculation_available);
+    for (QWidget* control : {static_cast<QWidget*>(ui_->checkViewerAutomaticRange), static_cast<QWidget*>(ui_->editViewerTmin), static_cast<QWidget*>(ui_->editViewerTmax), static_cast<QWidget*>(ui_->editViewerStep), static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing), static_cast<QWidget*>(ui_->editViewerIsoLevelSpec), static_cast<QWidget*>(ui_->checkViewerIsoLineLabels)}) control->setEnabled(summary.calculation_available);
     const bool cubic_selected = ui_->comboViewerSourceInterpolation->currentIndex() == 1;
     const bool cubic_available = summary.calculation_available && cubic_selected && regular_inspection_grid;
     const auto cubic_reason = !regular_inspection_grid
@@ -2196,10 +2249,13 @@ void MainWindow::updateViewerSelectionDetails() {
     const auto row = *viewer_.selected_rows.cbegin(); TcqtRow composition{}; TcqtCell cell{};
     if (!tcqt_grid_row_at(viewer_.grid_index, row, &composition).success || !tcqt_grid_cell_at(viewer_.grid_index, viewer_.field_index, row, &cell).success) return;
     const auto state = cell.state == 0 ? tr("Calculated") : cell.state == 4 ? tr("Extrapolated") : cell.state == 2 ? tr("Cut-off") : tr("Missing");
-    const auto value = cell.has_value ? QLocale::c().toString(cell.value, 'g', 12) : QStringLiteral("-");
+    const auto value = cell.has_value ? displayNumber(cell.value, DisplayNumberKind::Property) : QStringLiteral("-");
     const auto note = text(cell.note);
-    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) Â· %7\nState: %8\nValue: %9\nNote: %10")
-        .arg(row + 1).arg(composition.a, 0, 'g', 10).arg(composition.b, 0, 'g', 10).arg(composition.c, 0, 'g', 10)
+    ui_->labelViewerSelectedVertex->setText(tr("Row %1\nA %2  B %3  C %4\nPhase %5 (stable ID %6) \u00B7 %7\nState: %8\nValue: %9\nNote: %10")
+        .arg(row + 1)
+        .arg(displayNumber(composition.a, DisplayNumberKind::Composition))
+        .arg(displayNumber(composition.b, DisplayNumberKind::Composition))
+        .arg(displayNumber(composition.c, DisplayNumberKind::Composition))
         .arg(ui_->comboViewerPhase->currentText()).arg(viewer_.phase_id).arg(viewer_.property).arg(state, value, note));
 }
 void MainWindow::setInterpolationPreview(const TcqtLocatedPoint& location) {
@@ -2272,7 +2328,7 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
     state->addItem(tr("Missing (NA)"), 3);
     state->addItem(tr("Cut-off (CO)"), 2);
     state->setCurrentIndex(qMax(0, state->findData(existing.state)));
-    auto* value = new QLineEdit(existing.has_value ? QLocale::c().toString(existing.value, 'g', 15) : QString(), &dialog);
+    auto* value = new QLineEdit(existing.has_value ? displayNumber(existing.value, DisplayNumberKind::Property) : QString(), &dialog);
     auto* note = new QLineEdit(text(existing.note), &dialog);
     auto* provenance = new QLabel(&dialog);
     provenance->setWordWrap(true);
@@ -2310,7 +2366,7 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
                 .arg(existing.extrapolation_layer)
                 .arg(existing.extrapolation_method == 0 ? tr("Akima") : existing.extrapolation_method == 1 ? tr("Makima") : existing.extrapolation_method == 2 ? tr("PCHIP") : tr("Steffen"))
                 .arg(existing.extrapolation_support_count)
-                .arg(QLocale::c().toString(existing.extrapolation_spread, 'g', 10)));
+                .arg(displayNumber(existing.extrapolation_spread, DisplayNumberKind::Property)));
         } else if (code == 2) {
             provenance->setText(tr("Cut-off values are excluded from automatic mesh extrapolation. Convert to NA first to make this vertex eligible."));
         } else {
@@ -2328,7 +2384,7 @@ void MainWindow::editViewerVertex(std::uint32_t row, const QPoint& global_positi
             bool ok = false;
             const auto scalar = QLocale::c().toDouble(value->text(), &ok);
             if (!ok || !std::isfinite(scalar)) { error->setText(tr("Calculated requires one finite numeric value.")); return; }
-            token = QLocale::c().toString(scalar, 'g', 15);
+            token = displayNumber(scalar, DisplayNumberKind::Property);
         } else {
             token = code == 2 ? QStringLiteral("CO") : QStringLiteral("NA");
         }
