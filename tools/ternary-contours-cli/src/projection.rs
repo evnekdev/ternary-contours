@@ -124,6 +124,12 @@ pub struct ProjectionDiagnostics {
     pub contour_invariant_level_coincidence_count: usize,
     /// Tangent, unresolved, or incidence-incomplete contacts retained as typed diagnostics.
     pub contour_degenerate_event_count: usize,
+    /// Independently attempted requested contour levels.
+    pub contour_levels_attempted: usize,
+    /// Levels with a completed contour graph.
+    pub contour_levels_completed: usize,
+    /// Levels retained as typed failures without discarding stable topology.
+    pub contour_levels_failed: usize,
     /// Continuous scalar residual maximum across retained junction evidence.
     pub maximum_contour_level_residual: f64,
     pub invariant_count: usize,
@@ -351,8 +357,27 @@ pub fn calculate_stable_topology(
     dataset: &TabulatedTernaryDataset,
     options: &ProjectionOptions,
 ) -> Result<StableBoundaryNetwork, ProjectionError> {
+    calculate_stable_topology_projection(dataset, options)
+        .map(|projection| projection.stable_boundaries)
+}
+
+/// Build an accepted topology-only projection envelope. The result contains
+/// invariant nodes, univariants, source provenance, and diagnostics but no
+/// requested contour geometry. Viewer integrations retain this artifact before
+/// attempting independent isotherm extraction.
+pub fn calculate_stable_topology_projection(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+) -> Result<LiquidusProjection, ProjectionError> {
     let mut sink = NoopTraceSink;
-    calculate_stable_topology_with_trace(dataset, options, &mut sink)
+    calculate_projection_with_trace_context_reusing_stable_topology_mode(
+        dataset,
+        options,
+        &mut sink,
+        &NumericalTraceRunContext::default(),
+        None,
+        true,
+    )
 }
 
 /// Trace-aware topology-only bootstrap. The empty contour set is an internal
@@ -909,6 +934,9 @@ fn calculate_projection_with_trace_session_reusing_topology(
             contour_one_sided_contact_count: 0,
             contour_invariant_level_coincidence_count: 0,
             contour_degenerate_event_count: 0,
+            contour_levels_attempted: 0,
+            contour_levels_completed: 0,
+            contour_levels_failed: 0,
             maximum_contour_level_residual: 0.0,
             stable_polygon_count: 0,
             invariant_count: stable_boundaries.nodes.len(),
@@ -1041,6 +1069,9 @@ fn calculate_projection_with_trace_session_reusing_topology(
                 )
             })
             .count(),
+        contour_levels_attempted: stable_contours.diagnostics.level_calculations_attempted,
+        contour_levels_completed: stable_contours.diagnostics.levels_completed,
+        contour_levels_failed: stable_contours.diagnostics.levels_failed,
         maximum_contour_level_residual: stable_contours
             .levels
             .iter()
@@ -1894,6 +1925,51 @@ mod tests {
         assert!(range.minimum <= range.maximum);
         assert_eq!(range.minimum % 100.0, 0.0);
         assert_eq!(range.maximum % 100.0, 0.0);
+    }
+
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn detailed_ex_automatic_bootstrap_keeps_topology_and_completes_all_levels() {
+        let dataset = parse_str(include_str!(
+            "../../../calculations/CaO-PbO-ZnO_detailed.tct"
+        ))
+        .expect("committed detailed EX fixture parses");
+        let projection = calculate_projection(
+            &dataset,
+            &ProjectionOptions {
+                automatic_level_step: Some(100.0),
+                sampling_subdivisions: Some(20),
+                regularize: true,
+                interpolation: InterpolationOptions::default(),
+                ..ProjectionOptions::default()
+            },
+        )
+        .expect("detailed EX automatic Viewer calculation");
+        assert_eq!(projection.stable_boundaries.nodes.len(), 4);
+        assert_eq!(projection.stable_boundaries.univariants.len(), 3);
+        assert_eq!(projection.stable_boundaries.truncated_univariants.len(), 0);
+        assert_eq!(
+            projection.automatic_iso_range,
+            Some(AutomaticIsoRange {
+                minimum: 900.0,
+                maximum: 1_500.0,
+                used_invariant_minimum: true,
+            })
+        );
+        assert_eq!(
+            projection.levels,
+            vec![900.0, 1_000.0, 1_100.0, 1_200.0, 1_300.0, 1_400.0, 1_500.0]
+        );
+        assert_eq!(projection.diagnostics.contour_levels_attempted, 7);
+        assert_eq!(projection.diagnostics.contour_levels_completed, 7);
+        assert_eq!(projection.diagnostics.contour_levels_failed, 0);
+        assert!(
+            projection
+                .stable_contours
+                .levels
+                .iter()
+                .all(|level| level.status.is_complete())
+        );
     }
 
     #[cfg(feature = "inspection")]

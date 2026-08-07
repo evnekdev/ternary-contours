@@ -34,7 +34,10 @@ pub use contour_signature::{
     compare_stable_contours, stable_contour_signature,
 };
 pub use diagnostics::{StableContourDiagnostics, StableVerificationPassDiagnostics};
-pub use error::{StableContourError, StableSourceEvaluationError};
+pub use error::{
+    IncompatiblePhysicalContourEdgeContext, NonForwardPathAssemblyContext, StableContourError,
+    StableSourceEvaluationError,
+};
 pub use options::{StableGridOptions, StableGridVerification};
 pub use prepare::PreparedStablePhaseEnsemble;
 pub use signature::{
@@ -74,6 +77,8 @@ pub struct StableContourSet {
 pub struct StableContourLevel {
     /// Requested finite scalar value.
     pub value: f64,
+    /// Completion state for this independently isolated requested level.
+    pub status: StableContourLevelStatus,
     /// Deterministically ordered paths, never joined across phase IDs.
     pub paths: Vec<StableContourPath>,
     /// Canonical stable-boundary contacts used by path endpoints.
@@ -82,6 +87,22 @@ pub struct StableContourLevel {
     /// each of its two phases; phase ownership is never inferred from a
     /// coincident pair of endpoint coordinates.
     pub half_edges: Vec<StableContourHalfEdge>,
+}
+
+/// Completion status for one requested stable-contour level.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StableContourLevelStatus {
+    /// Every phase component at the level was assembled and verified.
+    Complete,
+    /// The level has no usable contour graph. The accepted stable-boundary
+    /// topology remains valid and other requested levels can still be used.
+    Failed { error: StableContourError },
+}
+
+impl StableContourLevelStatus {
+    pub const fn is_complete(&self) -> bool {
+        matches!(self, Self::Complete)
+    }
 }
 
 /// One path owned by a single stable phase.

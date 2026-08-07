@@ -28,6 +28,7 @@ struct TcqtProjectionSummary {
     std::uint32_t univariant_count; std::uint32_t contour_path_count;
     std::uint32_t contour_transfer_junction_count; std::uint32_t contour_one_sided_contact_count;
     std::uint32_t contour_invariant_level_coincidence_count; std::uint32_t contour_degenerate_event_count;
+    std::uint32_t contour_levels_attempted; std::uint32_t contour_levels_completed; std::uint32_t contour_levels_failed;
     double maximum_contour_level_residual;
     bool effective_automatic_range; double effective_minimum; double effective_maximum; double effective_level_step;
     std::uint32_t effective_sampling_subdivisions; bool effective_regularize; double effective_regularization_spacing;

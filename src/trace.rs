@@ -178,6 +178,7 @@ pub enum NumericalTraceEventKind {
     ContourAssemblyAmbiguous,
     ContourPathCompleted,
     ContourLevelCompleted,
+    ContourLevelFailed,
     RegularizationStarted,
     RegularizationPointProposed,
     RegularizationProjectionIteration,

@@ -4,7 +4,7 @@ use core::fmt;
 use crate::IrregularFieldEvaluationError;
 use crate::{FieldError, FieldEvaluationError, GridVertexId, TernaryCoordinate};
 
-use super::{StableContourQuantity, StablePhaseId};
+use super::{StableContourQuantity, StableJunctionId, StablePhaseId};
 
 /// Context-preserving source evaluator failure.
 #[derive(Clone, Debug, PartialEq)]
@@ -35,6 +35,46 @@ impl std::error::Error for StableSourceEvaluationError {
             Self::Irregular(error) => Some(error),
         }
     }
+}
+
+/// Context for a genuine post-canonicalization physical contour retrace.
+///
+/// This payload is boxed in [`StableContourError`] so detailed tracing does
+/// not inflate every stable-contour result type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct NonForwardPathAssemblyContext {
+    pub level: f64,
+    pub phase: StablePhaseId,
+    /// Previous, current, and proposed-next physical graph points. These
+    /// identify an actual post-canonicalization retrace rather than an input
+    /// producer orientation.
+    pub point: TernaryCoordinate,
+    pub previous: Option<TernaryCoordinate>,
+    pub next: Option<TernaryCoordinate>,
+    pub triangle: Option<usize>,
+    pub previous_junction: Option<StableJunctionId>,
+    pub current_junction: Option<StableJunctionId>,
+    pub next_junction: Option<StableJunctionId>,
+}
+
+/// Context for incompatible records that occupy one physical contour edge.
+///
+/// This payload is boxed in [`StableContourError`] so preserving source-edge
+/// diagnostics does not inflate every stable-contour result type.
+#[derive(Clone, Debug, PartialEq)]
+pub struct IncompatiblePhysicalContourEdgeContext {
+    pub level: f64,
+    pub phase: StablePhaseId,
+    pub triangle: usize,
+    pub existing_triangle: usize,
+    pub start: TernaryCoordinate,
+    pub end: TernaryCoordinate,
+    pub existing_start: TernaryCoordinate,
+    pub existing_end: TernaryCoordinate,
+    pub start_junction: Option<StableJunctionId>,
+    pub end_junction: Option<StableJunctionId>,
+    pub existing_start_junction: Option<StableJunctionId>,
+    pub existing_end_junction: Option<StableJunctionId>,
 }
 
 /// Failure while preparing or extracting stable phase contours.
@@ -138,9 +178,13 @@ pub enum StableContourError {
         next_parameter: f64,
     },
     NonForwardPathAssembly {
-        level: f64,
-        phase: StablePhaseId,
-        point: TernaryCoordinate,
+        context: Box<NonForwardPathAssemblyContext>,
+    },
+    /// Two phase-local segment records describe the same physical contour
+    /// edge, but disagree about its endpoint or transfer semantics. Such
+    /// records cannot be canonicalized safely.
+    IncompatiblePhysicalContourEdge {
+        context: Box<IncompatiblePhysicalContourEdgeContext>,
     },
     DirectedTraversalCycle {
         level: f64,
@@ -320,14 +364,23 @@ impl fmt::Display for StableContourError {
                 formatter,
                 "local contour events do not make forward progress in triangle {triangle} for phase {phase:?}: {next_parameter} follows {previous_parameter}"
             ),
-            Self::NonForwardPathAssembly {
-                level,
-                phase,
-                point,
-            } => write!(
+            Self::NonForwardPathAssembly { context } => write!(
                 formatter,
-                "stable path continuation retraces or fails forward tangent alignment at level {level} for phase {phase:?} near {:?}",
-                point.as_array()
+                "stable path continuation retraces after physical-edge canonicalization at level {} for phase {:?} near {:?}; previous={:?}, next={:?}, triangle={:?}, junctions={:?}/{:?}/{:?}",
+                context.level,
+                context.phase,
+                context.point.as_array(),
+                context.previous.map(TernaryCoordinate::as_array),
+                context.next.map(TernaryCoordinate::as_array),
+                context.triangle,
+                context.previous_junction,
+                context.current_junction,
+                context.next_junction,
+            ),
+            Self::IncompatiblePhysicalContourEdge { context } => write!(
+                formatter,
+                "phase-local contour records describe incompatible coincident physical edges at level {} for phase {:?} (triangles {} and {})",
+                context.level, context.phase, context.existing_triangle, context.triangle,
             ),
             Self::DirectedTraversalCycle {
                 level,

@@ -31,11 +31,11 @@ use ternary_contours_cli::{
     ProjectionGeometryCsvSelection, ProjectionOptions, ProjectionPathSource, PropertyDefinition,
     RegularTabulatedGrid, RenderOptions, RenderPathMode, RowOrder, SourceRange, TabulatedField,
     TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
-    TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, calculate_projection,
-    calculate_projection_reusing_stable_topology,
+    TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, automatic_iso_range,
+    calculate_projection, calculate_projection_reusing_stable_topology,
     calculate_projection_with_automatic_bootstrap_with_trace_context,
     calculate_projection_with_trace_context_reusing_stable_topology, calculate_stable_topology,
-    empty_project_dataset, extrapolate_regular_grid_fields,
+    calculate_stable_topology_projection, empty_project_dataset, extrapolate_regular_grid_fields,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
@@ -351,6 +351,9 @@ pub struct TcqtProjectionSummary {
     pub contour_one_sided_contact_count: u32,
     pub contour_invariant_level_coincidence_count: u32,
     pub contour_degenerate_event_count: u32,
+    pub contour_levels_attempted: u32,
+    pub contour_levels_completed: u32,
+    pub contour_levels_failed: u32,
     pub maximum_contour_level_residual: f64,
     pub effective_automatic_range: bool,
     pub effective_minimum: f64,
@@ -2764,7 +2767,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
     let selected_regularized = requested_options.regularize;
     let mut selected_options = projection_options.clone();
     selected_options.regularize = selected_regularized;
-    let existing_topology = if can_reuse_topology {
+    let reusable_topology = if can_reuse_topology {
         reuse_regularized
             .as_ref()
             .map(|projection| &projection.stable_boundaries)
@@ -2776,22 +2779,150 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
     } else {
         None
     };
-    let automatic_bootstrap = requested_options.automatic_range
-        && requested_options.explicit_levels.is_empty()
-        && existing_topology.is_none();
-    let selected_reuse = existing_topology;
-    let reused_stable_topology = can_reuse_topology && existing_topology.is_some();
-    let topology_built_for_request = automatic_bootstrap;
+
+    // Stage A is an independently accepted artifact. Build and commit it
+    // before Stage B so a contour failure can never make an accepted stable
+    // boundary network, its invariant temperatures, or its univariants vanish.
+    let mut staged_topology = if reusable_topology.is_none() {
+        match calculate_stable_topology_projection(&dataset, &selected_options) {
+            Ok(projection) => Some(projection),
+            Err(error) => {
+                return failure(
+                    format!("Stable topology calculation failed: {error}"),
+                    expected_revision,
+                    options_revision,
+                );
+            }
+        }
+    } else {
+        None
+    };
+    let mut automatic_level_failure = None;
+    if let Some(topology) = staged_topology.as_mut() {
+        if requested_options.automatic_range && requested_options.explicit_levels.is_empty() {
+            let step = selected_options.automatic_level_step.unwrap_or(100.0);
+            match automatic_iso_range(
+                &topology.stable_boundaries,
+                topology.input_summary.temperature_range[0],
+                topology.input_summary.temperature_range[1],
+                step,
+            ) {
+                Ok(range) => match automatic_iso_levels(range.minimum, range.maximum, step) {
+                    Ok(levels) => {
+                        topology.levels = levels;
+                        topology.automatic_iso_range = Some(range);
+                    }
+                    Err(error) => {
+                        automatic_level_failure = Some(format!(
+                            "automatic levels could not be materialized: {error}"
+                        ));
+                    }
+                },
+                Err(error) => {
+                    automatic_level_failure =
+                        Some(format!("automatic levels could not be derived: {error}"));
+                }
+            }
+        } else {
+            topology.levels = selected_options.levels.clone();
+        }
+        let topology_records = match projection_csv_records(
+            &dataset,
+            Some(topology),
+            None,
+            &RenderOptions::default(),
+            ProjectionCsvOptions {
+                layers: ProjectionCsvLayerFilter::AllCalculatedLayers,
+                path_mode: RenderPathMode::Raw,
+            },
+        ) {
+            Ok(records) => records,
+            Err(error) => {
+                return failure(
+                    format!("Stable topology could not be transferred to the Viewer: {error}"),
+                    expected_revision,
+                    options_revision,
+                );
+            }
+        };
+        match document().lock() {
+            Ok(mut state)
+                if state.revision == expected_revision
+                    && state.options_revision == expected_options_revision
+                    && state.calculation_generation == request_id =>
+            {
+                state.projection = Some(topology.clone());
+                state.raw_projection = Some(topology.clone());
+                state.regularized_projection = None;
+                state.projection_records = topology_records;
+                state.accepted_projection_dataset = Some(dataset.clone());
+                state.accepted_projection_dataset_revision = expected_revision;
+                state.accepted_viewer_options = Some(requested_options.clone());
+                state.projection_options_revision = expected_options_revision;
+                state.projection_request_id = request_id;
+                state.accepted_topology_key = Some(requested_options.topology_key());
+                state.stable_topology_build_count =
+                    state.stable_topology_build_count.saturating_add(1);
+                state.last_stable_topology_reused = false;
+            }
+            Ok(state) => {
+                return failure(
+                    "stable topology result became stale and was discarded".to_owned(),
+                    state.revision,
+                    state.options_revision,
+                );
+            }
+            Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
+        }
+    }
+    if let Some(error) = automatic_level_failure {
+        return TcqtCalculationResult {
+            success: true,
+            request_id,
+            dataset_revision: expected_revision,
+            options_revision: expected_options_revision,
+            vertex_count: dataset
+                .grids
+                .iter()
+                .map(|grid| grid.compositions().len())
+                .sum::<usize>() as u32,
+            message: bytes(&format!(
+                "Stable topology calculated; automatic isotherm range is unavailable: {error}"
+            )),
+        };
+    }
+    let selected_reuse = staged_topology
+        .as_ref()
+        .map(|projection| &projection.stable_boundaries)
+        .or(reusable_topology);
+    let topology_built_for_request = staged_topology.is_some();
+    let reused_stable_topology = !topology_built_for_request && selected_reuse.is_some();
     let (selected_result, trace_status) = calculate_viewer_projection(
         &dataset,
         &selected_options,
         &trace_request,
         &trace_context,
         selected_reuse,
-        topology_built_for_request,
+        false,
     );
     let mut selected_projection = match selected_result {
         Ok(projection) => projection,
+        Err(error) if topology_built_for_request => {
+            return TcqtCalculationResult {
+                success: true,
+                request_id,
+                dataset_revision: expected_revision,
+                options_revision: expected_options_revision,
+                vertex_count: dataset
+                    .grids
+                    .iter()
+                    .map(|grid| grid.compositions().len())
+                    .sum::<usize>() as u32,
+                message: bytes(&format!(
+                    "Stable topology calculated; isotherm calculation incomplete: {error}"
+                )),
+            };
+        }
         Err(error) => {
             return failure(
                 format!(
@@ -2818,12 +2949,10 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
     let mut regularized_options = projection_options.clone();
     regularized_options.regularize = true;
     let (raw_projection, regularized_projection, sibling_warning) = if selected_regularized {
-        let raw = match reuse_raw.as_ref() {
-            Some(projection) => calculate_projection_reusing_stable_topology(
-                &dataset,
-                &raw_options,
-                &projection.stable_boundaries,
-            ),
+        let raw = match selected_reuse {
+            Some(topology) => {
+                calculate_projection_reusing_stable_topology(&dataset, &raw_options, topology)
+            }
             None => calculate_projection(&dataset, &raw_options),
         }
         .map_err(|error| error.to_string());
@@ -2833,11 +2962,11 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
             .map(|error| format!("Raw path variant unavailable: {error}"));
         (raw.ok(), Some(selected_projection.clone()), warning)
     } else {
-        let regularized = match reuse_regularized.as_ref() {
-            Some(projection) => calculate_projection_reusing_stable_topology(
+        let regularized = match selected_reuse {
+            Some(topology) => calculate_projection_reusing_stable_topology(
                 &dataset,
                 &regularized_options,
-                &projection.stable_boundaries,
+                topology,
             ),
             None => calculate_projection(&dataset, &regularized_options),
         }
@@ -2940,7 +3069,7 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
             if reused_stable_topology {
                 state.stable_topology_reuse_count =
                     state.stable_topology_reuse_count.saturating_add(1);
-            } else {
+            } else if !topology_built_for_request {
                 state.stable_topology_build_count =
                     state.stable_topology_build_count.saturating_add(1);
             }
@@ -2989,6 +3118,9 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 contour_one_sided_contact_count: 0,
                 contour_invariant_level_coincidence_count: 0,
                 contour_degenerate_event_count: 0,
+                contour_levels_attempted: 0,
+                contour_levels_completed: 0,
+                contour_levels_failed: 0,
                 maximum_contour_level_residual: 0.0,
                 effective_automatic_range: effective.automatic_range,
                 effective_minimum: effective.minimum,
@@ -3064,8 +3196,11 @@ pub unsafe extern "C" fn tcqt_projection_summary(
                 as u32,
             contour_degenerate_event_count: projection.diagnostics.contour_degenerate_event_count
                 as u32,
+            contour_levels_attempted: projection.diagnostics.contour_levels_attempted as u32,
+            contour_levels_completed: projection.diagnostics.contour_levels_completed as u32,
+            contour_levels_failed: projection.diagnostics.contour_levels_failed as u32,
             maximum_contour_level_residual: projection.diagnostics.maximum_contour_level_residual,
-            effective_automatic_range: effective.automatic_range,
+            effective_automatic_range: automatic.is_some(),
             effective_minimum,
             effective_maximum,
             effective_level_step: effective.level_step,
@@ -4610,6 +4745,60 @@ mod tests {
             assert!(tcqt_projection_summary(&mut third).success);
             assert!(!third.stable_topology_reused);
             assert_eq!(third.stable_topology_build_count, 2);
+        }
+    }
+
+    #[test]
+    fn contour_failure_retains_the_independently_accepted_stable_topology() {
+        let _guard = test_document_lock().lock().unwrap();
+        let fixture = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../tools/ternary-contours-cli/fixtures/interior-invariant.tct");
+        let path = std::ffi::CString::new(fixture.to_string_lossy().as_bytes()).unwrap();
+        unsafe {
+            assert!(tcqt_open_document(path.as_ptr()).success);
+            let options = TcqtViewerCalculationOptions {
+                automatic_range: false,
+                minimum: 1_000_000.0,
+                maximum: 1_000_100.0,
+                level_step: 100.0,
+                sampling_subdivisions: 17,
+                regularize: false,
+                regularization_spacing: 0.01,
+                source_interpolation: ABI_SOURCE_LINEAR,
+                cubic_method: ABI_CUBIC_AKIMA,
+                partial_domain_policy: ABI_PARTIAL_ONE_SIDED_THEN_LINEAR,
+                continuation: ABI_CONTINUATION_MUGGIANU,
+                explicit_level_count: 0,
+                explicit_levels: [0.0; TCQT_MAX_EXPLICIT_LEVELS],
+            };
+            assert!(tcqt_set_viewer_calculation_options(&options).success);
+            let mut project = std::mem::zeroed::<TcqtProjectSummary>();
+            let mut state = std::mem::zeroed::<TcqtViewerCalculationState>();
+            assert!(tcqt_project_summary(&mut project).success);
+            assert!(tcqt_viewer_calculation_state(&mut state).success);
+            let result = tcqt_calculate_viewer(
+                &state.options,
+                project.revision,
+                state.options_revision,
+                390,
+            );
+            assert!(result.success);
+            assert!(
+                String::from_utf8_lossy(&result.message)
+                    .contains("Stable topology calculated; isotherm calculation incomplete")
+            );
+            let mut summary = std::mem::zeroed::<TcqtProjectionSummary>();
+            assert!(tcqt_projection_summary(&mut summary).success);
+            assert!(summary.available);
+            assert_eq!(summary.binary_invariant_count, 3);
+            assert_eq!(summary.interior_invariant_count, 1);
+            assert_eq!(summary.univariant_count, 3);
+            assert_eq!(summary.level_count, 2);
+            assert_eq!(summary.contour_path_count, 0);
+            assert_eq!(summary.stable_topology_build_count, 1);
+            let mut record_count = 0;
+            assert!(tcqt_projection_record_count(&mut record_count).success);
+            assert!(record_count > 0, "topology records remain renderable");
         }
     }
 

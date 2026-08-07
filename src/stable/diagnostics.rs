@@ -66,6 +66,18 @@ pub struct StableContourDiagnostics {
 
     // Level extraction and path assembly.
     pub requested_levels: usize,
+    /// Requested levels entered into independent extraction attempts.
+    pub level_calculations_attempted: usize,
+    /// Levels whose contour graph completed successfully.
+    pub levels_completed: usize,
+    /// Levels retaining at least one independently valid component after a
+    /// recoverable component-local failure.
+    pub levels_partially_completed: usize,
+    /// Levels with a typed extraction/assembly failure.
+    pub levels_failed: usize,
+    /// Recoverable disconnected phase components that failed while other
+    /// components of their level remained available.
+    pub phase_components_failed: usize,
     pub local_stable_segments: usize,
     pub phase_labelled_paths: usize,
     pub closed_paths: usize,
@@ -75,6 +87,17 @@ pub struct StableContourDiagnostics {
     pub invariant_junctions: usize,
     pub isolated_target_points: usize,
     pub path_assembly_ambiguities: usize,
+    /// Number of phase-local contour segments emitted before physical-edge
+    /// canonicalization. Local extraction orientation is intentionally not a
+    /// topological identity.
+    pub physical_contour_segments_emitted: usize,
+    /// Compatible duplicate physical edges merged before graph assembly,
+    /// including producer records emitted in opposite orientations.
+    pub reverse_compatible_contour_duplicates_merged: usize,
+    /// Geometrically coincident producer records whose junction or endpoint
+    /// semantics disagree. These are retained as typed failures rather than
+    /// being silently merged.
+    pub incompatible_coincident_contour_edges: usize,
 
     // Continuous contour root isolation and transfer assembly.
     pub continuous_phase_contour_segments: usize,

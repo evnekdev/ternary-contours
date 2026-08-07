@@ -291,46 +291,22 @@ fn assemble_phase(
     parameter_tolerance: f64,
     diagnostics: &mut StableContourDiagnostics,
 ) -> Result<Vec<StableContourPath>, StableContourError> {
+    let segments = canonicalize_physical_edges(phase, segments, level, tolerance, diagnostics)?;
     let mut nodes = Vec::<Node>::new();
     let mut buckets = BTreeMap::<[i64; 3], Vec<usize>>::new();
     let mut edges = Vec::<(usize, usize, usize)>::new();
-    let mut unique_edges = BTreeSet::new();
-    let mut directed_edges = BTreeSet::new();
     for segment in segments {
-        let directed_key = (
-            bucket_key(segment.start.point, tolerance),
-            bucket_key(segment.end.point, tolerance),
-        );
-        if !directed_edges.insert(directed_key) {
-            diagnostics.path_assembly_ambiguities += 1;
-            return Err(StableContourError::DirectedTraversalCycle {
-                level,
-                phase,
-                triangle: segment.triangle,
-            });
-        }
-        if directed_edges.contains(&(directed_key.1, directed_key.0)) {
-            diagnostics.path_assembly_ambiguities += 1;
-            return Err(StableContourError::NonForwardPathAssembly {
-                level,
-                phase,
-                point: segment.start.point,
-            });
-        }
-        let geometric_key = canonical_edge_key(segment.start.point, segment.end.point, tolerance);
-        if !unique_edges.insert(geometric_key) {
-            diagnostics.path_assembly_ambiguities += 1;
-            return Err(StableContourError::DirectedTraversalCycle {
-                level,
-                phase,
-                triangle: segment.triangle,
-            });
-        }
         let start = node_for(&mut nodes, &mut buckets, segment.start, tolerance);
         let end = node_for(&mut nodes, &mut buckets, segment.end, tolerance);
-        if start != end {
-            edges.push((start, end, segment.triangle));
+        if start == end {
+            diagnostics.path_assembly_ambiguities += 1;
+            return Err(StableContourError::DirectedTraversalCycle {
+                level,
+                phase,
+                triangle: segment.triangle,
+            });
         }
+        edges.push((start, end, segment.triangle));
     }
     let mut adjacency = vec![Vec::<(usize, usize)>::new(); nodes.len()];
     for (edge_index, &(left, right, _)) in edges.iter().enumerate() {
@@ -395,6 +371,75 @@ fn assemble_phase(
     Ok(paths)
 }
 
+/// Canonicalize producer-oriented segment records into unique undirected
+/// physical contour edges. Stable contour extraction occurs independently in
+/// neighbouring sampling cells, so the same continuous edge may legitimately
+/// arrive in either direction. Producer orientation is therefore not evidence
+/// of a path retrace.
+fn canonicalize_physical_edges(
+    phase: StablePhaseId,
+    segments: Vec<WorkSegment>,
+    level: f64,
+    tolerance: f64,
+    diagnostics: &mut StableContourDiagnostics,
+) -> Result<Vec<WorkSegment>, StableContourError> {
+    let mut unique = Vec::<WorkSegment>::new();
+    for segment in segments {
+        diagnostics.physical_contour_segments_emitted += 1;
+        let coincident = unique
+            .iter()
+            .position(|existing| physical_edge_geometry_matches(*existing, segment, tolerance));
+        let Some(index) = coincident else {
+            unique.push(segment);
+            continue;
+        };
+        let existing = unique[index];
+        if physical_edge_semantics_match(existing, segment, tolerance) {
+            diagnostics.reverse_compatible_contour_duplicates_merged += 1;
+            continue;
+        }
+        diagnostics.path_assembly_ambiguities += 1;
+        diagnostics.incompatible_coincident_contour_edges += 1;
+        return Err(StableContourError::IncompatiblePhysicalContourEdge {
+            context: Box::new(super::IncompatiblePhysicalContourEdgeContext {
+                level,
+                phase,
+                triangle: segment.triangle,
+                existing_triangle: existing.triangle,
+                start: segment.start.point,
+                end: segment.end.point,
+                existing_start: existing.start.point,
+                existing_end: existing.end.point,
+                start_junction: segment.start.junction,
+                end_junction: segment.end.junction,
+                existing_start_junction: existing.start.junction,
+                existing_end_junction: existing.end.junction,
+            }),
+        });
+    }
+    Ok(unique)
+}
+
+fn physical_edge_geometry_matches(left: WorkSegment, right: WorkSegment, tolerance: f64) -> bool {
+    (points_close(left.start.point, right.start.point, tolerance)
+        && points_close(left.end.point, right.end.point, tolerance))
+        || (points_close(left.start.point, right.end.point, tolerance)
+            && points_close(left.end.point, right.start.point, tolerance))
+}
+
+fn physical_edge_semantics_match(left: WorkSegment, right: WorkSegment, tolerance: f64) -> bool {
+    let endpoint_matches = |left: WorkEndpoint, right: WorkEndpoint| {
+        left.junction == right.junction && left.break_path == right.break_path
+    };
+    if points_close(left.start.point, right.start.point, tolerance)
+        && points_close(left.end.point, right.end.point, tolerance)
+    {
+        endpoint_matches(left.start, right.start) && endpoint_matches(left.end, right.end)
+    } else {
+        endpoint_matches(left.start, right.end) && endpoint_matches(left.end, right.start)
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn walk(
     phase: StablePhaseId,
@@ -420,6 +465,13 @@ fn walk(
             .copied();
         let Some((node, edge)) = next else { break };
         if let Some(previous_node) = previous
+            // A continuously corrected transfer junction may move off the
+            // sampled endpoint that seeded it. The final local segment can
+            // then appear to turn backwards in affine sampling geometry even
+            // though it terminates at a verified phase-transfer event. Its
+            // semantic endpoint, not producer orientation, is authoritative.
+            && nodes[current].junction.is_none()
+            && nodes[node].junction.is_none()
             && forward_tangent_alignment(
                 nodes[previous_node].point,
                 nodes[current].point,
@@ -428,9 +480,17 @@ fn walk(
         {
             diagnostics.path_assembly_ambiguities += 1;
             return Err(StableContourError::NonForwardPathAssembly {
-                level,
-                phase,
-                point: nodes[current].point,
+                context: Box::new(super::NonForwardPathAssemblyContext {
+                    level,
+                    phase,
+                    point: nodes[current].point,
+                    previous: Some(nodes[previous_node].point),
+                    next: Some(nodes[node].point),
+                    triangle: Some(edges[edge].2),
+                    previous_junction: nodes[previous_node].junction,
+                    current_junction: nodes[current].junction,
+                    next_junction: nodes[node].junction,
+                }),
             });
         }
         if !directed_states.insert((current, node)) {
@@ -612,20 +672,6 @@ fn node_for(
     });
     buckets.entry(key).or_default().push(index);
     index
-}
-
-fn canonical_edge_key(
-    start: TernaryCoordinate,
-    end: TernaryCoordinate,
-    tolerance: f64,
-) -> ([i64; 3], [i64; 3]) {
-    let start = bucket_key(start, tolerance);
-    let end = bucket_key(end, tolerance);
-    if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    }
 }
 
 fn bucket_key(point: TernaryCoordinate, tolerance: f64) -> [i64; 3] {

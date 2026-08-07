@@ -525,6 +525,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
         diagnostics.requested_levels = levels.len();
         let mut results = Vec::with_capacity(levels.len());
         for (level_index, level) in levels.into_iter().enumerate() {
+            diagnostics.level_calculations_attempted += 1;
             if trace.is_enabled(NumericalTraceLevel::Summary) {
                 trace.emit(
                     NumericalTraceLevel::Summary,
@@ -539,136 +540,171 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
                     ),
                 );
             }
-            let segments = extract_level_segments(
-                &self.cells,
-                &self.samples,
-                &self.phase_ids,
-                self.quantity,
-                level,
-                self.options.value_tolerance,
-                self.options.stability_tolerance,
-                self.options.geometry_tolerance,
-                self.options.parameter_tolerance,
-                &mut diagnostics,
-            )?;
-            if trace.is_enabled(NumericalTraceLevel::Decisions) {
-                trace.emit(
-                    NumericalTraceLevel::Decisions,
-                    NumericalTraceStage::Contour,
-                    decision(
-                        NumericalTraceEventKind::ContourRootIsolationStarted,
-                        TraceDecision {
-                            level: Some(level),
-                            counts: Some(TraceCounts {
-                                calculated: boundaries.univariants.len(),
-                                ..TraceCounts::default()
-                            }),
-                            ..TraceDecision::default()
-                        },
-                    ),
-                );
-            }
-            let junctions = isolate_transfer_junctions(
-                &self.layers,
-                &self.phase_ids,
-                self.quantity,
-                self.options,
-                boundaries,
-                level,
-                &mut diagnostics,
-            )?;
-            if trace.is_enabled(NumericalTraceLevel::Decisions) {
-                for junction in &junctions {
-                    let event = match junction.kind {
-                        super::StableContourJunctionKind::RegularTransfer => {
-                            NumericalTraceEventKind::ContourTransferRootConverged
-                        }
-                        super::StableContourJunctionKind::InvariantLevelCoincidence => {
-                            NumericalTraceEventKind::ContourInvariantLevelCoincidence
-                        }
-                        _ => NumericalTraceEventKind::ContourTransferRootRejected,
-                    };
+            let attempt = (|| -> Result<StableContourLevel, StableContourError> {
+                let segments = extract_level_segments(
+                    &self.cells,
+                    &self.samples,
+                    &self.phase_ids,
+                    self.quantity,
+                    level,
+                    self.options.value_tolerance,
+                    self.options.stability_tolerance,
+                    self.options.geometry_tolerance,
+                    self.options.parameter_tolerance,
+                    &mut diagnostics,
+                )?;
+                if trace.is_enabled(NumericalTraceLevel::Decisions) {
                     trace.emit(
                         NumericalTraceLevel::Decisions,
                         NumericalTraceStage::Contour,
                         decision(
-                            event,
+                            NumericalTraceEventKind::ContourRootIsolationStarted,
                             TraceDecision {
                                 level: Some(level),
-                                phase_pair: junction
-                                    .phases
-                                    .first()
-                                    .zip(junction.phases.get(1))
-                                    .map(|(left, right)| [left.0, right.0]),
-                                node_id: Some(junction.id.0),
-                                composition: Some(junction.point.as_array()),
-                                residual: junction
-                                    .verification
-                                    .as_ref()
-                                    .map(|verification| verification.equality_residual),
-                                reason: Some(format!(
-                                    "{:?}; branch={:?}",
-                                    junction.kind, junction.branch
-                                )),
+                                counts: Some(TraceCounts {
+                                    calculated: boundaries.univariants.len(),
+                                    ..TraceCounts::default()
+                                }),
                                 ..TraceDecision::default()
                             },
                         ),
                     );
                 }
-            }
-            let (mut paths, mut junctions) = assemble_level_with_junctions(
-                segments,
-                self.quantity,
-                level,
-                self.options.geometry_tolerance,
-                self.options.parameter_tolerance,
-                junctions,
-                self.samples.grid.subdivisions(),
-                &mut diagnostics,
-            )?;
-            apply_boundary_geometry_state(&mut paths, &junctions, boundaries);
-            refine_paths_continuously(
-                &self.layers,
-                &self.phase_ids,
-                self.quantity,
-                self.options,
-                level,
-                &mut paths,
-                &mut diagnostics,
-            )?;
-            let half_edges = half_edges(&paths);
-            let incidence_failures_before = diagnostics.contour_transfer_incidence_failures;
-            super::continuous::validate_transfer_incidence(
-                &mut junctions,
-                &half_edges,
-                level,
-                &mut diagnostics,
-            )?;
-            if diagnostics.contour_transfer_incidence_failures > incidence_failures_before
-                && trace.is_enabled(NumericalTraceLevel::Decisions)
-            {
-                trace.emit(
-                    NumericalTraceLevel::Decisions,
-                    NumericalTraceStage::Contour,
-                    decision(
-                        NumericalTraceEventKind::ContourTransferIncidenceInvalid,
-                        TraceDecision {
-                            level: Some(level),
-                            reason: Some(
-                                "continuous transfer retained as typed degenerate event".into(),
+                let junctions = isolate_transfer_junctions(
+                    &self.layers,
+                    &self.phase_ids,
+                    self.quantity,
+                    self.options,
+                    boundaries,
+                    level,
+                    &mut diagnostics,
+                )?;
+                if trace.is_enabled(NumericalTraceLevel::Decisions) {
+                    for junction in &junctions {
+                        let event = match junction.kind {
+                            super::StableContourJunctionKind::RegularTransfer => {
+                                NumericalTraceEventKind::ContourTransferRootConverged
+                            }
+                            super::StableContourJunctionKind::InvariantLevelCoincidence => {
+                                NumericalTraceEventKind::ContourInvariantLevelCoincidence
+                            }
+                            _ => NumericalTraceEventKind::ContourTransferRootRejected,
+                        };
+                        trace.emit(
+                            NumericalTraceLevel::Decisions,
+                            NumericalTraceStage::Contour,
+                            decision(
+                                event,
+                                TraceDecision {
+                                    level: Some(level),
+                                    phase_pair: junction
+                                        .phases
+                                        .first()
+                                        .zip(junction.phases.get(1))
+                                        .map(|(left, right)| [left.0, right.0]),
+                                    node_id: Some(junction.id.0),
+                                    composition: Some(junction.point.as_array()),
+                                    residual: junction
+                                        .verification
+                                        .as_ref()
+                                        .map(|verification| verification.equality_residual),
+                                    reason: Some(format!(
+                                        "{:?}; branch={:?}",
+                                        junction.kind, junction.branch
+                                    )),
+                                    ..TraceDecision::default()
+                                },
                             ),
-                            ..TraceDecision::default()
-                        },
-                    ),
-                );
+                        );
+                    }
+                }
+                let (mut paths, mut junctions) = assemble_level_with_junctions(
+                    segments,
+                    self.quantity,
+                    level,
+                    self.options.geometry_tolerance,
+                    self.options.parameter_tolerance,
+                    junctions,
+                    self.samples.grid.subdivisions(),
+                    &mut diagnostics,
+                )?;
+                apply_boundary_geometry_state(&mut paths, &junctions, boundaries);
+                refine_paths_continuously(
+                    &self.layers,
+                    &self.phase_ids,
+                    self.quantity,
+                    self.options,
+                    level,
+                    &mut paths,
+                    &mut diagnostics,
+                )?;
+                let half_edges = half_edges(&paths);
+                let incidence_failures_before = diagnostics.contour_transfer_incidence_failures;
+                super::continuous::validate_transfer_incidence(
+                    &mut junctions,
+                    &half_edges,
+                    level,
+                    &mut diagnostics,
+                )?;
+                if diagnostics.contour_transfer_incidence_failures > incidence_failures_before
+                    && trace.is_enabled(NumericalTraceLevel::Decisions)
+                {
+                    trace.emit(
+                        NumericalTraceLevel::Decisions,
+                        NumericalTraceStage::Contour,
+                        decision(
+                            NumericalTraceEventKind::ContourTransferIncidenceInvalid,
+                            TraceDecision {
+                                level: Some(level),
+                                reason: Some(
+                                    "continuous transfer retained as typed degenerate event".into(),
+                                ),
+                                ..TraceDecision::default()
+                            },
+                        ),
+                    );
+                }
+                emit_contour_trace(trace, level_index, level, &paths, &junctions);
+                Ok(StableContourLevel {
+                    value: level,
+                    status: super::StableContourLevelStatus::Complete,
+                    paths,
+                    junctions,
+                    half_edges,
+                })
+            })();
+            match attempt {
+                Ok(level_result) => {
+                    diagnostics.levels_completed += 1;
+                    results.push(level_result);
+                }
+                Err(error) => {
+                    diagnostics.levels_failed += 1;
+                    let reason = error.to_string();
+                    if trace.is_enabled(NumericalTraceLevel::Summary) {
+                        trace.emit(
+                            NumericalTraceLevel::Summary,
+                            NumericalTraceStage::Contour,
+                            decision(
+                                NumericalTraceEventKind::ContourLevelFailed,
+                                TraceDecision {
+                                    level: Some(level),
+                                    path_id: Some(level_index),
+                                    reason: Some(reason),
+                                    ..TraceDecision::default()
+                                },
+                            ),
+                        );
+                    }
+                    results.push(StableContourLevel {
+                        value: level,
+                        status: super::StableContourLevelStatus::Failed { error },
+                        paths: Vec::new(),
+                        junctions: Vec::new(),
+                        half_edges: Vec::new(),
+                    });
+                }
             }
-            emit_contour_trace(trace, level_index, level, &paths, &junctions);
-            results.push(StableContourLevel {
-                value: level,
-                paths,
-                junctions,
-                half_edges,
-            });
         }
         Ok(StableContourSet {
             quantity: self.quantity,
@@ -806,6 +842,7 @@ impl<'a> PreparedStablePhaseEnsemble<'a> {
             }
             results.push(StableContourLevel {
                 value: level,
+                status: super::StableContourLevelStatus::Complete,
                 half_edges: half_edges(&paths),
                 paths,
                 junctions,

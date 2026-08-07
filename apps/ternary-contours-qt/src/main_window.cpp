@@ -1584,7 +1584,7 @@ void MainWindow::runRustCalculation() {
                 viewer_.has_last_valid_projection = true;
                 viewer_.projection_is_stale = false;
                 const auto level_preview = projection.level_count == 0
-                    ? tr("Waiting for stable topology to derive levels")
+                    ? tr("Automatic isotherm range is unavailable for the accepted stable topology")
                     : tr("%1 levels: %2-%3 \u00B0C, step %4 \u00B0C")
                         .arg(projection.level_count)
                         .arg(displayTemperature(projection.effective_minimum))
@@ -1612,6 +1612,11 @@ void MainWindow::runRustCalculation() {
                         .arg(projection.contour_degenerate_event_count)
                         .arg(projection.contour_degenerate_event_count == 1 ? QString() : QStringLiteral("s"));
                 }
+                if (projection.contour_levels_failed != 0) {
+                    projection_summary += tr("; isotherms incomplete: %1 level failure%2 retained as diagnostics")
+                        .arg(projection.contour_levels_failed)
+                        .arg(projection.contour_levels_failed == 1 ? QString() : QStringLiteral("s"));
+                }
                 if (projection.domain_truncated_univariant_count != 0) {
                     projection_summary += tr("; %1 domain-truncated branch%2 retained as diagnostics")
                         .arg(projection.domain_truncated_univariant_count)
@@ -1627,6 +1632,10 @@ void MainWindow::runRustCalculation() {
                 }
                 if (projection.stable_topology_reused) {
                     projection_summary.prepend(tr("Updated isotherms using accepted stable topology; "));
+                }
+                const auto calculation_detail = text(result.message);
+                if (calculation_detail.startsWith(QStringLiteral("Stable topology calculated; isotherm calculation incomplete:"))) {
+                    projection_summary = calculation_detail;
                 }
                 setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(
@@ -2336,7 +2345,9 @@ void MainWindow::syncViewerPanelControls() {
             ui_->editViewerIsoLevelSpec->clear();
             ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
             ui_->editViewerIsoLevelSpec->setToolTip(
-                tr("Waiting for stable topology to derive invariant-based levels."));
+                viewer_.has_last_valid_projection
+                    ? tr("Automatic isotherm range is unavailable for the accepted stable topology.")
+                    : tr("Waiting for stable topology to derive invariant-based levels."));
         }
     }
     if (!viewer_.has_last_valid_projection) {

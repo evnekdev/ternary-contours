@@ -449,6 +449,33 @@ fn tangential_target_is_diagnostic_only_and_positive_tie_is_typed() {
 }
 
 #[test]
+fn stable_boundary_contour_failure_isolated_to_its_requested_level() {
+    let height = field(4, |_| 0.0);
+    let prepared = PreparedStablePhaseEnsemble::new(
+        [phase(1, &height)],
+        StableContourQuantity::Height,
+        options(4),
+    )
+    .unwrap();
+    let boundaries = prepared
+        .stable_boundaries(StableBoundaryOptions::default())
+        .unwrap();
+    let contours = prepared
+        .contours_with_stable_boundaries(&[0.0, 1.0], &boundaries)
+        .expect("one failed level must not discard the independent level");
+    assert_eq!(contours.diagnostics.level_calculations_attempted, 2);
+    assert_eq!(contours.diagnostics.levels_completed, 1);
+    assert_eq!(contours.diagnostics.levels_failed, 1);
+    assert!(matches!(
+        contours.levels[0].status,
+        StableContourLevelStatus::Failed {
+            error: StableContourError::CoincidentTargetSegment { .. }
+        }
+    ));
+    assert!(contours.levels[1].status.is_complete());
+}
+
+#[test]
 fn secondary_discontinuity_does_not_force_phase_paths_to_meet() {
     let h_a = field(12, |[a, _, _]| a);
     let h_b = field(12, |[_, b, _]| b);
@@ -878,9 +905,9 @@ fn shared_edge_and_multi_cell_vertex_hits_progress_without_zigzag() {
 }
 
 #[test]
-fn duplicate_directed_state_and_immediate_retrace_are_typed_errors() {
+fn reverse_compatible_segments_merge_but_a_physical_retrace_is_typed() {
     let first = local_segment(2, [0.1, 0.2, 0.7], [0.4, 0.2, 0.4]);
-    let duplicate = first.clone();
+    let duplicate = local_segment(3, [0.4, 0.2, 0.4], [0.1, 0.2, 0.7]);
     let mut diagnostics = StableContourDiagnostics::default();
     assert!(
         super::paths::assemble_level(
@@ -894,17 +921,22 @@ fn duplicate_directed_state_and_immediate_retrace_are_typed_errors() {
         .is_ok()
     );
     let first = local_segment(2, [0.1, 0.2, 0.7], [0.4, 0.2, 0.4]);
-    assert!(matches!(
-        super::paths::assemble_level(
-            vec![first, duplicate],
-            StableContourQuantity::Height,
-            0.0,
-            1.0e-9,
-            1.0e-12,
-            &mut StableContourDiagnostics::default(),
-        ),
-        Err(StableContourError::DirectedTraversalCycle { .. })
-    ));
+    let mut duplicate_diagnostics = StableContourDiagnostics::default();
+    let (paths, _) = super::paths::assemble_level(
+        vec![first, duplicate],
+        StableContourQuantity::Height,
+        0.0,
+        1.0e-9,
+        1.0e-12,
+        &mut duplicate_diagnostics,
+    )
+    .expect("reverse-compatible physical edge must merge");
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].points.len(), 2);
+    assert_eq!(
+        duplicate_diagnostics.reverse_compatible_contour_duplicates_merged,
+        1
+    );
 
     let retrace = vec![
         local_segment(1, [0.1, 0.2, 0.7], [0.5, 0.2, 0.3]),
@@ -921,6 +953,55 @@ fn duplicate_directed_state_and_immediate_retrace_are_typed_errors() {
         ),
         Err(StableContourError::NonForwardPathAssembly { .. })
     ));
+}
+
+#[test]
+fn incompatible_coincident_segments_remain_typed_ambiguities() {
+    let first = local_segment(2, [0.1, 0.2, 0.7], [0.4, 0.2, 0.4]);
+    let mut incompatible = local_segment(3, [0.4, 0.2, 0.4], [0.1, 0.2, 0.7]);
+    incompatible.start.source = super::segments::EndpointSource::StableBoundary;
+    assert!(matches!(
+        super::paths::assemble_level(
+            vec![first, incompatible],
+            StableContourQuantity::Height,
+            0.0,
+            1.0e-9,
+            1.0e-12,
+            &mut StableContourDiagnostics::default(),
+        ),
+        Err(StableContourError::IncompatiblePhysicalContourEdge { .. })
+    ));
+}
+
+#[test]
+fn corrected_transfer_terminal_does_not_fail_affine_tangent_orientation() {
+    let first = local_segment(1, [0.1, 0.2, 0.7], [0.5, 0.2, 0.3]);
+    let mut terminal = local_segment(2, [0.5, 0.2, 0.3], [0.3, 0.2, 0.5]);
+    terminal.end.tied_phases = vec![StablePhaseId(1), StablePhaseId(2)];
+    terminal.end.junction_kind = Some(StableContourJunctionKind::RegularTransfer);
+    terminal.end.source = super::segments::EndpointSource::StableBoundary;
+    let junction = StableContourJunction {
+        id: StableJunctionId(0),
+        point: [0.3, 0.2, 0.5].into(),
+        phases: vec![StablePhaseId(1), StablePhaseId(2)],
+        kind: StableContourJunctionKind::RegularTransfer,
+        branch: None,
+        invariant: None,
+        verification: None,
+    };
+    let (paths, _) = super::paths::assemble_level_with_junctions(
+        vec![first, terminal],
+        StableContourQuantity::Height,
+        0.0,
+        1.0e-9,
+        1.0e-12,
+        vec![junction],
+        100,
+        &mut StableContourDiagnostics::default(),
+    )
+    .expect("a verified terminal transfer owns the final path orientation");
+    assert_eq!(paths.len(), 1);
+    assert_eq!(paths[0].end_junction, Some(StableJunctionId(0)));
 }
 
 #[test]

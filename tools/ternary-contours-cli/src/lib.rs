@@ -35,8 +35,9 @@ pub use projection::{
     calculate_projection_with_automatic_bootstrap_with_trace_context,
     calculate_projection_with_trace, calculate_projection_with_trace_context,
     calculate_projection_with_trace_context_reusing_stable_topology, calculate_stable_topology,
-    calculate_stable_topology_with_trace, calculate_stable_topology_with_trace_context,
-    invariant_iso_range_from_temperatures, parse_level_spec, parse_viewer_level_spec,
+    calculate_stable_topology_projection, calculate_stable_topology_with_trace,
+    calculate_stable_topology_with_trace_context, invariant_iso_range_from_temperatures,
+    parse_level_spec, parse_viewer_level_spec,
 };
 pub use projection_csv::{
     ProjectionCsvError, ProjectionCsvLayerFilter, ProjectionCsvOptions, ProjectionCsvRecord,
