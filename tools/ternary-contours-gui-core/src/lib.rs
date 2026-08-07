@@ -2405,6 +2405,11 @@ mod tests {
         assert!(window.contains("tcqt_evaluate_field_current"));
     }
 
+    fn button_placeholder_is_not_a_value(ui: &str) -> bool {
+        ui.contains("placeholderText")
+            && !ui.contains(r#"<property name="text"><string>minimum maximum step; extra1, extra2</string></property>"#)
+    }
+
     #[test]
     fn viewer_level_field_uses_concrete_auto_text_and_retains_manual_fallback() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2414,14 +2419,20 @@ mod tests {
         let header = std::fs::read_to_string(root.join("src/main_window.hpp")).unwrap();
 
         assert!(ui.contains("editViewerIsoLevelSpec"));
+        assert!(ui.contains("placeholderText"));
+        assert!(ui.contains("minimum maximum step; extra1, extra2"));
+        assert!(button_placeholder_is_not_a_value(&ui));
         assert!(ui.contains("buttonViewerResetAutomaticRange"));
         assert!(!ui.contains("checkViewerAutomaticRange"));
         assert!(header.contains("IsoLevelSpecOrigin"));
+        assert!(header.contains("AwaitingTopology"));
         assert!(header.contains("AutoDerived"));
         assert!(header.contains("UserEdited"));
-        assert!(window.contains("last_user_iso_level_spec"));
-        assert!(window.contains("retaining the last valid user level specification"));
-        assert!(window.contains("Automatically derived from accepted invariant temperatures."));
+        assert!(header.contains("accepted_iso_level_spec"));
+        assert!(header.contains("requested_iso_level_spec"));
+        assert!(window.contains("Waiting for stable topology to derive invariant-based levels."));
+        assert!(window.contains("accepted_iso_level_spec"));
+        assert!(window.contains("Derived from accepted invariant temperatures."));
         assert!(!window.contains("QStringLiteral(\"automatic\")"));
     }
 

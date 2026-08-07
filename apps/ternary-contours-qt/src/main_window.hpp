@@ -24,6 +24,7 @@ class QAbstractItemView;
 namespace Ui { class MainWindow; }
 
 enum class IsoLevelSpecOrigin {
+    AwaitingTopology,
     AutoDerived,
     UserEdited,
 };
@@ -112,8 +113,13 @@ struct ViewerState {
     bool has_last_valid_projection = false;
     bool projection_is_stale = false;
     TcqtViewerCalculationOptions options{};
-    IsoLevelSpecOrigin iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
-    QString last_user_iso_level_spec;
+    // Draft/requested state is independent from the accepted visible result.
+    IsoLevelSpecOrigin iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+    IsoLevelSpecOrigin accepted_iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+    QString iso_level_draft_text;
+    QString requested_iso_level_spec;
+    QString accepted_iso_level_spec;
+    bool iso_level_draft_invalid = false;
 };
 
 class MainWindow final : public QMainWindow {

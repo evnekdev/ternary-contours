@@ -344,6 +344,46 @@ pub fn calculate_projection(
     calculate_projection_with_trace(dataset, options, &mut sink)
 }
 
+/// Build only the accepted stable-boundary network. Automatic Viewer levels
+/// use this topology-first pass because invariant temperatures are available
+/// only after stable-boundary discovery.
+pub fn calculate_stable_topology(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+) -> Result<StableBoundaryNetwork, ProjectionError> {
+    let mut sink = NoopTraceSink;
+    calculate_stable_topology_with_trace(dataset, options, &mut sink)
+}
+
+/// Trace-aware topology-only bootstrap. The empty contour set is an internal
+/// transport envelope and must not be exposed as a complete projection.
+pub fn calculate_stable_topology_with_trace(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+) -> Result<StableBoundaryNetwork, ProjectionError> {
+    calculate_stable_topology_with_trace_context(
+        dataset,
+        options,
+        sink,
+        &NumericalTraceRunContext::default(),
+    )
+}
+
+/// Build topology while retaining the same request metadata as the subsequent
+/// contour pass. This keeps the two-stage automatic bootstrap in one trace.
+pub fn calculate_stable_topology_with_trace_context(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+    context: &NumericalTraceRunContext,
+) -> Result<StableBoundaryNetwork, ProjectionError> {
+    calculate_projection_with_trace_context_reusing_stable_topology_mode(
+        dataset, options, sink, context, None, true,
+    )
+    .map(|projection| projection.stable_boundaries)
+}
+
 /// Calculate a liquidus projection while emitting optional deterministic,
 /// observation-only numerical trace events.
 pub fn calculate_projection_with_trace(
@@ -357,6 +397,60 @@ pub fn calculate_projection_with_trace(
         sink,
         &NumericalTraceRunContext::default(),
     )
+}
+
+/// Calculate the automatic two-stage Viewer request in one trace session.
+/// Stable topology is built first, then the contour pass reuses that exact
+/// network; sequence numbers and request metadata remain continuous.
+pub fn calculate_projection_with_automatic_bootstrap_with_trace_context(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+    context: &NumericalTraceRunContext,
+) -> Result<LiquidusProjection, ProjectionError> {
+    let mut trace = NumericalTraceSession::new(sink);
+    if trace.is_enabled(NumericalTraceLevel::Summary) {
+        trace.emit(
+            NumericalTraceLevel::Summary,
+            NumericalTraceStage::Run,
+            NumericalTracePayload::RunStarted(trace_run_started(
+                dataset,
+                options,
+                trace.config(),
+                context,
+            )),
+        );
+    }
+    let topology = calculate_projection_with_trace_session_reusing_topology(
+        dataset, options, &mut trace, None, true,
+    )?
+    .stable_boundaries;
+    let result = calculate_projection_with_trace_session_reusing_topology(
+        dataset,
+        options,
+        &mut trace,
+        Some(&topology),
+        false,
+    );
+    match &result {
+        Ok(projection) if trace.is_configured(NumericalTraceLevel::Summary) => {
+            trace.emit_terminal(NumericalTracePayload::RunCompleted(TraceRunCompleted {
+                invariant_count: projection.diagnostics.invariant_count,
+                univariant_count: projection.diagnostics.univariant_count,
+                contour_path_count: projection.diagnostics.contour_path_count,
+                trace_events: trace.emitted(),
+                truncated: trace.is_truncated(),
+            }));
+        }
+        Err(error) if trace.is_configured(NumericalTraceLevel::Summary) => {
+            trace.emit_terminal(NumericalTracePayload::RunFailed(TraceRunFailed {
+                error_kind: NumericalTraceEventKind::InvalidOptions,
+                message: error.to_string(),
+            }));
+        }
+        _ => {}
+    }
+    result
 }
 
 /// Calculate a projection with deterministic trace events and request-local
@@ -382,6 +476,24 @@ pub fn calculate_projection_with_trace_context_reusing_stable_topology(
     context: &NumericalTraceRunContext,
     stable_topology: Option<&StableBoundaryNetwork>,
 ) -> Result<LiquidusProjection, ProjectionError> {
+    calculate_projection_with_trace_context_reusing_stable_topology_mode(
+        dataset,
+        options,
+        sink,
+        context,
+        stable_topology,
+        false,
+    )
+}
+
+fn calculate_projection_with_trace_context_reusing_stable_topology_mode(
+    dataset: &TabulatedTernaryDataset,
+    options: &ProjectionOptions,
+    sink: &mut impl NumericalTraceSink,
+    context: &NumericalTraceRunContext,
+    stable_topology: Option<&StableBoundaryNetwork>,
+    topology_only: bool,
+) -> Result<LiquidusProjection, ProjectionError> {
     let mut trace = NumericalTraceSession::new(sink);
     if trace.is_enabled(NumericalTraceLevel::Summary) {
         trace.emit(
@@ -400,6 +512,7 @@ pub fn calculate_projection_with_trace_context_reusing_stable_topology(
         options,
         &mut trace,
         stable_topology,
+        topology_only,
     );
     match &result {
         Ok(projection) if trace.is_configured(NumericalTraceLevel::Summary) => {
@@ -437,6 +550,7 @@ pub fn calculate_projection_reusing_stable_topology(
         options,
         &mut trace,
         Some(stable_topology),
+        false,
     )
 }
 
@@ -445,6 +559,7 @@ fn calculate_projection_with_trace_session_reusing_topology(
     options: &ProjectionOptions,
     trace: &mut NumericalTraceSession<'_>,
     reused_topology: Option<&StableBoundaryNetwork>,
+    topology_only: bool,
 ) -> Result<LiquidusProjection, ProjectionError> {
     let mut fields = BTreeMap::<StablePhaseId, PhaseSourceModel>::new();
     let mut regular_grid_count = 0;
@@ -784,6 +899,46 @@ fn calculate_projection_with_trace_session_reusing_topology(
             trace,
         )?
     };
+    if topology_only {
+        let diagnostics = ProjectionDiagnostics {
+            sampling_subdivisions,
+            regularized: options.regularize,
+            stable_topology_reused: reused_topology.is_some(),
+            contour_path_count: 0,
+            contour_transfer_junction_count: 0,
+            contour_one_sided_contact_count: 0,
+            contour_invariant_level_coincidence_count: 0,
+            contour_degenerate_event_count: 0,
+            maximum_contour_level_residual: 0.0,
+            stable_polygon_count: 0,
+            invariant_count: stable_boundaries.nodes.len(),
+            univariant_count: stable_boundaries.univariants.len(),
+            domain_truncated_univariant_count: stable_boundaries.truncated_univariants.len(),
+            regularization_failure_count: stable_boundaries.regularization_failures.len(),
+            partial_cubic_summaries,
+            extrapolated_source_values_used,
+            maximum_extrapolation_layer_used,
+            extrapolation_methods_used: extrapolation_methods_used.into_iter().collect(),
+        };
+        return Ok(LiquidusProjection {
+            levels: Vec::new(),
+            automatic_iso_range: None,
+            stable_contours: StableContourSet {
+                quantity: StableContourQuantity::Height,
+                levels: Vec::new(),
+                diagnostics: Default::default(),
+            },
+            stable_boundaries,
+            input_summary: InputSummary {
+                phase_count: dataset.phases.len(),
+                regular_grid_count,
+                irregular_grid_count,
+                temperature_range: [minimum, maximum],
+            },
+            diagnostics,
+        });
+    }
+
     let automatic_range = options
         .automatic_level_step
         .map(|step| automatic_iso_range(&stable_boundaries, minimum, maximum, step))
@@ -1516,6 +1671,44 @@ mod tests {
     }
 
     #[test]
+    fn automatic_bootstrap_trace_is_one_monotonic_calculation() {
+        let dataset = parse_str(include_str!("../fixtures/interior-invariant.tct")).unwrap();
+        let options = ProjectionOptions {
+            automatic_level_step: Some(5.0),
+            sampling_subdivisions: Some(17),
+            regularize: true,
+            regularization_spacing: Some(0.01),
+            interpolation: InterpolationOptions {
+                source: SourceInterpolation::Linear,
+                ..InterpolationOptions::default()
+            },
+            ..ProjectionOptions::default()
+        };
+        let mut sink = ternary_contours::VecTraceSink::new(
+            ternary_contours::NumericalTraceConfig::decisions(),
+        );
+        let projection = calculate_projection_with_automatic_bootstrap_with_trace_context(
+            &dataset,
+            &options,
+            &mut sink,
+            &NumericalTraceRunContext::default(),
+        )
+        .expect("automatic two-stage calculation");
+        assert!(!projection.levels.is_empty());
+        assert!(
+            sink.events()
+                .windows(2)
+                .all(|pair| { pair[0].sequence < pair[1].sequence })
+        );
+        assert!(sink.events().iter().any(|event| {
+            event.payload.kind() == ternary_contours::NumericalTraceEventKind::StableTopologyBuilt
+        }));
+        assert!(sink.events().iter().any(|event| {
+            event.payload.kind() == ternary_contours::NumericalTraceEventKind::StableTopologyReused
+        }));
+    }
+
+    #[test]
     fn traced_isotherm_update_reuses_the_accepted_topology() {
         let dataset = parse_str(include_str!("../fixtures/interior-invariant.tct")).unwrap();
         let initial = calculate_projection(&dataset, &ProjectionOptions::default()).unwrap();
@@ -1677,6 +1870,30 @@ mod tests {
             interior_verification(at_20).stability_margin.is_infinite(),
             interior_verification(at_40).stability_margin.is_infinite()
         );
+    }
+
+    #[cfg(feature = "inspection")]
+    #[test]
+    fn automatic_bootstrap_builds_topology_before_deriving_levels() {
+        let dataset = parse_str(include_str!(
+            "../../../calculations/CaO-PbO-ZnO_detailed.tct"
+        ))
+        .expect("committed detailed EX fixture parses");
+        let options = ProjectionOptions {
+            automatic_level_step: Some(100.0),
+            sampling_subdivisions: Some(20),
+            interpolation: InterpolationOptions::default(),
+            ..ProjectionOptions::default()
+        };
+        let topology = calculate_stable_topology(&dataset, &options)
+            .expect("automatic bootstrap must not require levels");
+        assert_eq!(topology.nodes.len(), 4);
+        assert_eq!(topology.univariants.len(), 3);
+        let range = automatic_iso_range(&topology, 0.0, 0.0, 100.0)
+            .expect("accepted invariant temperatures must derive a range");
+        assert!(range.minimum <= range.maximum);
+        assert_eq!(range.minimum % 100.0, 0.0);
+        assert_eq!(range.maximum % 100.0, 0.0);
     }
 
     #[cfg(feature = "inspection")]

@@ -421,6 +421,11 @@ MainWindow::MainWindow(QWidget* parent) : QMainWindow(parent), ui_(std::make_uni
     connect(ui_->checkViewerLabelsSelectedOnly, &QCheckBox::toggled, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetLabelsSelectedOnly); });
     ui_->checkViewerInvariantIds->setVisible(false);
     ui_->checkViewerUnivariantIds->setVisible(false);
+    connect(ui_->editViewerIsoLevelSpec, &QLineEdit::textEdited, this, [this](const QString& text) {
+        viewer_.iso_level_draft_text = text;
+        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::UserEdited;
+        viewer_.iso_level_draft_invalid = false;
+    });
     connect(ui_->editViewerIsoLevelSpec, &QLineEdit::editingFinished, this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::CommitIsoLevelSpec); });
     connect(ui_->spinViewerSamplingSubdivisions, qOverload<int>(&QSpinBox::valueChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetSamplingSubdivisions); });
     connect(ui_->comboViewerSourceInterpolation, qOverload<int>(&QComboBox::currentIndexChanged), this, [this] { dispatchViewerWidgetCommand(ViewerWidgetCommand::SetSourceInterpolation); });
@@ -722,8 +727,12 @@ void MainWindow::newDocument() {
     if (result.success) {
         viewer_.has_last_valid_projection = false;
         viewer_.projection_is_stale = false;
-        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
-        viewer_.last_user_iso_level_spec.clear();
+        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+        viewer_.accepted_iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+        viewer_.iso_level_draft_text.clear();
+        viewer_.requested_iso_level_spec.clear();
+        viewer_.accepted_iso_level_spec.clear();
+        viewer_.iso_level_draft_invalid = false;
         viewer_.selected_rows.clear();
         viewer_.queries.clear();
         ui_->canvasTernary->setProjectionPaths({});
@@ -754,8 +763,12 @@ void MainWindow::openDocument() {
     }
     viewer_.has_last_valid_projection = false;
     viewer_.projection_is_stale = false;
-    viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
-    viewer_.last_user_iso_level_spec.clear();
+    viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+    viewer_.accepted_iso_level_spec_origin = IsoLevelSpecOrigin::AwaitingTopology;
+    viewer_.iso_level_draft_text.clear();
+    viewer_.requested_iso_level_spec.clear();
+    viewer_.accepted_iso_level_spec.clear();
+    viewer_.iso_level_draft_invalid = false;
     viewer_.selected_rows.clear();
     viewer_.queries.clear();
     ui_->canvasTernary->setProjectionPaths({});
@@ -1552,8 +1565,32 @@ void MainWindow::runRustCalculation() {
                 setViewerCalculationStatus(tr("Calculation completed, but projection records could not be transferred to the canvas."), true);
                 reportBridgeStatus(tr("Projection records could not be transferred; previous plot remains visible."), false);
             } else {
+                const auto accepted_text = projection.effective_automatic_range
+                    ? QStringLiteral("%1 %2 %3")
+                        .arg(displayNumber(projection.effective_minimum, DisplayNumberKind::Temperature))
+                        .arg(displayNumber(projection.effective_maximum, DisplayNumberKind::Temperature))
+                        .arg(displayNumber(projection.effective_level_step, DisplayNumberKind::Temperature))
+                    : (viewer_.requested_iso_level_spec.isEmpty()
+                        ? ui_->editViewerIsoLevelSpec->text().trimmed()
+                        : viewer_.requested_iso_level_spec);
+                viewer_.accepted_iso_level_spec = accepted_text;
+                viewer_.accepted_iso_level_spec_origin = projection.effective_automatic_range
+                    ? IsoLevelSpecOrigin::AutoDerived
+                    : IsoLevelSpecOrigin::UserEdited;
+                viewer_.iso_level_spec_origin = viewer_.accepted_iso_level_spec_origin;
+                viewer_.iso_level_draft_text = accepted_text;
+                viewer_.requested_iso_level_spec = accepted_text;
+                viewer_.iso_level_draft_invalid = false;
                 viewer_.has_last_valid_projection = true;
                 viewer_.projection_is_stale = false;
+                const auto level_preview = projection.level_count == 0
+                    ? tr("Waiting for stable topology to derive levels")
+                    : tr("%1 levels: %2-%3 \u00B0C, step %4 \u00B0C")
+                        .arg(projection.level_count)
+                        .arg(displayTemperature(projection.effective_minimum))
+                        .arg(displayTemperature(projection.effective_maximum))
+                        .arg(displayTemperature(projection.effective_level_step));
+                ui_->labelViewerLevelPreview->setText(level_preview);
                 auto projection_summary = tr("%1 levels, %2 binary invariants, %3 ternary invariant%4, %5 complete univariants, %6 isotherm paths")
                     .arg(projection.level_count)
                     .arg(projection.binary_invariant_count)
@@ -1591,11 +1628,10 @@ void MainWindow::runRustCalculation() {
                 if (projection.stable_topology_reused) {
                     projection_summary.prepend(tr("Updated isotherms using accepted stable topology; "));
                 }
-                ui_->labelViewerLevelPreview->setText(projection_summary);
                 setViewerCalculationStatus(projection_summary);
                 ui_->labelViewerCalculationStatus->setToolTip(
                     tr("Effective settings\nRange: %1 (%2 to %3), step %4\nSampling: %5\nInterpolation: %6, cubic method %7, partial-domain policy %8, continuation %9\nRegularization: %10, spacing %11\nDataset revision %12, options revision %13, request %14\nTopology builds %15, reuses %16, isotherm rebuilds %17\nContour transfers %18, one-sided contacts %19, invariant coincidences %20, max residual %21, degenerate events %22")
-                        .arg(projection.effective_automatic_range ? tr("automatic") : tr("manual"))
+                        .arg(projection.effective_automatic_range ? tr("derived") : tr("user"))
                         .arg(displayTemperature(projection.effective_minimum))
                         .arg(displayTemperature(projection.effective_maximum))
                         .arg(displayTemperature(projection.effective_level_step))
@@ -1622,6 +1658,10 @@ void MainWindow::runRustCalculation() {
                 reportBridgeStatus(text(result.message), true);
             }
         } else {
+            if (!viewer_.iso_level_draft_text.isEmpty()
+                && viewer_.iso_level_draft_text != viewer_.accepted_iso_level_spec) {
+                viewer_.iso_level_draft_invalid = true;
+            }
             viewer_.projection_is_stale = viewer_.has_last_valid_projection;
             const auto detail = calculationText(result);
             setViewerCalculationStatus(
@@ -2123,9 +2163,12 @@ void MainWindow::dispatchViewerWidgetCommand(ViewerWidgetCommand action) {
         clearAllInterpolationQueries();
         break;
     case ViewerWidgetCommand::ResetAutomaticRange:
-        viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::AutoDerived;
-        // Retain a valid manual specification as the visible fallback when
-        // invariant temperatures cannot form a whole-step automatic range.
+        viewer_.iso_level_spec_origin = viewer_.has_last_valid_projection
+            ? IsoLevelSpecOrigin::AutoDerived
+            : IsoLevelSpecOrigin::AwaitingTopology;
+        viewer_.iso_level_draft_text.clear();
+        viewer_.requested_iso_level_spec.clear();
+        viewer_.iso_level_draft_invalid = false;
         viewer_.options.automatic_range = true;
         viewer_.options.level_step = 100.0;
         viewer_.options.explicit_level_count = 0;
@@ -2147,19 +2190,27 @@ bool MainWindow::commitViewerCalculationOptions(ViewerWidgetCommand source) {
     if (source == ViewerWidgetCommand::CommitIsoLevelSpec) {
         const auto parsed = parseIsoLevelSpec(ui_->editViewerIsoLevelSpec->text());
         if (!parsed.valid()) {
+            viewer_.iso_level_draft_text = ui_->editViewerIsoLevelSpec->text();
+            viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::UserEdited;
+            viewer_.iso_level_draft_invalid = true;
             ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
             ui_->editViewerIsoLevelSpec->setToolTip(parsed.error);
             reportBridgeStatus(parsed.error, false);
             return false;
         }
         if (parsed.levels.size() > 256) {
+            viewer_.iso_level_draft_text = ui_->editViewerIsoLevelSpec->text();
+            viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::UserEdited;
+            viewer_.iso_level_draft_invalid = true;
             ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
             ui_->editViewerIsoLevelSpec->setToolTip(tr("At most 256 explicit levels are supported."));
             return false;
         }
         ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
         viewer_.iso_level_spec_origin = IsoLevelSpecOrigin::UserEdited;
-        viewer_.last_user_iso_level_spec = ui_->editViewerIsoLevelSpec->text().trimmed();
+        viewer_.iso_level_draft_invalid = false;
+        viewer_.iso_level_draft_text = ui_->editViewerIsoLevelSpec->text().trimmed();
+        viewer_.requested_iso_level_spec = viewer_.iso_level_draft_text;
         viewer_.options.automatic_range = false;
         viewer_.options.explicit_level_count = static_cast<std::uint32_t>(parsed.levels.size());
         std::fill(std::begin(viewer_.options.explicit_levels), std::end(viewer_.options.explicit_levels), 0.0);
@@ -2261,35 +2312,35 @@ void MainWindow::syncViewerPanelControls() {
     { const QSignalBlocker blocker(ui_->checkViewerRegularizePaths); ui_->checkViewerRegularizePaths->setChecked(viewer_.options.regularize); }
     {
         const QSignalBlocker blocker(ui_->editViewerIsoLevelSpec);
-        if (viewer_.iso_level_spec_origin == IsoLevelSpecOrigin::AutoDerived) {
-            TcqtProjectionSummary projection{};
-            if (tcqt_projection_summary(&projection).success && projection.available
-                && projection.effective_automatic_range) {
-                ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3")
-                    .arg(displayNumber(projection.effective_minimum, DisplayNumberKind::Temperature))
-                    .arg(displayNumber(projection.effective_maximum, DisplayNumberKind::Temperature))
-                    .arg(displayNumber(projection.effective_level_step, DisplayNumberKind::Temperature)));
-                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatically derived from accepted invariant temperatures."));
-                ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
-            } else if (!viewer_.last_user_iso_level_spec.isEmpty()) {
-                ui_->editViewerIsoLevelSpec->setText(viewer_.last_user_iso_level_spec);
-                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatic range is unavailable; retaining the last valid user level specification."));
-                ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
-            } else {
-                ui_->editViewerIsoLevelSpec->clear();
-                ui_->editViewerIsoLevelSpec->setToolTip(tr("Automatic range is unavailable until a projection with finite invariant temperatures is accepted."));
-                ui_->editViewerIsoLevelSpec->setStyleSheet(QStringLiteral("QLineEdit { background: #ffd6d6; }"));
-            }
-        } else if (!viewer_.last_user_iso_level_spec.isEmpty()) {
-            ui_->editViewerIsoLevelSpec->setText(viewer_.last_user_iso_level_spec);
-            ui_->editViewerIsoLevelSpec->setToolTip(QString());
-        } else if (viewer_.options.explicit_level_count != 0) {
-            QStringList values;
-            for (std::uint32_t index = 0; index < viewer_.options.explicit_level_count; ++index) values << displayNumber(viewer_.options.explicit_levels[index], DisplayNumberKind::Temperature);
-            ui_->editViewerIsoLevelSpec->setText(values.join(QStringLiteral(", ")));
+        const bool draft_active = !viewer_.iso_level_draft_text.isEmpty()
+            && viewer_.iso_level_draft_text != viewer_.accepted_iso_level_spec;
+        if (viewer_.has_last_valid_projection && !viewer_.accepted_iso_level_spec.isEmpty()
+            && !draft_active) {
+            ui_->editViewerIsoLevelSpec->setText(viewer_.accepted_iso_level_spec);
+            ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+            ui_->editViewerIsoLevelSpec->setToolTip(
+                viewer_.accepted_iso_level_spec_origin == IsoLevelSpecOrigin::AutoDerived
+                    ? tr("Derived from accepted invariant temperatures.")
+                    : QString());
+        } else if (!viewer_.iso_level_draft_text.isEmpty()) {
+            ui_->editViewerIsoLevelSpec->setText(viewer_.iso_level_draft_text);
+            ui_->editViewerIsoLevelSpec->setStyleSheet(
+                viewer_.iso_level_draft_invalid
+                    ? QStringLiteral("QLineEdit { background: #ffd6d6; }")
+                    : QString());
+            ui_->editViewerIsoLevelSpec->setToolTip(
+                viewer_.iso_level_draft_invalid
+                    ? tr("Invalid requested level specification; the accepted projection remains unchanged.")
+                    : tr("Requested level specification; the accepted projection remains unchanged until calculation succeeds."));
         } else {
-            ui_->editViewerIsoLevelSpec->setText(QStringLiteral("%1 %2 %3").arg(displayNumber(viewer_.options.minimum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.maximum, DisplayNumberKind::Temperature)).arg(displayNumber(viewer_.options.level_step, DisplayNumberKind::Temperature)));
+            ui_->editViewerIsoLevelSpec->clear();
+            ui_->editViewerIsoLevelSpec->setStyleSheet(QString());
+            ui_->editViewerIsoLevelSpec->setToolTip(
+                tr("Waiting for stable topology to derive invariant-based levels."));
         }
+    }
+    if (!viewer_.has_last_valid_projection) {
+        ui_->labelViewerLevelPreview->setText(tr("Waiting for stable topology to derive levels"));
     }
     { const QSignalBlocker blocker(ui_->editViewerRegularizationSpacing); ui_->editViewerRegularizationSpacing->setText(displayNumber(viewer_.options.regularization_spacing, DisplayNumberKind::Property)); }
 }
@@ -2333,7 +2384,9 @@ void MainWindow::updateViewerActionState() {
     ui_->buttonInterpolationClearAll->setEnabled(!viewer_.queries.isEmpty());
     ui_->buttonInvariantCopy->setEnabled(has_selected_invariant);
     for (auto* action : {ui_->actionViewStableIsotherms, ui_->actionViewStableUnivariants, ui_->actionViewBinaryInvariants, ui_->actionViewInteriorInvariants}) { action->setEnabled(viewer_.has_last_valid_projection); action->setToolTip(viewer_.has_last_valid_projection ? QString() : unavailable); }
-    ui_->buttonViewerResetAutomaticRange->setEnabled(summary.calculation_available);
+    const bool can_reset_automatic_range = viewer_.has_last_valid_projection && !viewer_.calculation_running;
+    ui_->buttonViewerResetAutomaticRange->setEnabled(can_reset_automatic_range);
+    ui_->actionViewerResetAutomaticRange->setEnabled(can_reset_automatic_range);
     for (QWidget* control : {static_cast<QWidget*>(ui_->spinViewerSamplingSubdivisions), static_cast<QWidget*>(ui_->comboViewerSourceInterpolation), static_cast<QWidget*>(ui_->comboViewerCubicMethod), static_cast<QWidget*>(ui_->comboViewerPartialDomain), static_cast<QWidget*>(ui_->comboViewerContinuation), static_cast<QWidget*>(ui_->checkViewerRegularizePaths), static_cast<QWidget*>(ui_->editViewerRegularizationSpacing), static_cast<QWidget*>(ui_->editViewerIsoLevelSpec), static_cast<QWidget*>(ui_->checkViewerIsoLineLabels)}) control->setEnabled(summary.calculation_available);
     const bool cubic_selected = ui_->comboViewerSourceInterpolation->currentIndex() == 1;
     const bool cubic_available = summary.calculation_available && cubic_selected && regular_inspection_grid;

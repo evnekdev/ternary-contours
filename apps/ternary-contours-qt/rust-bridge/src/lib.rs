@@ -33,8 +33,9 @@ use ternary_contours_cli::{
     TabulatedGrid, TabulatedTernaryDataset, TabulatedValue, TabulatedValueState,
     TctSerializeOptions, apply_mesh_extrapolation, automatic_iso_levels, calculate_projection,
     calculate_projection_reusing_stable_topology,
-    calculate_projection_with_trace_context_reusing_stable_topology, empty_project_dataset,
-    extrapolate_regular_grid_fields,
+    calculate_projection_with_automatic_bootstrap_with_trace_context,
+    calculate_projection_with_trace_context_reusing_stable_topology, calculate_stable_topology,
+    empty_project_dataset, extrapolate_regular_grid_fields,
     interpolation_inspection::{
         FieldInspectionCache, InspectionFieldIdentity, InterpolatedResultState,
     },
@@ -2600,24 +2601,37 @@ fn calculate_viewer_projection(
     trace_request: &NumericalTraceRequest,
     context: &NumericalTraceRunContext,
     reused_topology: Option<&StableBoundaryNetwork>,
+    bootstrap_topology: bool,
 ) -> (Result<LiquidusProjection, String>, Option<String>) {
     let Some(destination) = trace_request.destination.as_ref() else {
-        let result = match reused_topology {
-            Some(topology) => {
-                calculate_projection_reusing_stable_topology(dataset, options, topology)
+        let result = if bootstrap_topology {
+            calculate_stable_topology(dataset, options).and_then(|topology| {
+                calculate_projection_reusing_stable_topology(dataset, options, &topology)
+            })
+        } else {
+            match reused_topology {
+                Some(topology) => {
+                    calculate_projection_reusing_stable_topology(dataset, options, topology)
+                }
+                None => calculate_projection(dataset, options),
             }
-            None => calculate_projection(dataset, options),
         };
         return (result.map_err(|error| error.to_string()), None);
     };
     let mut sink = match JsonLinesTraceSink::create(destination, trace_request.config()) {
         Ok(sink) => sink,
         Err(error) => {
-            let projection = match reused_topology {
-                Some(topology) => {
-                    calculate_projection_reusing_stable_topology(dataset, options, topology)
+            let projection = if bootstrap_topology {
+                calculate_stable_topology(dataset, options).and_then(|topology| {
+                    calculate_projection_reusing_stable_topology(dataset, options, &topology)
+                })
+            } else {
+                match reused_topology {
+                    Some(topology) => {
+                        calculate_projection_reusing_stable_topology(dataset, options, topology)
+                    }
+                    None => calculate_projection(dataset, options),
                 }
-                None => calculate_projection(dataset, options),
             };
             return (
                 projection.map_err(|error| error.to_string()),
@@ -2625,13 +2639,19 @@ fn calculate_viewer_projection(
             );
         }
     };
-    let result = calculate_projection_with_trace_context_reusing_stable_topology(
-        dataset,
-        options,
-        &mut sink,
-        context,
-        reused_topology,
-    )
+    let result = if bootstrap_topology {
+        calculate_projection_with_automatic_bootstrap_with_trace_context(
+            dataset, options, &mut sink, context,
+        )
+    } else {
+        calculate_projection_with_trace_context_reusing_stable_topology(
+            dataset,
+            options,
+            &mut sink,
+            context,
+            reused_topology,
+        )
+    }
     .map_err(|error| error.to_string());
     let output = sink.finish();
     let status = match (&result, output.first_error) {
@@ -2677,49 +2697,56 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
         Err(error) => return failure(error, 0, 0),
     };
     let projection_options = requested_options.projection_options();
-    let (dataset, options_revision, trace_request, reuse_raw, reuse_regularized) =
-        match document().lock() {
-            Ok(mut state) => {
-                if state.revision != expected_revision {
-                    return failure(
-                        "project changed before calculation started".to_owned(),
-                        state.revision,
-                        state.options_revision,
-                    );
-                }
-                if state.options_revision != expected_options_revision
-                    || state.viewer_options != requested_options
-                {
-                    return failure(
-                        "viewer settings changed before calculation started".to_owned(),
-                        state.revision,
-                        state.options_revision,
-                    );
-                }
-                if let Err(error) = state.dataset.validate_calculation_readiness() {
-                    return failure(
-                        format!("Calculation unavailable: {error}"),
-                        state.revision,
-                        state.options_revision,
-                    );
-                }
-                state.calculation_generation = request_id;
-                let can_reuse_topology =
-                    state.accepted_topology_key == Some(requested_options.topology_key());
-                (
-                    state.dataset.clone(),
+    let (
+        dataset,
+        options_revision,
+        trace_request,
+        reuse_raw,
+        reuse_regularized,
+        can_reuse_topology,
+    ) = match document().lock() {
+        Ok(mut state) => {
+            if state.revision != expected_revision {
+                return failure(
+                    "project changed before calculation started".to_owned(),
+                    state.revision,
                     state.options_revision,
-                    state.trace_request.clone(),
-                    can_reuse_topology
-                        .then(|| state.raw_projection.clone())
-                        .flatten(),
-                    can_reuse_topology
-                        .then(|| state.regularized_projection.clone())
-                        .flatten(),
-                )
+                );
             }
-            Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
-        };
+            if state.options_revision != expected_options_revision
+                || state.viewer_options != requested_options
+            {
+                return failure(
+                    "viewer settings changed before calculation started".to_owned(),
+                    state.revision,
+                    state.options_revision,
+                );
+            }
+            if let Err(error) = state.dataset.validate_calculation_readiness() {
+                return failure(
+                    format!("Calculation unavailable: {error}"),
+                    state.revision,
+                    state.options_revision,
+                );
+            }
+            state.calculation_generation = request_id;
+            let can_reuse_topology =
+                state.accepted_topology_key == Some(requested_options.topology_key());
+            (
+                state.dataset.clone(),
+                state.options_revision,
+                state.trace_request.clone(),
+                can_reuse_topology
+                    .then(|| state.raw_projection.clone())
+                    .flatten(),
+                can_reuse_topology
+                    .then(|| state.regularized_projection.clone())
+                    .flatten(),
+                can_reuse_topology,
+            )
+        }
+        Err(_) => return failure("project lock is unavailable".to_owned(), 0, 0),
+    };
 
     // Calculate the selected display variant first. The request trace belongs
     // to that accepted projection; an optional sibling variant is useful for
@@ -2737,24 +2764,33 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
     let selected_regularized = requested_options.regularize;
     let mut selected_options = projection_options.clone();
     selected_options.regularize = selected_regularized;
-    let selected_reuse = if selected_regularized {
+    let existing_topology = if can_reuse_topology {
         reuse_regularized
             .as_ref()
             .map(|projection| &projection.stable_boundaries)
+            .or_else(|| {
+                reuse_raw
+                    .as_ref()
+                    .map(|projection| &projection.stable_boundaries)
+            })
     } else {
-        reuse_raw
-            .as_ref()
-            .map(|projection| &projection.stable_boundaries)
+        None
     };
-    let reused_stable_topology = selected_reuse.is_some();
+    let automatic_bootstrap = requested_options.automatic_range
+        && requested_options.explicit_levels.is_empty()
+        && existing_topology.is_none();
+    let selected_reuse = existing_topology;
+    let reused_stable_topology = can_reuse_topology && existing_topology.is_some();
+    let topology_built_for_request = automatic_bootstrap;
     let (selected_result, trace_status) = calculate_viewer_projection(
         &dataset,
         &selected_options,
         &trace_request,
         &trace_context,
         selected_reuse,
+        topology_built_for_request,
     );
-    let selected_projection = match selected_result {
+    let mut selected_projection = match selected_result {
         Ok(projection) => projection,
         Err(error) => {
             return failure(
@@ -2771,6 +2807,11 @@ pub unsafe extern "C" fn tcqt_calculate_viewer(
             );
         }
     };
+    if topology_built_for_request {
+        // The selected contour pass reused the topology produced by Stage A;
+        // it is a build for lifecycle counters, not an isotherm-only reuse.
+        selected_projection.diagnostics.stable_topology_reused = false;
+    }
 
     let mut raw_options = projection_options.clone();
     raw_options.regularize = false;
@@ -4414,6 +4455,12 @@ mod tests {
             let mut projection = std::mem::zeroed::<TcqtProjectionSummary>();
             assert!(tcqt_projection_summary(&mut projection).success);
             assert!(projection.available);
+            assert!(
+                projection.level_count > 0,
+                "automatic bootstrap must derive concrete levels"
+            );
+            assert_eq!(projection.stable_topology_build_count, 1);
+            assert_eq!(projection.stable_topology_reuse_count, 0);
             assert_eq!(
                 (
                     projection.binary_invariant_count,

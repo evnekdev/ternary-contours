@@ -32,8 +32,10 @@ pub use projection::{
     AutomaticIsoRange, InterpolationOptions, LiquidusProjection, NumericalTraceRunContext,
     ProjectionOptions, SourceInterpolation, ViewerIsoLevelSpec, automatic_iso_levels,
     automatic_iso_range, calculate_projection, calculate_projection_reusing_stable_topology,
+    calculate_projection_with_automatic_bootstrap_with_trace_context,
     calculate_projection_with_trace, calculate_projection_with_trace_context,
-    calculate_projection_with_trace_context_reusing_stable_topology,
+    calculate_projection_with_trace_context_reusing_stable_topology, calculate_stable_topology,
+    calculate_stable_topology_with_trace, calculate_stable_topology_with_trace_context,
     invariant_iso_range_from_temperatures, parse_level_spec, parse_viewer_level_spec,
 };
 pub use projection_csv::{

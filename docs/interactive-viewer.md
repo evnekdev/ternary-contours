@@ -186,6 +186,18 @@ field is visibly invalid or empty with an explanation. It never says
 `automatic` and never falls back to sampled extrema. Level-only edits retain
 stable topology and rebuild only level-dependent contours.
 
+The level control has three lifecycle states: AwaitingTopology (a valid
+first-run state while invariant temperatures are being discovered),
+AutoDerived (concrete text derived from the accepted invariant range), and
+UserEdited (the committed user specification). The placeholder text is never
+parsed. The Viewer first accepts stable topology without levels, derives the
+whole-hundred range, then runs the contour stage against that same topology.
+Draft and requested text are kept separate from the accepted projection. If a
+later request fails, the accepted plot, invariant/univariant data, concrete
+level text, and generated-level preview remain visible; an invalid draft is
+shown separately. No generated levels is reserved for a genuinely valid
+zero-level result, not bootstrap or failure.
+
 Zoom/pan is intentionally a viewer-only bitmap transform rather than an
 arbitrary Plotters viewport. It preserves the renderer and numerical pipeline,
 but vector export always uses the full configured static plot. Diagnostic text
